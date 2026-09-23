@@ -31,3 +31,17 @@ Este incremento só pode ser considerado migrado quando:
 3. leitura independente confirmar o estado final `NORMAL`;
 4. nenhum segredo for publicado;
 5. somente então o código equivalente poderá começar a ser removido do ReqSys.
+
+
+## Incremento operacional — control plane e E2E próprio
+
+Após o núcleo NORMAL/ESTUDO, o próximo corte transfere para este repositório:
+- probe do control plane do Noteri;
+- watchdog de persistência do runner;
+- launcher UAC governado para persistência headless;
+- workflows de probe e ativação headless;
+- E2E físico próprio do `noteri-runtime`.
+
+O ReqSys permanece temporariamente como consumidor/legado até este incremento estar
+na `main`, com CI verde e E2E físico no Noteri no mesmo SHA. Só depois disso o
+código equivalente pode começar a ser retirado do repositório de produto.
