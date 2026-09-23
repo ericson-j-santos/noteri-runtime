@@ -45,3 +45,16 @@ Após o núcleo NORMAL/ESTUDO, o próximo corte transfere para este repositório
 O ReqSys permanece temporariamente como consumidor/legado até este incremento estar
 na `main`, com CI verde e E2E físico no Noteri no mesmo SHA. Só depois disso o
 código equivalente pode começar a ser retirado do repositório de produto.
+
+### Runner físico durante a migração
+
+O runner `noteri/reqsys-dev` atualmente disponível no host Noteri é registrado no
+repositório ReqSys e não é automaticamente compartilhado com outro repositório
+pessoal. Por isso, o workflow `physical-e2e.yml` deste repositório permanece
+`workflow_dispatch` sem gatilho automático de `push` até existir um runner
+explicitamente registrado para `noteri-runtime`.
+
+Durante essa transição, a evidência física pode ser produzida pelo harness
+governado do ReqSys fazendo checkout do SHA imutável deste repositório. Registrar
+um runner próprio exige bootstrap administrativo separado e não é pré-condição
+para validar o código extraído.
