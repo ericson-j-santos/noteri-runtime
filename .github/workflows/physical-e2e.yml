@@ -2,6 +2,14 @@ name: Noteri Physical E2E
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/physical-e2e.yml'
+      - 'scripts/noteri_runtime_isolated_e2e.py'
+      - 'scripts/noteri_host_profile_agent.py'
+      - 'scripts/noteri_host_profile_agent_control.py'
+      - 'scripts/noteri_host_profile_agent_persistence.py'
 
 permissions:
   contents: read
