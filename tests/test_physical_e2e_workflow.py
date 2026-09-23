@@ -7,6 +7,8 @@ def test_physical_e2e_is_manual_exact_sha_and_noteri_only() -> None:
     raw = WORKFLOW.read_text(encoding="utf-8")
     assert "workflow_dispatch:" in raw
     assert "pull_request:" not in raw
+    assert "push:" in raw
+    assert "branches: [main]" in raw
     assert "runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]" in raw
     assert "ref: ${{ github.sha }}" in raw
     assert "persist-credentials: false" in raw
