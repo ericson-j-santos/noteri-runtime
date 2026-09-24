@@ -15,5 +15,7 @@ def test_physical_e2e_is_manual_exact_sha_and_noteri_only() -> None:
     assert "final_profile_not_normal" in raw
     assert "idempotency_missing" in raw
     assert "negative_control_missing" in raw
+    assert "observed_sha_mismatch" in raw
+    assert "source_sha_not_verified" in raw
     assert "rdc_dependency_detected" in raw
     assert "secrets." not in raw
