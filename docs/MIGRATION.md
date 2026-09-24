@@ -58,3 +58,7 @@ Durante essa transição, a evidência física pode ser produzida pelo harness
 governado do ReqSys fazendo checkout do SHA imutável deste repositório. Registrar
 um runner próprio exige bootstrap administrativo separado e não é pré-condição
 para validar o código extraído.
+
+A evidência física também deve registrar o SHA realmente observado pelo próprio
+executor e falhar fechado quando ele divergir do SHA esperado. O valor recebido
+por parâmetro não é evidência suficiente de identidade da versão executada.
