@@ -36,6 +36,37 @@ def test_validate_inputs_fails_closed(host: str, sha: str, correlation: str) -> 
         module.validate_inputs(host=host, expected_sha=sha, correlation_id=correlation)
 
 
+
+class _CompletedGit:
+    returncode = 0
+    stdout = "a" * 40 + "\n"
+
+
+class _FailedGit:
+    returncode = 1
+    stdout = ""
+
+
+def test_resolve_source_sha_reads_exact_git_head(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: _CompletedGit())
+    assert module.resolve_source_sha(tmp_path) == "a" * 40
+
+
+def test_resolve_source_sha_fails_closed_when_git_unavailable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: _FailedGit())
+    with pytest.raises(RuntimeError, match="source_sha_unavailable"):
+        module.resolve_source_sha(tmp_path)
+
+
+def test_resolve_source_sha_rejects_invalid_git_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class InvalidGit:
+        returncode = 0
+        stdout = "not-a-sha\n"
+
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: InvalidGit())
+    with pytest.raises(RuntimeError, match="source_sha_invalid"):
+        module.resolve_source_sha(tmp_path)
+
 def test_validate_independent_state_requires_transition_replay_and_negative_control(tmp_path: Path) -> None:
     profile = tmp_path / "host-profile.json"
     audit = tmp_path / "host-profile-audit.jsonl"

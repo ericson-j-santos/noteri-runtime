@@ -47,6 +47,8 @@ jobs:
           if (-not $e.ok) { throw 'noteri_runtime_e2e_failed' }
           if ($e.host -ne 'Noteri') { throw 'host_mismatch' }
           if ($e.expected_sha -ne '${{ github.sha }}') { throw 'evidence_sha_mismatch' }
+          if ($e.observed_sha -ne '${{ github.sha }}') { throw 'observed_sha_mismatch' }
+          if (-not $e.source_sha_verified) { throw 'source_sha_not_verified' }
           if ($e.production_touched) { throw 'production_touched' }
           if ($e.secrets_read) { throw 'secrets_read' }
           if ($e.rdc_required) { throw 'rdc_dependency_detected' }

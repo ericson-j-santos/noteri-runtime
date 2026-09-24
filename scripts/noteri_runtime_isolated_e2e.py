@@ -39,6 +39,24 @@ def choose_loopback_port() -> int:
         return int(probe.getsockname()[1])
 
 
+def resolve_source_sha(root: Path) -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(root),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("source_sha_unavailable")
+    observed = completed.stdout.strip().lower()
+    if not _SHA_RE.fullmatch(observed):
+        raise RuntimeError("source_sha_invalid")
+    return observed
+
+
 def read_json(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -163,11 +181,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if not agent_script.is_file() or not e2e_script.is_file():
         raise RuntimeError("runtime_scripts_missing")
 
+    expected_sha = args.expected_sha.strip().lower()
+    observed_sha = resolve_source_sha(root)
+    if observed_sha != expected_sha:
+        raise RuntimeError(f"source_sha_mismatch:{observed_sha}")
+
     evidence: dict[str, Any] = {
         "schema_version": "1",
         "ok": False,
         "host": socket.gethostname(),
-        "expected_sha": args.expected_sha.lower(),
+        "expected_sha": expected_sha,
+        "observed_sha": observed_sha,
+        "source_sha_verified": True,
         "correlation_id": args.correlation_id,
         "started_at": now_iso(),
         "production_touched": False,
@@ -252,11 +277,20 @@ def main() -> int:
         payload = run(args)
         code = 0
     except Exception as exc:
+        observed_sha: str | None = None
+        try:
+            observed_sha = resolve_source_sha(Path(__file__).resolve().parents[1])
+        except Exception:
+            pass
         payload = {
             "schema_version": "1",
             "ok": False,
             "host": socket.gethostname(),
-            "expected_sha": args.expected_sha.lower(),
+            "expected_sha": args.expected_sha.strip().lower(),
+            "observed_sha": observed_sha,
+            "source_sha_verified": bool(
+                observed_sha and observed_sha == args.expected_sha.strip().lower()
+            ),
             "correlation_id": args.correlation_id,
             "error_type": type(exc).__name__,
             "error": str(exc),
