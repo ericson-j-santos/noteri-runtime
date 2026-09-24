@@ -19,10 +19,11 @@ jobs:
       EVIDENCE_FILE: artifacts/noteri-control-plane/headless-activation.json
     steps:
       - name: Checkout immutable workflow SHA
-        uses: actions/checkout@v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Stage immutable one-click UAC launcher on Noteri desktop
         shell: powershell
