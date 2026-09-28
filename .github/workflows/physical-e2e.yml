@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: noteri-runtime-physical-e2e
+  group: noteri-runtime-physical-e2e-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
