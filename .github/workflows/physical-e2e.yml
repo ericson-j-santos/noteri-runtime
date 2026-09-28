@@ -1,6 +1,9 @@
 name: Noteri Physical E2E
 
 on:
+  push:
+    branches:
+      - ops/noteri-runner-canary-20260928
   workflow_dispatch:
 
 permissions:
