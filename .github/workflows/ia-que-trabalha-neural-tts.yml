@@ -1,0 +1,118 @@
+name: IA Que Trabalha Neural TTS Trial
+
+on:
+  push:
+    branches:
+      - work/ia-que-trabalha-neural-tts-20260928
+    paths:
+      - .github/workflows/ia-que-trabalha-neural-tts.yml
+      - scripts/ia_que_trabalha_neural_tts.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ia-que-trabalha-neural-tts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  neural-tts:
+    name: Generate PT-BR neural voice candidates on Noteri
+    runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
+    timeout-minutes: 20
+    env:
+      ROOT_OUT: artifacts/ia-que-trabalha-neural-tts
+      EVIDENCE: artifacts/ia-que-trabalha-neural-tts/evidence.json
+
+    steps:
+      - name: Checkout immutable source SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact host and SHA
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:COMPUTERNAME -ne 'NOTERI') { throw "host_mismatch:$env:COMPUTERNAME" }
+          $observed = (git rev-parse HEAD).Trim()
+          if ($observed -ne '${{ github.sha }}') { throw "sha_mismatch:$observed" }
+          python --version
+          New-Item -ItemType Directory -Force $env:ROOT_OUT | Out-Null
+
+      - name: Create isolated Python environment
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m venv --system-site-packages .venv-tts
+          if ($LASTEXITCODE -ne 0) { throw 'venv_create_failed' }
+          .\.venv-tts\Scripts\python.exe -m pip install --disable-pip-version-check --no-input --upgrade pip
+          if ($LASTEXITCODE -ne 0) { throw 'pip_upgrade_failed' }
+
+      - name: Install Kokoro PT-BR stack
+        id: kokoro_install
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\.venv-tts\Scripts\python.exe -m pip install --disable-pip-version-check --no-input "kokoro>=0.9.4,<1.0" "soundfile>=0.12,<1" "espeakng-loader==0.2.4"
+          if ($LASTEXITCODE -ne 0) { throw "kokoro_install_failed:$LASTEXITCODE" }
+
+      - name: Generate Kokoro candidates
+        id: kokoro_generate
+        if: steps.kokoro_install.outcome == 'success'
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\.venv-tts\Scripts\python.exe scripts\ia_que_trabalha_neural_tts.py --engine kokoro --output-dir "$env:ROOT_OUT\kokoro" --evidence "$env:EVIDENCE"
+          if ($LASTEXITCODE -ne 0) { throw "kokoro_generation_failed:$LASTEXITCODE" }
+
+      - name: Install Piper fallback
+        id: piper_install
+        if: steps.kokoro_generate.outcome != 'success'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\.venv-tts\Scripts\python.exe -m pip install --disable-pip-version-check --no-input "piper-tts" "soundfile>=0.12,<1"
+          if ($LASTEXITCODE -ne 0) { throw "piper_install_failed:$LASTEXITCODE" }
+
+      - name: Generate Piper candidates
+        id: piper_generate
+        if: steps.kokoro_generate.outcome != 'success'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\.venv-tts\Scripts\python.exe scripts\ia_que_trabalha_neural_tts.py --engine piper --output-dir "$env:ROOT_OUT\piper" --evidence "$env:EVIDENCE"
+          if ($LASTEXITCODE -ne 0) { throw "piper_generation_failed:$LASTEXITCODE" }
+
+      - name: Validate independent audio evidence
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path -LiteralPath $env:EVIDENCE)) { throw 'evidence_missing' }
+          $e = Get-Content -Raw -Encoding UTF8 $env:EVIDENCE | ConvertFrom-Json
+          if (-not $e.ok) { throw 'tts_evidence_not_ok' }
+          if ($e.host -ne 'NOTERI') { throw "evidence_host_mismatch:$($e.host)" }
+          if ($e.github_sha -ne '${{ github.sha }}') { throw 'evidence_sha_mismatch' }
+          if ($e.paid_service) { throw 'paid_service_detected' }
+          if ($e.production_touched) { throw 'production_touched' }
+          if ($e.secrets_read) { throw 'secrets_read' }
+          if ($e.segments_expected -ne 10) { throw 'segment_contract_mismatch' }
+          if ($e.files_generated -ne 20) { throw "audio_file_count_mismatch:$($e.files_generated)" }
+          foreach ($item in $e.files) {
+            if ($item.duration_s -le 0.2) { throw 'audio_duration_invalid' }
+            if ($item.rms -le 0.001) { throw 'audio_silence_detected' }
+            if ([string]::IsNullOrWhiteSpace($item.sha256)) { throw 'audio_sha_missing' }
+          }
+
+      - name: Upload neural TTS artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ia-que-trabalha-neural-tts-${{ github.run_id }}
+          path: artifacts/ia-que-trabalha-neural-tts
+          if-no-files-found: error
+          retention-days: 7
