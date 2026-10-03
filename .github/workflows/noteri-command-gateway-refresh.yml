@@ -2,6 +2,10 @@ name: Noteri Command Gateway Refresh
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/triggers/noteri-command-gateway-refresh'
 
 permissions:
   contents: read
