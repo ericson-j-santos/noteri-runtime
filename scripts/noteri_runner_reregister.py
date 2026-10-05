@@ -57,7 +57,37 @@ def registration_token(gh:Path)->str:
     if cp.returncode!=0 or len(token)<20: raise BootstrapError("runner_admin_permission_required")
     return token
 
+def diag_snapshot(root:Path)->dict[str,int]:
+    diag=root/"_diag"
+    if not diag.is_dir(): return {}
+    out={}
+    for p in diag.glob("Runner_*.log"):
+        try: out[str(p.resolve())]=p.stat().st_mtime_ns
+        except OSError: pass
+    return out
+
+def classify_current_diag(root:Path,before:dict[str,int])->str:
+    diag=root/"_diag"
+    candidates=[]
+    if diag.is_dir():
+        for p in diag.glob("Runner_*.log"):
+            try:
+                key=str(p.resolve()); stamp=p.stat().st_mtime_ns
+                if key not in before or stamp>before[key]: candidates.append((stamp,p))
+            except OSError: pass
+    if not candidates: return "diag_unavailable"
+    path=max(candidates,key=lambda item:item[0])[1]
+    try: text=path.read_text(encoding="utf-8",errors="replace").casefold()
+    except OSError: return "diag_unavailable"
+    if "401" in text or "bad credentials" in text: return "http_401"
+    if "403" in text or "forbidden" in text: return "http_403"
+    if "404" in text or "not found" in text: return "http_404"
+    if "already configured" in text: return "already_configured"
+    if any(x in text for x in ("timed out","timeout","name or service not known","no such host","connection refused")): return "network"
+    return "runner_error"
+
 def configure(root:Path,gh:Path)->None:
+    before=diag_snapshot(root)
     token=registration_token(gh)
     try:
         cmd=[str(root/"config.cmd"),"--unattended","--replace","--url",EXPECTED_URL,
@@ -67,7 +97,7 @@ def configure(root:Path,gh:Path)->None:
                          encoding="utf-8",errors="replace",timeout=120,check=False)
     finally:
         token=""
-    if r.returncode!=0: raise BootstrapError(f"config_failed:{r.returncode}")
+    if r.returncode!=0: raise BootstrapError(f"config_failed:{classify_current_diag(root,before)}")
     if not configured(root): raise BootstrapError("registro nao materializou .runner")
 
 def start(root:Path)->None:
@@ -96,7 +126,10 @@ def main()->int:
     except Exception as e:
         reason=str(e)
         allowed=("github_cli_missing","github_identity_mismatch","runner_admin_permission_required",
-                 "runner_home incompleto","config_failed","runner_marker_missing","listener_failed",
+                 "runner_home incompleto","config_failed:http_401","config_failed:http_403",
+                 "config_failed:http_404","config_failed:already_configured","config_failed:network",
+                 "config_failed:diag_unavailable","config_failed:runner_error",
+                 "runner_marker_missing","listener_failed",
                  "host invalido","repositorio invalido","confirmacao invalida")
         state=next((item for item in allowed if reason.startswith(item)),"bootstrap_failed")
         print(json.dumps({"ok":False,"result":"RUNNER_REREGISTRATION_BLOCKED",
