@@ -6,7 +6,7 @@ P=Path(__file__).resolve().parents[1]/"scripts"/"noteri_gateway_refresh.py"
 S=importlib.util.spec_from_file_location("noteri_gateway_refresh",P); m=importlib.util.module_from_spec(S); sys.modules[S.name]=m; S.loader.exec_module(m)
 
 def test_contract_is_fixed():
-    assert m.RULES_COMMIT=="d26351458b17c917100efc3b736dcc6d53a646cb"
+    assert m.RULES_COMMIT=="46c1c00c663cf2ade5abbe1fe8e0c58a73611078"
     assert m.RULES_VERSION=="1.6.10"
     assert m.INSTALL_ROOT==Path(r"C:\dev\chatgpt-command-gateway")
 def test_rejects_other_host():
