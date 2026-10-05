@@ -13,7 +13,10 @@ def main():
  runtime=Path(os.environ["LOCALAPPDATA"])/"ReqSys"/"NoteriGovernedAdminActuator";runtime.mkdir(parents=True,exist_ok=True)
  target=runtime/"noteri_admin_actuator.py";target.write_bytes(a.actuator.read_bytes())
  # Tarefa fixa e elevada; ações reais continuam limitadas pelo choices do atuador.
- tr=subprocess.list2cmdline([sys.executable,str(target),"--capability","windows-health","--receipt",str(runtime/"scheduled-receipt.json")])
+ # A tarefa elevada executa um request file validado pelo dispatcher; não recebe shell.
+ dispatcher=runtime/"dispatch.py"
+ dispatcher.write_text("""import json,subprocess,sys\nfrom pathlib import Path\nCAPS={'windows-health','runner-probe','gateway-health','appcontrol-read'}\nr=Path(__file__).with_name('request.json')\nif not r.is_file(): raise SystemExit(2)\np=json.loads(r.read_text(encoding='utf-8'))\nc=p.get('capability')\nif c not in CAPS: raise SystemExit(3)\na=Path(__file__).with_name('noteri_admin_actuator.py')\nout=Path(__file__).with_name('receipt.json')\nraise SystemExit(subprocess.run([sys.executable,str(a),'--capability',c,'--receipt',str(out)]).returncode)\n""",encoding="utf-8")
+ tr=subprocess.list2cmdline([sys.executable,str(dispatcher)])
  r=subprocess.run(["schtasks.exe","/Create","/TN",TASK,"/TR",tr,"/SC","ONCE","/ST","23:59","/RL","HIGHEST","/F"],
   capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=30,check=False)
  print(json.dumps({"ok":r.returncode==0,"state":"installed" if r.returncode==0 else "task_create_failed","task":TASK,"arbitrary_command":False}))
