@@ -31,3 +31,10 @@ def test_uac_launcher_has_global_deadline_and_phase_receipt():
  assert "phase_receipt" in src.replace("-","_")
  assert "shell_execute_done" in src and "powershell_done" in src and "shell_application_done" in src
  assert '"state":"fallbacks_exhausted"' in src
+
+def test_shell_execute_is_isolated_and_bounded():
+ src=(Path(__file__).resolve().parents[1]/"scripts"/"noteri_windows_health_uac_launcher.py").read_text(encoding="utf-8")
+ assert "def shell_execute_isolated" in src
+ assert "timeout=10" in src
+ assert 'return "timeout"' in src
+ assert "shell_state!=\"launched\"" in src
