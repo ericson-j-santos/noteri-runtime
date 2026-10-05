@@ -31,8 +31,13 @@ def shell_application_runas(executable:Path,params:str,cwd:Path)->str:
   return "timeout"
  return "launched" if r.returncode==0 else "failed"
 
+def phase(path:Path,state:str,attempts:dict)->None:
+ tmp=path.with_suffix(".phase.tmp")
+ tmp.write_text(json.dumps({"state":state,"attempts":attempts},sort_keys=True)+"\\n",encoding="utf-8")
+ os.replace(tmp,path)
+
 def main():
- p=argparse.ArgumentParser();p.add_argument("--worker",type=Path,required=True);p.add_argument("--receipt",type=Path,required=True);p.add_argument("--confirm",required=True);p.add_argument("--timeout",type=int,default=180);a=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument("--worker",type=Path,required=True);p.add_argument("--receipt",type=Path,required=True);p.add_argument("--confirm",required=True);p.add_argument("--timeout",type=int,default=180);p.add_argument("--phase-receipt",type=Path);a=p.parse_args()
  if a.confirm!=CONFIRM or not a.worker.is_file(): print(json.dumps({"ok":False,"state":"launch_failed"}));return 2
  try:a.receipt.unlink()
  except FileNotFoundError:pass
@@ -40,15 +45,23 @@ def main():
  rc=int(ctypes.windll.shell32.ShellExecuteW(None,"runas",os.sys.executable,params,str(a.worker.parent),1))
  attempts={"shell_execute":"launched" if rc>32 else f"denied:{rc}","powershell":"not_run","shell_application":"not_run"}
  broker="shell_execute_runas" if rc>32 else "none"
+ phase_path=a.phase_receipt or a.receipt.with_suffix(".phase.json")
+ phase(phase_path,"shell_execute_done",attempts)
+ deadline=time.monotonic()+max(15,min(a.timeout,180))
  if rc<=32:
+  if time.monotonic()>=deadline:
+   print(json.dumps({"ok":False,"state":"fallbacks_exhausted","attempts":attempts,"global_timeout":True}));return 6
   attempts["powershell"]=powershell_runas(Path(os.sys.executable),params,a.worker.parent)
+  phase(phase_path,"powershell_done",attempts)
   if attempts["powershell"]=="launched": broker="powershell_start_process_runas"
   else:
+   if time.monotonic()>=deadline:
+    print(json.dumps({"ok":False,"state":"fallbacks_exhausted","attempts":attempts,"global_timeout":True}));return 6
    attempts["shell_application"]=shell_application_runas(Path(os.sys.executable),params,a.worker.parent)
+   phase(phase_path,"shell_application_done",attempts)
    if attempts["shell_application"]=="launched": broker="shell_application_runas"
  if broker=="none": print(json.dumps({"ok":False,"state":"launch_failed","attempts":attempts,"fallbacks_exhausted":True}));return 3
- end=time.monotonic()+max(15,min(a.timeout,300))
- while time.monotonic()<end:
+ while time.monotonic()<deadline:
   if a.receipt.is_file():
    try:r=json.loads(a.receipt.read_text(encoding="utf-8"))
    except Exception:r={}

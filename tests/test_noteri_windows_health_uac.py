@@ -24,3 +24,10 @@ def test_uac_launcher_compiles():
  import py_compile
  target=Path(__file__).resolve().parents[1]/"scripts"/"noteri_windows_health_uac_launcher.py"
  py_compile.compile(str(target),doraise=True)
+
+def test_uac_launcher_has_global_deadline_and_phase_receipt():
+ src=(Path(__file__).resolve().parents[1]/"scripts"/"noteri_windows_health_uac_launcher.py").read_text(encoding="utf-8")
+ assert "deadline=time.monotonic()" in src
+ assert "phase_receipt" in src.replace("-","_")
+ assert "shell_execute_done" in src and "powershell_done" in src and "shell_application_done" in src
+ assert '"state":"fallbacks_exhausted"' in src
