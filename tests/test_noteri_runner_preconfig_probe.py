@@ -5,7 +5,7 @@ S=importlib.util.spec_from_file_location("probe",P);m=importlib.util.module_from
 def test_probe_has_no_token_or_secret_access():
  src=P.read_text(encoding="utf-8").lower()
  assert "registration-token" not in src and "gh api" not in src
- assert '"token_used":false' not in src
+ assert '"token_used":false' in src
  assert "runner.listener.exe" in src
 def test_contract_requires_listener(tmp_path):
  (tmp_path/"config.cmd").write_text("",encoding="utf-8")
