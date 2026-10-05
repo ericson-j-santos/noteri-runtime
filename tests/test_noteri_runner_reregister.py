@@ -27,6 +27,19 @@ def test_sanitized_states_do_not_include_secret_material():
  assert '"token_logged":False' in src
  assert 'stdout' not in src[src.find('except Exception as e:'):]
 
+def test_current_diag_classification_ignores_old_log(tmp_path):
+ diag=tmp_path/"_diag"; diag.mkdir()
+ old=diag/"Runner_old.log"; old.write_text("401 Bad credentials",encoding="utf-8")
+ before=m.diag_snapshot(tmp_path)
+ new=diag/"Runner_new.log"; new.write_text("Http response code: 403 Forbidden",encoding="utf-8")
+ assert m.classify_current_diag(tmp_path,before)=="http_403"
+
+def test_current_diag_returns_closed_categories(tmp_path):
+ diag=tmp_path/"_diag"; diag.mkdir()
+ before={}
+ p=diag/"Runner_new.log"; p.write_text("unexpected internal detail SECRET",encoding="utf-8")
+ assert m.classify_current_diag(tmp_path,before)=="runner_error"
+
 def test_idempotent_marker(tmp_path):
  (tmp_path/".runner").write_text("configured",encoding="utf-8")
  assert m.configured(tmp_path)
