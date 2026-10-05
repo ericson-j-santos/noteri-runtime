@@ -10,11 +10,17 @@ def test_rejects_wrong_host():
  with pytest.raises(m.BootstrapError): m.validate("OTHER",m.EXPECTED_REPOSITORY,m.CONFIRM)
 def test_rejects_wrong_repo():
  with pytest.raises(m.BootstrapError): m.validate("Noteri","other/repo",m.CONFIRM)
-def test_requires_ephemeral_token(tmp_path,monkeypatch):
- for p in ("config.cmd","run.cmd"):
-  (tmp_path/p).write_text("",encoding="utf-8")
- (tmp_path/"bin").mkdir(); (tmp_path/"bin"/"Runner.Listener.exe").write_text("",encoding="utf-8")
- with pytest.raises(m.BootstrapError,match="token efemero"): m.configure(tmp_path,"")
+def test_registration_requires_expected_local_identity(monkeypatch):
+ class CP:
+  returncode=0; stdout="other-user\\n"
+ monkeypatch.setattr(m.subprocess,"run",lambda *a,**k: CP())
+ with pytest.raises(m.BootstrapError,match="github_identity_mismatch"):
+  m.registration_token(Path("gh"))
+
+def test_gh_env_removes_injected_tokens(monkeypatch):
+ monkeypatch.setenv("GH_TOKEN","secret"); monkeypatch.setenv("GITHUB_TOKEN","secret2")
+ env=m.gh_env()
+ assert "GH_TOKEN" not in env and "GITHUB_TOKEN" not in env
 def test_idempotent_marker(tmp_path):
  (tmp_path/".runner").write_text("configured",encoding="utf-8")
  assert m.configured(tmp_path)
