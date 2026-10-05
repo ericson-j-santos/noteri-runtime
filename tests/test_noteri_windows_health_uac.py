@@ -19,3 +19,8 @@ def test_broker_records_all_attempts_and_handles_timeout():
  assert '"shell_application":"not_run"' in src
  assert '"attempts":attempts' in src
  assert "fallbacks_exhausted" in src
+
+def test_uac_launcher_compiles():
+ import py_compile
+ target=Path(__file__).resolve().parents[1]/"scripts"/"noteri_windows_health_uac_launcher.py"
+ py_compile.compile(str(target),doraise=True)
