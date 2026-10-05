@@ -5,7 +5,7 @@ O token efêmero é recebido somente por variável de ambiente e nunca é persis
 nem incluído em receipts/logs deste wrapper.
 """
 from __future__ import annotations
-import argparse,json,os,socket,subprocess,time
+import argparse,json,os,shutil,socket,subprocess,time
 from pathlib import Path
 
 EXPECTED_HOST="Noteri"
@@ -14,7 +14,7 @@ EXPECTED_URL="https://github.com/ericson-j-santos/noteri-runtime"
 EXPECTED_NAME="Noteri"
 EXPECTED_LABELS=("noteri","reqsys-dev")
 CONFIRM="REREGISTER-NOTERI-RUNNER"
-TOKEN_ENV="NOTERI_RUNNER_REGISTRATION_TOKEN"
+EXPECTED_GITHUB_LOGIN="ericson-j-santos"
 
 class BootstrapError(RuntimeError): pass
 
@@ -32,14 +32,41 @@ def validate_home(root:Path)->Path:
 def configured(root:Path)->bool:
     return (root/".runner").is_file()
 
-def configure(root:Path,token:str)->None:
-    if not token or len(token)<20: raise BootstrapError("token efemero ausente/invalido")
-    cmd=[str(root/"config.cmd"),"--unattended","--replace","--url",EXPECTED_URL,
-         "--token",token,"--name",EXPECTED_NAME,"--labels",",".join(EXPECTED_LABELS),
-         "--work","_work"]
-    env=dict(os.environ); env[TOKEN_ENV]=""
-    r=subprocess.run(cmd,cwd=str(root),env=env,capture_output=True,text=True,
-                     encoding="utf-8",errors="replace",timeout=120,check=False)
+def gh_env():
+    env=dict(os.environ); env.pop("GH_TOKEN",None); env.pop("GITHUB_TOKEN",None); return env
+
+def find_gh()->Path:
+    found=shutil.which("gh")
+    candidates=[Path(found) if found else None,
+        Path(os.environ.get("ProgramFiles") or r"C:\\Program Files")/"GitHub CLI"/"gh.exe",
+        Path(os.environ.get("LOCALAPPDATA") or "")/"Programs"/"GitHub CLI"/"gh.exe"]
+    for item in candidates:
+        if item and item.is_file(): return item
+    raise BootstrapError("github_cli_missing")
+
+def registration_token(gh:Path)->str:
+    who=subprocess.run([str(gh),"api","user","--jq",".login"],capture_output=True,text=True,
+        encoding="utf-8",errors="replace",timeout=30,check=False,env=gh_env())
+    if who.returncode!=0 or who.stdout.strip().casefold()!=EXPECTED_GITHUB_LOGIN.casefold():
+        raise BootstrapError("github_identity_mismatch")
+    cp=subprocess.run([str(gh),"api","--method","POST",
+        f"repos/{EXPECTED_REPOSITORY}/actions/runners/registration-token","--jq",".token"],
+        capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=30,
+        check=False,env=gh_env())
+    token=cp.stdout.strip()
+    if cp.returncode!=0 or len(token)<20: raise BootstrapError("runner_admin_permission_required")
+    return token
+
+def configure(root:Path,gh:Path)->None:
+    token=registration_token(gh)
+    try:
+        cmd=[str(root/"config.cmd"),"--unattended","--replace","--url",EXPECTED_URL,
+             "--token",token,"--name",EXPECTED_NAME,"--labels",",".join(EXPECTED_LABELS),
+             "--work","_work"]
+        r=subprocess.run(cmd,cwd=str(root),env=gh_env(),capture_output=True,text=True,
+                         encoding="utf-8",errors="replace",timeout=120,check=False)
+    finally:
+        token=""
     if r.returncode!=0: raise BootstrapError(f"config_failed:{r.returncode}")
     if not configured(root): raise BootstrapError("registro nao materializou .runner")
 
@@ -59,7 +86,7 @@ def main()->int:
             out={"ok":True,"result":"RUNNER_ALREADY_CONFIGURED","host":EXPECTED_HOST,
                  "repository":EXPECTED_REPOSITORY,"token_persisted":False}
         else:
-            token=os.environ.get(TOKEN_ENV,""); configure(root,token); start(root)
+            gh=find_gh(); configure(root,gh); start(root)
             out={"ok":True,"result":"RUNNER_REREGISTERED","host":EXPECTED_HOST,
                  "repository":EXPECTED_REPOSITORY,"labels":list(EXPECTED_LABELS),"token_persisted":False}
         print(json.dumps(out,sort_keys=True)); return 0
