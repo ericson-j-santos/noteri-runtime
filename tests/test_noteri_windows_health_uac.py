@@ -11,3 +11,11 @@ def test_launcher_has_all_governed_uac_brokers():
  src=(Path(__file__).resolve().parents[1]/"scripts"/"noteri_windows_health_uac_launcher.py").read_text(encoding="utf-8")
  for name in ("shell_execute_runas","powershell_start_process_runas","shell_application_runas","fallbacks_exhausted"):
   assert name in src
+
+def test_broker_records_all_attempts_and_handles_timeout():
+ src=(Path(__file__).resolve().parents[1]/"scripts"/"noteri_windows_health_uac_launcher.py").read_text(encoding="utf-8")
+ assert "subprocess.TimeoutExpired" in src
+ assert '"powershell":"not_run"' in src
+ assert '"shell_application":"not_run"' in src
+ assert '"attempts":attempts' in src
+ assert "fallbacks_exhausted" in src
