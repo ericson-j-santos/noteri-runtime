@@ -21,7 +21,7 @@ def powershell_runas(executable:Path,params:str,cwd:Path)->str:
 def shell_application_runas(executable:Path,params:str,cwd:Path)->str:
  ps=Path(os.environ.get("SystemRoot") or r"C:\\Windows")/"System32"/"WindowsPowerShell"/"v1.0"/"powershell.exe"
  if not ps.is_file(): return "missing"
- script="$ErrorActionPreference='Stop';$s=New-Object -ComObject Shell.Application;"
+ script=("$ErrorActionPreference='Stop';$s=New-Object -ComObject Shell.Application;"
          f"$s.ShellExecute({json.dumps(str(executable))},{json.dumps(params)},{json.dumps(str(cwd))},'runas',1);"
          "Start-Sleep -Milliseconds 500;exit 0")
  try:
