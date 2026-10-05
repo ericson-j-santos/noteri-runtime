@@ -21,6 +21,12 @@ def test_gh_env_removes_injected_tokens(monkeypatch):
  monkeypatch.setenv("GH_TOKEN","secret"); monkeypatch.setenv("GITHUB_TOKEN","secret2")
  env=m.gh_env()
  assert "GH_TOKEN" not in env and "GITHUB_TOKEN" not in env
+def test_sanitized_states_do_not_include_secret_material():
+ src=P.read_text(encoding="utf-8")
+ assert '"state":state' in src
+ assert '"token_logged":False' in src
+ assert 'stdout' not in src[src.find('except Exception as e:'):]
+
 def test_idempotent_marker(tmp_path):
  (tmp_path/".runner").write_text("configured",encoding="utf-8")
  assert m.configured(tmp_path)
