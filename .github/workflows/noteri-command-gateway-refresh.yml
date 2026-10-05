@@ -38,6 +38,6 @@ jobs:
           if (-not (Test-Path -LiteralPath $p)) { throw 'update receipt missing' }
           $r = Get-Content -LiteralPath $p -Raw | ConvertFrom-Json
           if ($r.result -ne 'HOST_UPDATE_OK') { throw 'HOST_UPDATE_OK missing' }
-          if ($r.source_commit -ne 'd26351458b17c917100efc3b736dcc6d53a646cb') { throw 'source commit mismatch' }
+          if ($r.source_commit -ne '46c1c00c663cf2ade5abbe1fe8e0c58a73611078') { throw 'source commit mismatch' }
           if ($r.rules_version -ne '1.6.10') { throw 'rules version mismatch' }
           Write-Host 'NOTERI_GATEWAY_READBACK_OK'
