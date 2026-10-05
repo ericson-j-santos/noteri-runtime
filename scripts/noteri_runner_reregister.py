@@ -71,10 +71,13 @@ def configure(root:Path,gh:Path)->None:
     if not configured(root): raise BootstrapError("registro nao materializou .runner")
 
 def start(root:Path)->None:
-    subprocess.Popen([str(root/"run.cmd")],cwd=str(root),stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
-                     creationflags=subprocess.CREATE_NEW_PROCESS_GROUP|subprocess.DETACHED_PROCESS,
-                     close_fds=True)
+    try:
+        subprocess.Popen([str(root/"run.cmd")],cwd=str(root),stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP|subprocess.DETACHED_PROCESS,
+                         close_fds=True)
+    except OSError as exc:
+        raise BootstrapError("listener_failed") from exc
 
 def main()->int:
     p=argparse.ArgumentParser(); p.add_argument("--runner-home",type=Path,required=True)
@@ -91,6 +94,12 @@ def main()->int:
                  "repository":EXPECTED_REPOSITORY,"labels":list(EXPECTED_LABELS),"token_persisted":False}
         print(json.dumps(out,sort_keys=True)); return 0
     except Exception as e:
+        reason=str(e)
+        allowed=("github_cli_missing","github_identity_mismatch","runner_admin_permission_required",
+                 "runner_home incompleto","config_failed","runner_marker_missing","listener_failed",
+                 "host invalido","repositorio invalido","confirmacao invalida")
+        state=next((item for item in allowed if reason.startswith(item)),"bootstrap_failed")
         print(json.dumps({"ok":False,"result":"RUNNER_REREGISTRATION_BLOCKED",
-              "error_type":type(e).__name__,"token_persisted":False},sort_keys=True)); return 3
+              "error_type":type(e).__name__,"state":state,"token_persisted":False,
+              "token_logged":False},sort_keys=True)); return 3
 if __name__=="__main__": raise SystemExit(main())
