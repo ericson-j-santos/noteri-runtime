@@ -4,6 +4,19 @@ import argparse,ctypes,json,os,subprocess,time
 from pathlib import Path
 CONFIRM="LAUNCH-NOTERI-WINDOWS-HEALTH-UAC"
 WORKER_CONFIRM="RUN-NOTERI-WINDOWS-HEALTH"
+def shell_execute_isolated(executable:Path,params:str,cwd:Path)->str:
+ code=("import ctypes,sys;"
+       "rc=int(ctypes.windll.shell32.ShellExecuteW(None,'runas',sys.argv[1],sys.argv[2],sys.argv[3],1));"
+       "print(rc)")
+ try:
+  r=subprocess.run([os.sys.executable,"-c",code,str(executable),params,str(cwd)],
+   capture_output=True,text=True,encoding="utf-8",errors="replace",timeout=10,check=False)
+ except subprocess.TimeoutExpired:
+  return "timeout"
+ try: rc=int(r.stdout.strip().splitlines()[-1])
+ except (ValueError,IndexError): return "failed"
+ return "launched" if rc>32 else f"denied:{rc}"
+
 def powershell_runas(executable:Path,params:str,cwd:Path)->str:
  ps=Path(os.environ.get("SystemRoot") or r"C:\\Windows")/"System32"/"WindowsPowerShell"/"v1.0"/"powershell.exe"
  if not ps.is_file(): return "missing"
@@ -42,13 +55,13 @@ def main():
  try:a.receipt.unlink()
  except FileNotFoundError:pass
  params=subprocess.list2cmdline([str(a.worker),"--confirm",WORKER_CONFIRM,"--receipt",str(a.receipt)])
- rc=int(ctypes.windll.shell32.ShellExecuteW(None,"runas",os.sys.executable,params,str(a.worker.parent),1))
- attempts={"shell_execute":"launched" if rc>32 else f"denied:{rc}","powershell":"not_run","shell_application":"not_run"}
- broker="shell_execute_runas" if rc>32 else "none"
+ shell_state=shell_execute_isolated(Path(os.sys.executable),params,a.worker.parent)
+ attempts={"shell_execute":shell_state,"powershell":"not_run","shell_application":"not_run"}
+ broker="shell_execute_runas" if shell_state=="launched" else "none"
  phase_path=a.phase_receipt or a.receipt.with_suffix(".phase.json")
  phase(phase_path,"shell_execute_done",attempts)
  deadline=time.monotonic()+max(15,min(a.timeout,180))
- if rc<=32:
+ if shell_state!="launched":
   if time.monotonic()>=deadline:
    print(json.dumps({"ok":False,"state":"fallbacks_exhausted","attempts":attempts,"global_timeout":True}));return 6
   attempts["powershell"]=powershell_runas(Path(os.sys.executable),params,a.worker.parent)
