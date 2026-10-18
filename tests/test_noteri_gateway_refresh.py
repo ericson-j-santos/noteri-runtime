@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import stat
 import sys
 import tempfile
@@ -219,7 +220,7 @@ def test_missing_and_corrupt_backup_fail_closed(monkeypatch):
         first = next(iter(sorted(m.MANAGED_FILES)))
         saved = backup.joinpath("files", *first.split("/"))
         saved.unlink()
-        with pytest.raises(m.RefreshError, match="arquivo de backup ausente"):
+        with pytest.raises(m.RefreshError, match="componente ausente"):
             m.verify_update_receipt(receipt, expected)
         saved.parent.mkdir(parents=True, exist_ok=True)
         saved.write_bytes(b"corrupt")
@@ -233,6 +234,62 @@ def test_snapshot_outside_install_root_fails_closed(monkeypatch):
         receipt["backup_dir"] = outside
         with pytest.raises(m.RefreshError, match="backup fora da instalacao"):
             m.verify_update_receipt(receipt, expected)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation is not guaranteed on Windows")
+def test_snapshot_intermediate_symlink_escape_fails_closed(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        receipt, _, _, expected = seed_current_receipt(monkeypatch, root)
+        backup = Path(receipt["backup_dir"])
+        internal = backup / "files" / "bin"
+        external = root / "external-backup-bin"
+        internal.rename(external)
+        internal.symlink_to(external, target_is_directory=True)
+        with pytest.raises(m.RefreshError, match="componente reparse inseguro"):
+            m.verify_update_receipt(receipt, expected)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation is not guaranteed on Windows")
+def test_installed_intermediate_symlink_escape_fails_closed(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        receipt, _, _, expected = seed_current_receipt(monkeypatch, root)
+        internal = m.INSTALL_ROOT / "bin"
+        external = root / "external-installed-bin"
+        internal.rename(external)
+        internal.symlink_to(external, target_is_directory=True)
+        with pytest.raises(m.RefreshError, match="componente reparse inseguro"):
+            m.verify_update_receipt(receipt, expected)
+
+
+def test_windows_reparse_attribute_on_intermediate_component_is_rejected(
+    monkeypatch,
+):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        target = root / "bin" / "managed.py"
+        target.parent.mkdir()
+        target.write_bytes(b"payload")
+        real_lstat = m.os.lstat
+        reparse_flag = getattr(m.stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+        def mark_bin_as_reparse(path):
+            observed = real_lstat(path)
+            if Path(path) == root / "bin":
+                return SimpleNamespace(
+                    st_mode=observed.st_mode,
+                    st_file_attributes=(
+                        getattr(observed, "st_file_attributes", 0) | reparse_flag
+                    ),
+                )
+            return observed
+
+        monkeypatch.setattr(m.os, "lstat", mark_bin_as_reparse)
+        with pytest.raises(m.RefreshError, match="componente reparse inseguro"):
+            m.confined_regular_file(
+                root, "bin/managed.py", label="windows junction simulation"
+            )
 
 
 def test_coherent_local_file_and_receipt_tamper_fails_against_canonical(monkeypatch):

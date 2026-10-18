@@ -196,6 +196,100 @@ def _same_path(left: Path, right: Path) -> bool:
     )
 
 
+def _is_reparse_point(path_stat: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(getattr(path_stat, "st_file_attributes", 0) & reparse_flag)
+
+
+def _confined_existing(
+    root: Path, relative: str, *, label: str, require_directory: bool
+) -> Path:
+    """Resolve an existing path without traversing links or reparse points."""
+    try:
+        root_stat = os.lstat(root)
+    except OSError as exc:
+        raise RefreshError(f"raiz ausente: {label}") from exc
+    if (
+        stat.S_ISLNK(root_stat.st_mode)
+        or _is_reparse_point(root_stat)
+        or not stat.S_ISDIR(root_stat.st_mode)
+    ):
+        raise RefreshError(f"raiz insegura: {label}")
+    resolved_root = root.resolve()
+    current = root
+    parts = relative.split("/")
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise RefreshError(f"caminho relativo invalido: {label}")
+    for index, part in enumerate(parts):
+        current = current / part
+        try:
+            observed = os.lstat(current)
+        except OSError as exc:
+            raise RefreshError(f"componente ausente: {label}") from exc
+        if stat.S_ISLNK(observed.st_mode) or _is_reparse_point(observed):
+            raise RefreshError(f"componente reparse inseguro: {label}")
+        if index < len(parts) - 1 and not stat.S_ISDIR(observed.st_mode):
+            raise RefreshError(f"componente intermediario invalido: {label}")
+        resolved = current.resolve()
+        try:
+            common = os.path.commonpath([str(resolved_root), str(resolved)])
+        except ValueError as exc:
+            raise RefreshError(f"caminho fora da raiz: {label}") from exc
+        if os.path.normcase(common) != os.path.normcase(str(resolved_root)):
+            raise RefreshError(f"caminho fora da raiz: {label}")
+    if require_directory:
+        if not stat.S_ISDIR(observed.st_mode):
+            raise RefreshError(f"diretorio ausente: {label}")
+    elif not stat.S_ISREG(observed.st_mode):
+        raise RefreshError(f"arquivo regular ausente: {label}")
+    return current
+
+
+def confined_regular_file(root: Path, relative: str, *, label: str) -> Path:
+    return _confined_existing(
+        root, relative, label=label, require_directory=False
+    )
+
+
+def confined_directory(root: Path, relative: str, *, label: str) -> Path:
+    return _confined_existing(
+        root, relative, label=label, require_directory=True
+    )
+
+
+def verify_absent_confined(root: Path, relative: str, *, label: str) -> None:
+    """Require an absent leaf while rejecting any existing unsafe component."""
+    root_stat = os.lstat(root)
+    if (
+        stat.S_ISLNK(root_stat.st_mode)
+        or _is_reparse_point(root_stat)
+        or not stat.S_ISDIR(root_stat.st_mode)
+    ):
+        raise RefreshError(f"raiz insegura: {label}")
+    resolved_root = root.resolve()
+    current = root
+    parts = relative.split("/")
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise RefreshError(f"caminho relativo invalido: {label}")
+    for index, part in enumerate(parts):
+        current = current / part
+        try:
+            observed = os.lstat(current)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise RefreshError(f"componente ilegivel: {label}") from exc
+        if stat.S_ISLNK(observed.st_mode) or _is_reparse_point(observed):
+            raise RefreshError(f"componente reparse inseguro: {label}")
+        resolved = current.resolve()
+        common = os.path.commonpath([str(resolved_root), str(resolved)])
+        if os.path.normcase(common) != os.path.normcase(str(resolved_root)):
+            raise RefreshError(f"caminho fora da raiz: {label}")
+        if index < len(parts) - 1 and not stat.S_ISDIR(observed.st_mode):
+            raise RefreshError(f"componente intermediario invalido: {label}")
+    raise RefreshError(f"backup inesperado para arquivo novo: {label}")
+
+
 def verify_rollback(backup_dir: Path, expected: dict[str, dict]) -> str:
     root = INSTALL_ROOT.resolve()
     backup = backup_dir.resolve()
@@ -205,11 +299,19 @@ def verify_rollback(backup_dir: Path, expected: dict[str, dict]) -> str:
         raise RefreshError("backup fora da instalacao") from exc
     if os.path.normcase(confined) != os.path.normcase(str(root)) or backup == root:
         raise RefreshError("backup fora da instalacao")
-    if backup_dir.is_symlink() or not backup_dir.is_dir():
+    try:
+        backup_stat = os.lstat(backup_dir)
+    except OSError as exc:
+        raise RefreshError("diretorio de rollback invalido") from exc
+    if (
+        stat.S_ISLNK(backup_stat.st_mode)
+        or _is_reparse_point(backup_stat)
+        or not stat.S_ISDIR(backup_stat.st_mode)
+    ):
         raise RefreshError("diretorio de rollback invalido")
-    manifest_path = backup_dir / "rollback-manifest.json"
-    if manifest_path.is_symlink() or not manifest_path.is_file():
-        raise RefreshError("manifesto de rollback ausente")
+    manifest_path = confined_regular_file(
+        backup_dir, "rollback-manifest.json", label="manifesto de rollback"
+    )
     try:
         snapshot = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -247,8 +349,11 @@ def verify_rollback(backup_dir: Path, expected: dict[str, dict]) -> str:
                 or mode < 0
             ):
                 raise RefreshError(f"metadado de backup invalido: {destination}")
-            if previous.is_symlink() or not previous.is_file():
-                raise RefreshError(f"arquivo de backup ausente: {destination}")
+            previous = confined_regular_file(
+                backup_dir,
+                "files/" + destination,
+                label=f"arquivo de backup: {destination}",
+            )
             observed = previous.stat()
             if (
                 sha256_file(previous) != digest
@@ -256,8 +361,12 @@ def verify_rollback(backup_dir: Path, expected: dict[str, dict]) -> str:
                 or stat.S_IMODE(observed.st_mode) != mode
             ):
                 raise RefreshError(f"arquivo de backup divergente: {destination}")
-        elif previous.exists():
-            raise RefreshError(f"backup inesperado para arquivo novo: {destination}")
+        else:
+            verify_absent_confined(
+                backup_dir,
+                "files/" + destination,
+                label=destination,
+            )
     return sha256_file(manifest_path)
 
 
@@ -280,9 +389,11 @@ def verify_update_receipt(
     verified: dict[str, dict] = {}
     for relative, canonical in expected.items():
         metadata = files.get(relative)
-        target = INSTALL_ROOT.joinpath(*relative.split("/"))
-        if not isinstance(metadata, dict) or target.is_symlink() or not target.is_file():
+        if not isinstance(metadata, dict):
             raise RefreshError(f"arquivo instalado nao comprovado: {relative}")
+        target = confined_regular_file(
+            INSTALL_ROOT, relative, label=f"arquivo instalado: {relative}"
+        )
         observed = {"sha256": sha256_file(target), "size": target.stat().st_size}
         if (
             metadata.get("sha256") != canonical["sha256"]

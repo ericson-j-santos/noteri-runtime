@@ -47,6 +47,8 @@ def test_gateway_refresh_readback_matches_script_contract():
     assert "NOTERI_GATEWAY_ALREADY_CURRENT_VERIFIED" in workflow
     assert "installation_performed_by_run" in workflow
     assert "rollback_manifest_sha256" in workflow
+    assert "Get-ConfinedRegularFile" in workflow
+    assert "[IO.FileAttributes]::ReparsePoint" in workflow
     for field in [
         "host",
         "validation_head",
