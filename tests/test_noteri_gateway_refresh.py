@@ -274,9 +274,9 @@ def test_windows_reparse_attribute_on_intermediate_component_is_rejected(
         real_lstat = m.os.lstat
         reparse_flag = getattr(m.stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
-        def mark_bin_as_reparse(path):
-            observed = real_lstat(path)
-            if Path(path) == root / "bin":
+        def mark_bin_as_reparse(path, *args, **kwargs):
+            observed = real_lstat(path, *args, **kwargs)
+            if not args and not kwargs and Path(path) == root / "bin":
                 return SimpleNamespace(
                     st_mode=observed.st_mode,
                     st_file_attributes=(
