@@ -36,17 +36,62 @@ jobs:
             --workflow-run-id $env:GITHUB_RUN_ID `
             --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT
           if ($LASTEXITCODE -ne 0) { throw 'NOTERI_GATEWAY_REFRESH_BLOCKED' }
-      - name: Independently read back bound receipt and installed hashes
+      - name: Independently read back run evidence and installed hashes
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $installRoot = 'C:\dev\chatgpt-command-gateway'
-          $p = Join-Path $installRoot 'update-receipt.json'
-          if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw 'update receipt missing' }
+          function Get-ConfinedRegularFile {
+            param(
+              [Parameter(Mandatory=$true)][string]$Root,
+              [Parameter(Mandatory=$true)][string]$Relative
+            )
+            $rootItem = Get-Item -LiteralPath $Root -Force
+            if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw ('reparse root rejected: ' + $Root)
+            }
+            $rootResolved = (Resolve-Path -LiteralPath $Root).Path.TrimEnd('\')
+            $current = $rootResolved
+            foreach ($part in ($Relative -split '/')) {
+              if ([string]::IsNullOrWhiteSpace($part) -or $part -eq '.' -or $part -eq '..') {
+                throw ('invalid relative path: ' + $Relative)
+              }
+              $current = Join-Path $current $part
+              $item = Get-Item -LiteralPath $current -Force
+              if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw ('reparse component rejected: ' + $Relative)
+              }
+              $resolved = (Resolve-Path -LiteralPath $current).Path
+              $prefix = $rootResolved + '\'
+              if (-not $resolved.StartsWith(
+                    $prefix, [StringComparison]::OrdinalIgnoreCase) -and
+                  $resolved -ne $rootResolved) {
+                throw ('path escaped root: ' + $Relative)
+              }
+            }
+            if (-not (Test-Path -LiteralPath $current -PathType Leaf)) {
+              throw ('regular file missing: ' + $Relative)
+            }
+            return $current
+          }
+          $p = Join-Path $installRoot 'refresh-run-receipt.json'
+          if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw 'run receipt missing' }
           $r = Get-Content -LiteralPath $p -Raw | ConvertFrom-Json
-          if ($r.result -ne 'HOST_UPDATE_OK') { throw 'HOST_UPDATE_OK missing' }
+          $allowed = @(
+            'NOTERI_GATEWAY_REFRESHED',
+            'NOTERI_GATEWAY_ALREADY_CURRENT_VERIFIED'
+          )
+          if ($r.result -notin $allowed) { throw 'run result invalid' }
+          if ($r.result -eq 'NOTERI_GATEWAY_REFRESHED' -and
+              $r.installation_performed_by_run -ne $true) {
+            throw 'new installation proof missing'
+          }
+          if ($r.result -eq 'NOTERI_GATEWAY_ALREADY_CURRENT_VERIFIED' -and
+              $r.installation_performed_by_run -ne $false) {
+            throw 'old installation was reassigned to current run'
+          }
           if ($r.host -ne 'Noteri') { throw 'host mismatch' }
-          if ($r.source_commit -ne '92e927757c29396228d7c2a04bd3a0ebac21422c') { throw 'source commit mismatch' }
+          if ($r.source_commit -ne '1dc0e4f07e52dbc634033878e2e98e67af8bd337') { throw 'source commit mismatch' }
           if ($r.rules_version -ne '1.6.11') { throw 'rules version mismatch' }
           if ($r.validation_head -ne $r.source_commit) { throw 'validation head mismatch' }
           if ($r.install_root -ne $installRoot) { throw 'install root mismatch' }
@@ -70,10 +115,7 @@ jobs:
           foreach ($relative in $expectedFiles) {
             $property = $r.files.PSObject.Properties[$relative]
             if ($null -eq $property) { throw ('managed file missing: ' + $relative) }
-            $target = Join-Path $installRoot ($relative -replace '/', '\')
-            if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
-              throw ('installed file missing: ' + $relative)
-            }
+            $target = Get-ConfinedRegularFile -Root $installRoot -Relative $relative
             $item = Get-Item -LiteralPath $target
             $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($hash -ne $property.Value.sha256 -or
@@ -81,8 +123,12 @@ jobs:
               throw ('installed file hash mismatch: ' + $relative)
             }
           }
-          $rollbackManifest = Join-Path ([string]$r.backup_dir) 'rollback-manifest.json'
-          if (-not (Test-Path -LiteralPath $rollbackManifest -PathType Leaf)) {
-            throw 'rollback snapshot missing'
+          $rollbackManifest = Get-ConfinedRegularFile `
+            -Root ([string]$r.backup_dir) `
+            -Relative 'rollback-manifest.json'
+          $rollbackHash = (Get-FileHash -LiteralPath $rollbackManifest -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($rollbackHash -ne $r.rollback_manifest_sha256) {
+            throw 'rollback manifest changed after verification'
           }
-          Write-Host 'NOTERI_GATEWAY_READBACK_OK'
+          Write-Host ('NOTERI_GATEWAY_READBACK_OK result=' + $r.result)
+
