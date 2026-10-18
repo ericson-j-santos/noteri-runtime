@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import stat
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,64 +19,118 @@ sys.modules[S.name] = m
 S.loader.exec_module(m)
 
 
-def execution():
+def execution(attempt: int = 1):
     return {
         "repository": m.EXPECTED_WORKFLOW_REPOSITORY,
         "workflow_sha": "a" * 40,
         "run_id": 123,
-        "run_attempt": 1,
+        "run_attempt": attempt,
     }
 
 
-def seed_current_receipt(monkeypatch, root: Path) -> dict:
+def canonical_fixture():
+    payloads = {
+        destination: ("canonical:" + source).encode()
+        for source, destination in m.RUNTIME_MAP.items()
+    }
+    entries = []
+    for source, destination in m.RUNTIME_MAP.items():
+        payload = payloads[destination]
+        entries.append(
+            {
+                "path": source,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size": len(payload),
+            }
+        )
+    manifest = json.dumps(
+        {"version": m.RULES_VERSION, "files": entries}, sort_keys=True
+    ).encode()
+    return manifest, payloads, m.canonical_files(manifest)
+
+
+def write_snapshot(install: Path, expected: dict, previous: dict[str, bytes]):
+    backup = install / "backup-test"
+    entries = {}
+    for destination, canonical in expected.items():
+        existed = destination in previous
+        entry = {
+            "source": canonical["source"],
+            "existed": existed,
+            "desired_sha256": canonical["sha256"],
+            "desired_size": canonical["size"],
+        }
+        if existed:
+            target = backup.joinpath("files", *destination.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(previous[destination])
+            observed = target.stat()
+            entry.update(
+                {
+                    "previous_sha256": hashlib.sha256(previous[destination]).hexdigest(),
+                    "previous_size": observed.st_size,
+                    "previous_mode": stat.S_IMODE(observed.st_mode),
+                }
+            )
+        entries[destination] = entry
+    backup.mkdir(parents=True, exist_ok=True)
+    (backup / "rollback-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "install_root": str(install.resolve()),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "entries": entries,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return backup
+
+
+def seed_current_receipt(monkeypatch, root: Path):
     install = root / "install"
     monkeypatch.setattr(m, "INSTALL_ROOT", install)
-    files = {}
-    for relative in sorted(m.MANAGED_FILES):
-        payload = ("payload:" + relative).encode()
-        target = install.joinpath(*relative.split("/"))
+    manifest, payloads, expected = canonical_fixture()
+    for destination, payload in payloads.items():
+        target = install.joinpath(*destination.split("/"))
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(payload)
-        files[relative] = {
-            "sha256": hashlib.sha256(payload).hexdigest(),
-            "size": len(payload),
-        }
-    backup = install / "backup-test"
-    backup.mkdir(parents=True)
-    (backup / "rollback-manifest.json").write_text("{}", encoding="utf-8")
+    previous = {name: ("previous:" + name).encode() for name in payloads}
+    backup = write_snapshot(install, expected, previous)
     receipt = {
         "result": "HOST_UPDATE_OK",
         "source_commit": m.RULES_COMMIT,
         "rules_version": m.RULES_VERSION,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
         "host": m.EXPECTED_HOST,
         "install_root": str(install),
         "backup_dir": str(backup),
         "validation_head": m.RULES_COMMIT,
-        "files": files,
+        "files": {
+            name: {"sha256": meta["sha256"], "size": meta["size"]}
+            for name, meta in expected.items()
+        },
     }
     m.atomic_json(install / "update-receipt.json", receipt)
-    return receipt
+    return receipt, manifest, payloads, expected
 
 
 def test_contract_is_fixed():
-    assert m.RULES_COMMIT == "92e927757c29396228d7c2a04bd3a0ebac21422c"
+    assert m.RULES_COMMIT == "1dc0e4f07e52dbc634033878e2e98e67af8bd337"
     assert m.RULES_VERSION == "1.6.11"
+    assert m.MANIFEST_SHA256 == "f0027395ca4ca1b1228ecc0968fb219592cb42a5bebbf3a9292033d4b30f5a3f"
     assert m.INSTALL_ROOT == Path(r"C:\dev\chatgpt-command-gateway")
-    assert m.INSTALL_SHA256 == "f73d843c86953e5f1eaca791850b5b10ccb670389cef722c2b7d921ff381f561"
+    assert m.INSTALL_SHA256 == "5c31508b431a2a3bb9ea649e25e18fb0c6fd8c47afbe138aa2654f6bc92e262f"
     assert m.UPDATE_SHA256 == "fbed2c036415a4f97637c453c37e3060a580d549f68a519785d0a02926589103"
 
 
-def test_rejects_other_host():
+def test_rejects_other_host_confirmation_and_commit():
     with pytest.raises(m.RefreshError, match="host invalido"):
         m.validate("OTHER", m.CONFIRM, m.RULES_COMMIT)
-
-
-def test_rejects_wrong_confirmation():
     with pytest.raises(m.RefreshError, match="confirmacao invalida"):
         m.validate("Noteri", "WRONG", m.RULES_COMMIT)
-
-
-def test_rejects_wrong_commit():
     with pytest.raises(m.RefreshError, match="commit divergente"):
         m.validate("Noteri", m.CONFIRM, "0" * 40)
 
@@ -88,9 +144,7 @@ def test_rejects_wrong_commit():
         (m.EXPECTED_WORKFLOW_REPOSITORY, "a" * 40, 1, 0),
     ],
 )
-def test_rejects_invalid_execution_identity(
-    repository, workflow_sha, run_id, run_attempt
-):
+def test_rejects_invalid_execution_identity(repository, workflow_sha, run_id, run_attempt):
     with pytest.raises(m.RefreshError):
         m.validate_execution(repository, workflow_sha, run_id, run_attempt)
 
@@ -99,117 +153,196 @@ def test_non_admin_fails_before_fetch_or_write(monkeypatch):
     calls = {"fetch": 0, "write": 0}
     monkeypatch.setattr(m.socket, "gethostname", lambda: "Noteri")
     monkeypatch.setattr(m, "is_admin", lambda: False)
-    monkeypatch.setattr(
-        m,
-        "fetch",
-        lambda *_args: calls.__setitem__("fetch", calls["fetch"] + 1),
-    )
-    monkeypatch.setattr(
-        m,
-        "atomic_json",
-        lambda *_args: calls.__setitem__("write", calls["write"] + 1),
-    )
+    monkeypatch.setattr(m, "fetch", lambda *_args: calls.__setitem__("fetch", calls["fetch"] + 1))
+    monkeypatch.setattr(m, "atomic_json", lambda *_args: calls.__setitem__("write", calls["write"] + 1))
     with pytest.raises(m.RefreshError, match="elevacao obrigatoria"):
         m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution())
     assert calls == {"fetch": 0, "write": 0}
 
 
-def test_current_receipt_is_verified_and_bound_to_execution(monkeypatch):
+def test_old_install_is_revalidated_without_reassigning_installation(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        seed_current_receipt(monkeypatch, root)
+        receipt, manifest, _, _ = seed_current_receipt(monkeypatch, Path(tmp))
+        update_path = m.INSTALL_ROOT / "update-receipt.json"
+        original = update_path.read_bytes()
         monkeypatch.setattr(m.socket, "gethostname", lambda: "Noteri")
         monkeypatch.setattr(m, "is_admin", lambda: True)
         monkeypatch.setattr(
-            m, "fetch", lambda *_args: pytest.fail("must not download")
+            m,
+            "fetch",
+            lambda path, *_args: manifest
+            if path == "MANIFEST.json"
+            else pytest.fail("old install must not run updater"),
         )
         result = m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution())
-        assert result["result"] == "NOTERI_GATEWAY_ALREADY_CURRENT"
-        bound = json.loads(
-            (m.INSTALL_ROOT / "update-receipt.json").read_text(encoding="utf-8")
+        assert result["result"] == "NOTERI_GATEWAY_ALREADY_CURRENT_VERIFIED"
+        assert update_path.read_bytes() == original
+        assert "workflow_run_id" not in receipt
+        run_receipt = json.loads(
+            (m.INSTALL_ROOT / m.RUN_RECEIPT_NAME).read_text(encoding="utf-8")
         )
-        assert bound["workflow_repository"] == m.EXPECTED_WORKFLOW_REPOSITORY
-        assert bound["workflow_sha"] == "a" * 40
-        assert bound["workflow_run_id"] == 123
-        assert bound["workflow_run_attempt"] == 1
+        assert run_receipt["installation_performed_by_run"] is False
+        assert run_receipt["workflow_run_id"] == 123
 
 
-def test_hash_divergence_fails_before_binding(monkeypatch):
+def test_replay_cannot_be_relabelled_as_installation(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        receipt = seed_current_receipt(monkeypatch, root)
-        target = m.INSTALL_ROOT / "bin" / "command_gateway.py"
-        target.write_bytes(b"divergent")
-        with pytest.raises(m.RefreshError, match="hash instalado divergente"):
-            m.bind_execution(receipt, **execution())
-        stored = json.loads(
-            (m.INSTALL_ROOT / "update-receipt.json").read_text(encoding="utf-8")
-        )
-        assert "workflow_run_id" not in stored
-
-
-def test_missing_rollback_snapshot_fails_closed(monkeypatch):
-    with tempfile.TemporaryDirectory() as tmp:
-        receipt = seed_current_receipt(monkeypatch, Path(tmp))
-        Path(receipt["backup_dir"], "rollback-manifest.json").unlink()
-        with pytest.raises(m.RefreshError, match="backup de rollback"):
-            m.verify_update_receipt(receipt)
-
-
-def test_atomic_json_removes_only_owned_temp_on_replace_failure(
-    monkeypatch,
-):
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        path = root / "receipt.json"
-        monkeypatch.setattr(
-            m.os,
-            "replace",
-            lambda *_args: (_ for _ in ()).throw(
-                PermissionError("injected-replace-failure")
-            ),
-        )
-        with pytest.raises(PermissionError, match="injected-replace-failure"):
-            m.atomic_json(path, {"ok": True})
-        assert list(root.glob("receipt.json.tmp-*")) == []
-
-
-def test_atomic_json_preserves_divergent_temp_on_replace_failure(
-    monkeypatch,
-):
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        path = root / "receipt.json"
-
-        def diverge(source, _destination):
-            Path(source).write_bytes(b"divergent")
-            raise PermissionError("injected-replace-failure")
-
-        monkeypatch.setattr(m.os, "replace", diverge)
-        with pytest.raises(PermissionError, match="injected-replace-failure"):
-            m.atomic_json(path, {"ok": True})
-        leftovers = list(root.glob("receipt.json.tmp-*"))
-        assert len(leftovers) == 1
-        assert leftovers[0].read_bytes() == b"divergent"
-
-
-def test_updater_failure_is_sanitized_and_never_bound(monkeypatch):
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        install = root / "install"
-        install.mkdir()
-        monkeypatch.setattr(m, "INSTALL_ROOT", install)
+        _, manifest, _, _ = seed_current_receipt(monkeypatch, Path(tmp))
+        update_path = m.INSTALL_ROOT / "update-receipt.json"
+        original_hash = hashlib.sha256(update_path.read_bytes()).hexdigest()
         monkeypatch.setattr(m.socket, "gethostname", lambda: "Noteri")
         monkeypatch.setattr(m, "is_admin", lambda: True)
-        monkeypatch.setattr(m, "load_update_receipt", lambda: None)
-        monkeypatch.setattr(m, "fetch", lambda *_args: b"payload")
-        monkeypatch.setattr(
-            m.subprocess,
-            "run",
-            lambda *_args, **_kwargs: SimpleNamespace(
-                returncode=28, stderr="HOST_UPDATE_BLOCKED"
-            ),
+        monkeypatch.setattr(m, "fetch", lambda *_args: manifest)
+        first = m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution(1))
+        second = m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution(2))
+        assert first["result"] == second["result"] == "NOTERI_GATEWAY_ALREADY_CURRENT_VERIFIED"
+        assert hashlib.sha256(update_path.read_bytes()).hexdigest() == original_hash
+        run_receipt = json.loads(
+            (m.INSTALL_ROOT / m.RUN_RECEIPT_NAME).read_text(encoding="utf-8")
         )
+        assert run_receipt["workflow_run_attempt"] == 2
+        assert run_receipt["installation_performed_by_run"] is False
+
+
+def test_empty_rollback_manifest_fails_closed(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        receipt, _, _, expected = seed_current_receipt(monkeypatch, Path(tmp))
+        Path(receipt["backup_dir"], "rollback-manifest.json").write_text("{}", encoding="utf-8")
+        with pytest.raises(m.RefreshError, match="schema do rollback"):
+            m.verify_update_receipt(receipt, expected)
+
+
+def test_missing_and_corrupt_backup_fail_closed(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        receipt, _, _, expected = seed_current_receipt(monkeypatch, Path(tmp))
+        backup = Path(receipt["backup_dir"])
+        first = next(iter(sorted(m.MANAGED_FILES)))
+        saved = backup.joinpath("files", *first.split("/"))
+        saved.unlink()
+        with pytest.raises(m.RefreshError, match="arquivo de backup ausente"):
+            m.verify_update_receipt(receipt, expected)
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        saved.write_bytes(b"corrupt")
+        with pytest.raises(m.RefreshError, match="arquivo de backup divergente"):
+            m.verify_update_receipt(receipt, expected)
+
+
+def test_snapshot_outside_install_root_fails_closed(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside:
+        receipt, _, _, expected = seed_current_receipt(monkeypatch, Path(tmp))
+        receipt["backup_dir"] = outside
+        with pytest.raises(m.RefreshError, match="backup fora da instalacao"):
+            m.verify_update_receipt(receipt, expected)
+
+
+def test_coherent_local_file_and_receipt_tamper_fails_against_canonical(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        receipt, _, _, expected = seed_current_receipt(monkeypatch, Path(tmp))
+        relative = "bin/command_gateway.py"
+        target = m.INSTALL_ROOT.joinpath(*relative.split("/"))
+        target.write_bytes(b"coherent-local-tamper")
+        receipt["files"][relative] = {
+            "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+            "size": target.stat().st_size,
+        }
+        with pytest.raises(m.RefreshError, match="fonte canonica"):
+            m.verify_update_receipt(receipt, expected)
+
+
+def test_complete_update_proves_new_install_and_full_rollback(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        install = Path(tmp) / "install"
+        monkeypatch.setattr(m, "INSTALL_ROOT", install)
+        manifest, payloads, expected = canonical_fixture()
+        previous = {}
+        for destination in m.MANAGED_FILES:
+            old = ("old:" + destination).encode()
+            previous[destination] = old
+            target = install.joinpath(*destination.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(old)
+
+        def fake_fetch(path, *_args):
+            return manifest if path == "MANIFEST.json" else b"verified-script"
+
+        def fake_updater(*_args, **_kwargs):
+            backup = write_snapshot(install, expected, previous)
+            for destination, payload in payloads.items():
+                target = install.joinpath(*destination.split("/"))
+                target.write_bytes(payload)
+            receipt = {
+                "result": "HOST_UPDATE_OK",
+                "source_commit": m.RULES_COMMIT,
+                "rules_version": m.RULES_VERSION,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "host": m.EXPECTED_HOST,
+                "install_root": str(install),
+                "backup_dir": str(backup),
+                "validation_head": m.RULES_COMMIT,
+                "files": {
+                    name: {"sha256": meta["sha256"], "size": meta["size"]}
+                    for name, meta in expected.items()
+                },
+            }
+            m.atomic_json(install / "update-receipt.json", receipt)
+            return SimpleNamespace(returncode=0, stderr="")
+
+        monkeypatch.setattr(m.socket, "gethostname", lambda: "Noteri")
+        monkeypatch.setattr(m, "is_admin", lambda: True)
+        monkeypatch.setattr(m, "fetch", fake_fetch)
+        monkeypatch.setattr(m.subprocess, "run", fake_updater)
+        result = m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution())
+        assert result["result"] == "NOTERI_GATEWAY_REFRESHED"
+        run_receipt = json.loads(
+            (install / m.RUN_RECEIPT_NAME).read_text(encoding="utf-8")
+        )
+        assert run_receipt["installation_performed_by_run"] is True
+        assert run_receipt["workflow_run_id"] == 123
+        assert set(run_receipt["files"]) == m.MANAGED_FILES
+
+
+def test_stale_successful_subprocess_receipt_is_rejected(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        receipt, manifest, _, _ = seed_current_receipt(monkeypatch, Path(tmp))
+        receipt["source_commit"] = "0" * 40
+        m.atomic_json(m.INSTALL_ROOT / "update-receipt.json", receipt)
+        monkeypatch.setattr(m.socket, "gethostname", lambda: "Noteri")
+        monkeypatch.setattr(m, "is_admin", lambda: True)
+        monkeypatch.setattr(m, "fetch", lambda path, *_args: manifest if path == "MANIFEST.json" else b"script")
+        monkeypatch.setattr(m.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stderr=""))
+        with pytest.raises(m.RefreshError, match="nao foi renovado"):
+            m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution())
+
+
+def test_atomic_json_cleans_owned_temp_but_preserves_divergent(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "receipt.json"
+        monkeypatch.setattr(m.os, "replace", lambda *_args: (_ for _ in ()).throw(PermissionError("replace-failure")))
+        with pytest.raises(PermissionError, match="replace-failure"):
+            m.atomic_json(path, {"ok": True})
+        assert list(Path(tmp).glob("receipt.json.tmp-*")) == []
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "receipt.json"
+        def diverge(source, _destination):
+            Path(source).write_bytes(b"divergent")
+            raise PermissionError("replace-failure")
+        monkeypatch.setattr(m.os, "replace", diverge)
+        with pytest.raises(PermissionError, match="replace-failure"):
+            m.atomic_json(path, {"ok": True})
+        leftovers = list(Path(tmp).glob("receipt.json.tmp-*"))
+        assert len(leftovers) == 1 and leftovers[0].read_bytes() == b"divergent"
+
+
+def test_updater_failure_never_creates_run_receipt(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        install = Path(tmp) / "install"
+        monkeypatch.setattr(m, "INSTALL_ROOT", install)
+        manifest, _, _ = canonical_fixture()
+        monkeypatch.setattr(m.socket, "gethostname", lambda: "Noteri")
+        monkeypatch.setattr(m, "is_admin", lambda: True)
+        monkeypatch.setattr(m, "fetch", lambda path, *_args: manifest if path == "MANIFEST.json" else b"payload")
+        monkeypatch.setattr(m.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=28, stderr="HOST_UPDATE_BLOCKED"))
         with pytest.raises(m.RefreshError, match="updater_failed:28"):
             m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution())
-        assert not (install / "update-receipt.json").exists()
+        assert not (install / m.RUN_RECEIPT_NAME).exists()
+
