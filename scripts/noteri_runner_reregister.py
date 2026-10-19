@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Bootstrap fail-closed para re-registro do GitHub Actions Runner no Noteri.
 
-O token efêmero é recebido somente por variável de ambiente e nunca é persistido
-nem incluído em receipts/logs deste wrapper.
+A inspeção local não registra, inicia ou reconfigura o runner. O marcador local
+não comprova conectividade ou pickup no GitHub. O caminho legado de registro
+continua separado; sua execução não foi homologada por este incremento.
 """
 from __future__ import annotations
 import argparse,json,os,shutil,socket,subprocess,time
+import hashlib
+import stat
+from urllib.parse import urlsplit
 from pathlib import Path
 
 EXPECTED_HOST="Noteri"
@@ -23,17 +27,129 @@ def validate(host,repository,confirm):
     if repository!=EXPECTED_REPOSITORY: raise BootstrapError("repositorio invalido")
     if confirm!=CONFIRM: raise BootstrapError("confirmacao invalida")
 
-def validate_home(root:Path)->Path:
-    root=root.resolve()
-    for p in (root/"config.cmd",root/"run.cmd",root/"bin"/"Runner.Listener.exe"):
-        if not p.is_file(): raise BootstrapError("runner_home incompleto")
-    return root
+MARKER_LIMIT = 64 * 1024
+IDENTITY_ERRORS = (
+    "runner_path_reparse", "runner_marker_invalid", "runner_marker_changed",
+    "runner_repository_mismatch", "runner_agent_mismatch", "runner_workfolder_mismatch",
+    "runner_configuration_exists", "runner_marker_missing", "watchdog_metadata_invalid",
+)
 
-def configured(root:Path)->bool:
-    return (root/".runner").is_file()
+
+def _regular_path(path: Path) -> None:
+    for item in (path, *path.parents):
+        try:
+            info = item.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise BootstrapError("runner_path_reparse")
+
+
+def _signature(info):
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns)
+
+
+def _unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise BootstrapError("runner_marker_invalid")
+        value[key] = item
+    return value
+
+
+def _read_object(path: Path):
+    _regular_path(path)
+    before = path.stat()
+    if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= MARKER_LIMIT:
+        raise BootstrapError("runner_marker_invalid")
+    with path.open("rb") as handle:
+        if _signature(os.fstat(handle.fileno())) != _signature(before):
+            raise BootstrapError("runner_marker_changed")
+        raw = handle.read(MARKER_LIMIT + 1)
+        after = os.fstat(handle.fileno())
+    if (len(raw) != before.st_size or _signature(after) != _signature(before)
+            or _signature(path.stat()) != _signature(before)):
+        raise BootstrapError("runner_marker_changed")
+    try:
+        value = json.loads(raw.decode("utf-8-sig"), object_pairs_hook=_unique_object)
+    except (UnicodeError, ValueError) as exc:
+        raise BootstrapError("runner_marker_invalid") from None
+    if not isinstance(value, dict):
+        raise BootstrapError("runner_marker_invalid")
+    return value, hashlib.sha256(raw).hexdigest()
+
+
+def validate_home(root: Path) -> Path:
+    # Check before resolve(), which would hide a junction/symlink in the input.
+    root = root.absolute()
+    _regular_path(root)
+    for item in (root / "config.cmd", root / "run.cmd", root / "bin" / "Runner.Listener.exe"):
+        _regular_path(item)
+        if not item.is_file():
+            raise BootstrapError("runner_home incompleto")
+    return root.resolve()
+
+
+def local_identity(root: Path) -> dict | None:
+    """Only .runner metadata is opened; no credentials or logs are read."""
+    marker = root / ".runner"
+    _regular_path(marker)
+    try:
+        marker.lstat()
+    except FileNotFoundError:
+        return None
+    value, marker_sha256 = _read_object(marker)
+    url = value.get("gitHubUrl")
+    if not isinstance(url, str):
+        raise BootstrapError("runner_repository_mismatch")
+    try:
+        parsed = urlsplit(url)
+        valid_url = (parsed.scheme == "https" and parsed.netloc.casefold() == "github.com"
+                     and not parsed.query and not parsed.fragment
+                     and parsed.path.rstrip("/").casefold() == "/" + EXPECTED_REPOSITORY.casefold()
+                     and url == url.strip() and not any(ord(c) < 32 or ord(c) == 127 for c in url))
+    except ValueError:
+        valid_url = False
+    if not valid_url:
+        raise BootstrapError("runner_repository_mismatch")
+    if (type(value.get("agentId")) is not int or value["agentId"] <= 0
+            or value.get("agentName") != EXPECTED_NAME):
+        raise BootstrapError("runner_agent_mismatch")
+    if value.get("workFolder") != "_work":
+        raise BootstrapError("runner_workfolder_mismatch")
+    return {"agent_id": value["agentId"], "agent_name": EXPECTED_NAME,
+            "repository": EXPECTED_REPOSITORY, "marker_sha256": marker_sha256}
+
+
+def configured(root: Path) -> bool:
+    return local_identity(root) is not None
+
+
+def installed_home() -> Path:
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        raise BootstrapError("watchdog_metadata_invalid")
+    metadata = Path(local) / "ReqSys" / "NoteriControlPlaneWatchdog" / "metadata.json"
+    value, _ = _read_object(metadata)
+    if (value.get("host") != EXPECTED_HOST
+            or value.get("service") != "reqsys-noteri-control-plane-watchdog"
+            or not isinstance(value.get("runner_home"), str)):
+        raise BootstrapError("watchdog_metadata_invalid")
+    root = Path(value["runner_home"])
+    if not root.is_absolute():
+        raise BootstrapError("watchdog_metadata_invalid")
+    return validate_home(root)
+
 
 def gh_env():
-    env=dict(os.environ); env.pop("GH_TOKEN",None); env.pop("GITHUB_TOKEN",None); return env
+    env = dict(os.environ)
+    for key in list(env):
+        if key.upper() in {"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
+                           "GITHUB_ENTERPRISE_TOKEN", "GH_CONFIG_DIR", "GH_DEBUG"} or key.upper().startswith("ACTIONS_RUNNER_INPUT_"):
+            env.pop(key, None)
+    env.update(GH_HOST="github.com", GH_PROMPT_DISABLED="1", GIT_TERMINAL_PROMPT="0")
+    return env
 
 def find_gh()->Path:
     found=shutil.which("gh")
@@ -87,18 +203,23 @@ def classify_current_diag(root:Path,before:dict[str,int])->str:
     return "runner_error"
 
 def configure(root:Path,gh:Path)->None:
+    if configured(root):
+        raise BootstrapError("runner_configuration_exists")
     before=diag_snapshot(root)
     token=registration_token(gh)
+    child_env=gh_env()
+    child_env["ACTIONS_RUNNER_INPUT_TOKEN"]=token
     try:
-        cmd=[str(root/"config.cmd"),"--unattended","--replace","--url",EXPECTED_URL,
-             "--token",token,"--name",EXPECTED_NAME,"--labels",",".join(EXPECTED_LABELS),
+        cmd=[str(root/"config.cmd"),"--unattended","--url",EXPECTED_URL,
+             "--name",EXPECTED_NAME,"--labels",",".join(EXPECTED_LABELS),
              "--work","_work"]
-        r=subprocess.run(cmd,cwd=str(root),env=gh_env(),capture_output=True,text=True,
+        r=subprocess.run(cmd,cwd=str(root),env=child_env,capture_output=True,text=True,
                          encoding="utf-8",errors="replace",timeout=120,check=False)
     finally:
+        child_env.pop("ACTIONS_RUNNER_INPUT_TOKEN",None)
         token=""
     if r.returncode!=0: raise BootstrapError(f"config_failed:{classify_current_diag(root,before)}")
-    if not configured(root): raise BootstrapError("registro nao materializou .runner")
+    if not configured(root): raise BootstrapError("runner_marker_missing")
 
 def start(root:Path)->None:
     try:
@@ -110,18 +231,27 @@ def start(root:Path)->None:
         raise BootstrapError("listener_failed") from exc
 
 def main()->int:
-    p=argparse.ArgumentParser(); p.add_argument("--runner-home",type=Path,required=True)
+    p=argparse.ArgumentParser()
+    source=p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--runner-home",type=Path)
+    source.add_argument("--inspect-installed",action="store_true")
+    p.add_argument("--inspect-only",action="store_true")
     p.add_argument("--repository",default=EXPECTED_REPOSITORY); p.add_argument("--confirm",required=True)
     a=p.parse_args()
     try:
-        validate(socket.gethostname(),a.repository,a.confirm); root=validate_home(a.runner_home)
-        if configured(root):
-            out={"ok":True,"result":"RUNNER_ALREADY_CONFIGURED","host":EXPECTED_HOST,
-                 "repository":EXPECTED_REPOSITORY,"token_persisted":False}
+        validate(socket.gethostname(),a.repository,a.confirm)
+        root=installed_home() if a.inspect_installed else validate_home(a.runner_home)
+        identity=local_identity(root)
+        if identity is not None:
+            out={"ok":True,"result":"RUNNER_LOCAL_CONFIGURATION_VERIFIED","host":EXPECTED_HOST,
+                 **identity,"token_persisted":False}
+        elif a.inspect_only or a.inspect_installed:
+            raise BootstrapError("runner_marker_missing")
         else:
             gh=find_gh(); configure(root,gh); start(root)
             out={"ok":True,"result":"RUNNER_REREGISTERED","host":EXPECTED_HOST,
                  "repository":EXPECTED_REPOSITORY,"labels":list(EXPECTED_LABELS),"token_persisted":False}
+        out.update(actions_qualified=False, hml_verified=False)
         print(json.dumps(out,sort_keys=True)); return 0
     except Exception as e:
         reason=str(e)
@@ -131,8 +261,10 @@ def main()->int:
                  "config_failed:diag_unavailable","config_failed:runner_error",
                  "runner_marker_missing","listener_failed",
                  "host invalido","repositorio invalido","confirmacao invalida")
-        state=next((item for item in allowed if reason.startswith(item)),"bootstrap_failed")
+        allowed += IDENTITY_ERRORS
+        state=next((item for item in allowed if reason == item),"bootstrap_failed")
         print(json.dumps({"ok":False,"result":"RUNNER_REREGISTRATION_BLOCKED",
               "error_type":type(e).__name__,"state":state,"token_persisted":False,
+              "actions_qualified":False,"hml_verified":False,
               "token_logged":False},sort_keys=True)); return 3
 if __name__=="__main__": raise SystemExit(main())
