@@ -33,7 +33,7 @@ class ReadbackTests(unittest.TestCase):
                 "previous_size":len(data),"previous_mode":stat.S_IMODE(target.stat().st_mode)}
         self.manifest={"version":1,"install_root":str(self.install),"entries":self.entries}
         self.write()
-        (self.install/"update-receipt.json").write_text(json.dumps({"backup_dir":str(self.backup)}))
+        (self.install/"update-receipt.json").write_text(json.dumps({"backup_dir":str(self.backup),"result":"HOST_UPDATE_BLOCKED"}))
     def write(self):
         (self.backup/"rollback-manifest.json").write_text(json.dumps(self.manifest))
     def test_complete_previous_state_is_verified_without_write(self):
@@ -88,5 +88,29 @@ class ReadbackTests(unittest.TestCase):
         self.assertNotIn("shell=True",source)
         for name in ("StartServiceW","ControlService","ChangeServiceConfig","CreateServiceW"):
             self.assertNotIn(name,source)
+
+
+    def test_successful_update_is_verified_against_new_bundle(self):
+        desired={}
+        for rel, entry in self.entries.items():
+            data=("desired:"+rel).encode()
+            (self.install/rel).write_bytes(data)
+            entry.update(desired_sha256=hashlib.sha256(data).hexdigest(),desired_size=len(data))
+            desired[rel]={"sha256":entry["desired_sha256"],"size":len(data)}
+        self.write()
+        (self.install/"update-receipt.json").write_text(json.dumps({
+            "backup_dir":str(self.backup),"result":"HOST_UPDATE_OK","files":desired}))
+        result=q.rollback_readback(self.install)
+        self.assertFalse(result["matches_previous"])
+        self.assertTrue(result["state_verified"])
+
+    def test_failed_update_with_prior_state_is_safe(self):
+        result=q.rollback_readback(self.install)
+        self.assertTrue(result["state_verified"])
+
+    def test_unknown_update_status_never_certifies_runtime(self):
+        (self.install/"update-receipt.json").write_text(json.dumps({
+            "backup_dir":str(self.backup),"result":"unexpected"}))
+        self.assertFalse(q.rollback_readback(self.install)["state_verified"])
 
 if __name__=="__main__":unittest.main()

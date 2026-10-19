@@ -47,7 +47,7 @@ def read_json(path: Path) -> dict:
 def rollback_readback(install: Path = INSTALL) -> dict:
     update_path = install / "update-receipt.json"
     if not update_path.exists():
-        return {"status": "no_update_receipt", "matches_previous": None}
+        return {"status": "no_update_receipt", "matches_previous": None, "state_verified": None}
     update = read_json(update_path)
     backup = Path(str(update.get("backup_dir", "")))
     if backup.parent.resolve() != install.resolve() or not re.fullmatch(
@@ -80,8 +80,27 @@ def rollback_readback(install: Path = INSTALL) -> dict:
             and len(data) == previous.get("previous_size")
             and stat.S_IMODE(target.stat().st_mode) == previous.get("previous_mode"),
         }
-    return {"status": "observed", "matches_previous": all(
-        row["matches_previous"] for row in states.values()),
+    matches_previous = all(row["matches_previous"] for row in states.values())
+    update_result = update.get("result")
+    state_verified = False
+    if update_result == "HOST_UPDATE_BLOCKED":
+        state_verified = matches_previous
+    elif update_result == "HOST_UPDATE_OK":
+        # Successful upgrades must match the desired bundle, not the old backup.
+        declared = update.get("files")
+        if isinstance(declared, dict) and set(declared) == MANAGED:
+            state_verified = True
+            for rel, entry in entries.items():
+                current = read_regular(install / rel)
+                desired = declared.get(rel)
+                if (not isinstance(desired, dict)
+                        or hashlib.sha256(current).hexdigest() != entry.get("desired_sha256")
+                        or len(current) != entry.get("desired_size")
+                        or desired.get("sha256") != entry.get("desired_sha256")
+                        or desired.get("size") != entry.get("desired_size")):
+                    state_verified = False
+    return {"status": "observed", "matches_previous": matches_previous,
+        "state_verified": state_verified, "update_result": update_result,
         "manifest_sha256": hashlib.sha256(raw).hexdigest(), "files": states}
 
 def service_state(name: str) -> str:
