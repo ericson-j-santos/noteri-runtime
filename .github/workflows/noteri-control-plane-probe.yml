@@ -10,42 +10,84 @@ concurrency:
   group: noteri-control-plane-fallback-probe
   cancel-in-progress: false
 
+env:
+  # Reviewed candidate; integration of rules PR155 remains a separate merge gate.
+  RULES_SHA: 515b52b2ec51aa60f02265bd5a1e6df057140ece
+  PYTHONDONTWRITEBYTECODE: "1"
+
 jobs:
   probe:
-    name: Prove Noteri fallback without RDC
+    name: Qualify Noteri through Command Gateway
+    if: github.actor == 'ericson-j-santos' && github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 5
-    env:
-      CORRELATION_ID: noteri-control-plane-${{ github.run_id }}-${{ github.run_attempt }}
-      EVIDENCE_FILE: artifacts/noteri-control-plane/evidence.json
     steps:
       - name: Checkout immutable workflow SHA
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
-
-      - name: Prove exact host and active runner
+      - name: Checkout exact approved rules candidate
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify governed host qualification
+        id: qualify
         shell: powershell
-        run: python scripts/noteri_control_plane_probe.py --confirm PROBE-NOTERI-CONTROL-PLANE --correlation-id "$env:CORRELATION_ID" --evidence-file "$env:EVIDENCE_FILE"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python3 -B scripts/noteri_qualification_entrypoint.py --confirm PROBE-NOTERI-CONTROL-PLANE --rules-root _rules --rules-sha "$env:RULES_SHA"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve sanitized qualification or blocked diagnostic
+        if: always() && steps.qualify.outputs.receipt_path != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: noteri-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.qualify.outputs.receipt_path }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Upload sanitized fallback evidence
+  independent_readback:
+    name: Independently verify qualification and select transport
+    needs: probe
+    if: always() && github.actor == 'ericson-j-santos' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout same producer revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Checkout identical selector
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Verify API job, artifact bytes, binding and selector result
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python -B scripts/noteri_qualification_receipt.py verify --rules-root _rules --rules-sha "$RULES_SHA" --output .tmp/qualification-decision.json
+      - name: Preserve non-promoting decision
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: noteri-control-plane-${{ github.run_id }}
-          path: artifacts/noteri-control-plane/evidence.json
+          name: noteri-qualification-decision-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .tmp/qualification-decision.json
+          include-hidden-files: true
           if-no-files-found: error
-          retention-days: 30
-
-      - name: Summary
-        if: always()
-        shell: powershell
-        run: |
-          "## Noteri Control Plane Fallback" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "- Host esperado: Noteri" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "- RDC necessário: não" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "- Produção tocada: não" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "- Segredos lidos: não" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "- Correlation ID: $env:CORRELATION_ID" | Add-Content $env:GITHUB_STEP_SUMMARY
+          retention-days: 7
