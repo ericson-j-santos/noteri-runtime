@@ -5,7 +5,8 @@ Estado: PARCIAL. Integração de código em branch; ativação por Actions e HML
 ## Fluxo implementado
 
 O workflow existente `noteri-control-plane-probe.yml` permanece exclusivamente manual.
-Ele fixa o SHA das regras revisadas e usa `python3`, sem depender do alias `python`
+Ele preserva `--confirm PROBE-NOTERI-CONTROL-PLANE` no entrypoint, que rejeita
+confirmação ausente ou divergente antes do bootstrap. Fixa o SHA das regras revisadas e usa `python3`, sem depender do alias `python`
 quebrado observado no Noteri. O Session Launcher exige SHA exato, worktree isolado,
 snapshot e preflight da versão do runner. Todas as consultas posteriores passam
 pelo Command Gateway. Nenhum ACL, serviço, banco, perfil ou segredo do host é alterado.
@@ -65,7 +66,7 @@ física acima pertence exclusivamente ao incremento inicial.
 
 ## Testes e continuidade
 
-A suíte nova possui 43 testes de arquivos, contratos, vínculo, repetição,
+A suíte nova possui 45 testes de arquivos, contratos, vínculo, repetição,
 negativos e integração simulada. São testes de sandbox/CI, não execução física
 do novo workflow. Os testes nativos/Windows e Actions reais não são substituídos
 por fixtures de API. Os testes completos do repositório devem ser confirmados

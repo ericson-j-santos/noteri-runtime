@@ -41,7 +41,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          python3 -B scripts/noteri_qualification_receipt.py launch --rules-root _rules --rules-sha "$env:RULES_SHA"
+          python3 -B scripts/noteri_qualification_entrypoint.py --confirm PROBE-NOTERI-CONTROL-PLANE --rules-root _rules --rules-sha "$env:RULES_SHA"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Preserve sanitized qualification or blocked diagnostic
         if: always() && steps.qualify.outputs.receipt_path != ''
