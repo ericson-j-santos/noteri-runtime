@@ -1,0 +1,107 @@
+name: Noteri S3 Artifact Profile Preflight
+
+on:
+  push:
+    branches:
+      - "feat/noteri-s3-artifact-*"
+    paths:
+      - "scripts/noteri_s3_artifact_profile.py"
+      - "tests/test_noteri_s3_artifact_profile.py"
+      - "tests/test_noteri_s3_artifact_profile_workflow.py"
+      - ".github/workflows/noteri-s3-artifact-profile.yml"
+      - ".sdd/specs/noteri-s3-artifact-profile.requirements.md"
+      - "docs/noteri-s3-artifact-profile.md"
+  pull_request:
+    paths:
+      - "scripts/noteri_s3_artifact_profile.py"
+      - "tests/test_noteri_s3_artifact_profile.py"
+      - "tests/test_noteri_s3_artifact_profile_workflow.py"
+      - ".github/workflows/noteri-s3-artifact-profile.yml"
+      - ".sdd/specs/noteri-s3-artifact-profile.requirements.md"
+      - "docs/noteri-s3-artifact-profile.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  RULES_SHA: a430688c499077f5472841560f224c40766b0b78
+  WORKER_SHA: 5ef413c1c18996bd022c20987fb75dbb9ec47712
+  EVALUATED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  contract:
+    name: Validate host profile contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact evaluated runtime SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.EVALUATED_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout exact Worker Pool profile contract
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ericson-j-santos/engineering-worker-pool
+          ref: ${{ env.WORKER_SHA }}
+          path: _worker_pool
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Set up test Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Install pinned test dependency
+        run: python -m pip install --disable-pip-version-check pytest==8.4.2
+      - name: Verify exact Worker Pool contract
+        run: python -B scripts/noteri_s3_artifact_profile.py verify-contract --worker-root _worker_pool
+      - name: Run positive and negative contract controls
+        run: python -m pytest -q tests/test_noteri_s3_artifact_profile.py tests/test_noteri_s3_artifact_profile_workflow.py
+
+  physical:
+    name: Qualify minimal S3 profile on Noteri
+    needs: contract
+    if: >-
+      github.actor == 'ericson-j-santos' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    concurrency:
+      group: noteri-s3-artifact-profile-noteri
+      cancel-in-progress: false
+    runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
+    timeout-minutes: 8
+    steps:
+      - name: Checkout immutable runtime SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.EVALUATED_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout exact canonical operational rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Verify governed host qualification
+        id: qualify
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python3 -I -B scripts/noteri_s3_artifact_profile.py launch `
+            --confirm QUALIFY-NOTERI-S3-ARTIFACT-PROFILE `
+            --rules-root _rules `
+            --rules-sha "$env:RULES_SHA"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload sanitized profile evidence
+        if: always() && steps.qualify.outputs.evidence_path != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: noteri-s3-artifact-profile-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.qualify.outputs.evidence_path }}
+          if-no-files-found: error
+          retention-days: 7
