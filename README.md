@@ -32,3 +32,10 @@ A migração a partir de `ericson-j-santos/reqsys-v2-enterprise-real` é increme
 ## Segurança
 
 Não versionar segredos, tokens, credenciais, nomes privados de infraestrutura, dados pessoais ou caminhos que contenham dados sensíveis. Configurações específicas da máquina devem ser injetadas por ambiente/arquivo local protegido.
+
+## Perfil mínimo de artefatos S3
+
+O preflight em [`docs/noteri-s3-artifact-profile.md`](docs/noteri-s3-artifact-profile.md)
+qualifica no host apenas o perfil binário mínimo do transporte de artefatos do
+Engineering Worker Pool. Ele permanece sem credenciais e não declara o worker ou
+o transporte prontos antes dos gates físicos restantes.
