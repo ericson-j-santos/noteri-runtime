@@ -23,7 +23,7 @@ import noteri_qualification_receipt as receipts
 OWNER = "ericson-j-santos"
 REPOSITORY = OWNER + "/noteri-runtime"
 RELATED = OWNER + "/reqsys-v2-enterprise-real"
-REF = "fix/host-qualification-integration-20261019"
+REF = "main"
 WORKFLOW = "noteri-control-plane-probe.yml"
 LABELS = {"self-hosted", "windows", "x64", "noteri", "reqsys-dev"}
 API_VERSION = "2026-03-10"
