@@ -5,7 +5,7 @@ P=Path(__file__).resolve().parents[1]/"scripts"/"noteri_runner_reregister.py"
 S=importlib.util.spec_from_file_location("noteri_runner_reregister",P); m=importlib.util.module_from_spec(S);sys.modules[S.name]=m;S.loader.exec_module(m)
 def test_contract_fixed():
  assert m.EXPECTED_HOST=="Noteri"; assert m.EXPECTED_REPOSITORY=="ericson-j-santos/noteri-runtime"
- assert m.EXPECTED_LABELS==("noteri","reqsys-dev")
+ assert m.EXPECTED_LABELS==("noteri","reqsys-dev","noteri-runtime"); assert m.EXPECTED_NAME=="Noteri-runtime"
 def test_rejects_wrong_host():
  with pytest.raises(m.BootstrapError): m.validate("OTHER",m.EXPECTED_REPOSITORY,m.CONFIRM)
 def test_rejects_wrong_repo():
