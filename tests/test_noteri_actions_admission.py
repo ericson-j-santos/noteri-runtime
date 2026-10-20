@@ -72,6 +72,9 @@ class AdmissionTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
     def dispatch(self, confirm=mod.CONFIRM):
         return mod.dispatch_once(self.api, SHA, CORR, self.root, confirm)
+    def test_dispatch_targets_canonical_main(self):
+        self.assertEqual("main", mod.REF)
+
     def test_positive_submission_has_independent_readback_but_not_qualification(self):
         out = self.dispatch()
         self.assertTrue(out["readback_verified"])
