@@ -361,6 +361,22 @@ def start(root:Path)->int:
     if process.poll() is not None: raise BootstrapError("listener_failed")
     return int(process.pid)
 
+def install_dedicated(*,source_sha:str,correlation_id:str,idempotency_key:str)->dict:
+    root,prepared=prepare_dedicated_home()
+    identity=local_identity(root)
+    registered=False
+    listener_pid=None
+    if identity is None:
+        gh=find_gh();configure(root,gh);registered=True;identity=local_identity(root)
+        listener_pid=start(root)
+    metadata=write_control_metadata(root,source_sha=source_sha,
+        correlation_id=correlation_id,idempotency_key=idempotency_key)
+    return {"ok":True,"result":"RUNNER_DEDICATED_INSTALLED","host":EXPECTED_HOST,
+            **identity,"prepared_now":prepared,"registered_now":registered,
+            "listener_pid":listener_pid,"metadata_written":True,
+            "token_persisted":False,"registration_changed":registered,
+            "metadata":metadata,"actions_qualified":False,"hml_verified":False}
+
 def main()->int:
     p=argparse.ArgumentParser()
     source=p.add_mutually_exclusive_group(required=True)
@@ -376,20 +392,8 @@ def main()->int:
     try:
         validate(socket.gethostname(),a.repository,a.confirm)
         if a.install_dedicated:
-            root,prepared=prepare_dedicated_home()
-            identity=local_identity(root)
-            registered=False
-            listener_pid=None
-            if identity is None:
-                gh=find_gh();configure(root,gh);registered=True;identity=local_identity(root)
-                listener_pid=start(root)
-            metadata=write_control_metadata(root,source_sha=a.source_sha or "",
+            out=install_dedicated(source_sha=a.source_sha or "",
                 correlation_id=a.correlation_id or "",idempotency_key=a.idempotency_key or "")
-            out={"ok":True,"result":"RUNNER_DEDICATED_INSTALLED","host":EXPECTED_HOST,
-                 **identity,"prepared_now":prepared,"registered_now":registered,
-                 "listener_pid":listener_pid,"metadata_written":True,
-                 "token_persisted":False,"registration_changed":registered}
-            out.update(actions_qualified=False,hml_verified=False)
             print(json.dumps(out,sort_keys=True));return 0
         root=installed_home() if a.inspect_installed else validate_home(a.runner_home)
         identity=local_identity(root)
