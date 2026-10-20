@@ -11,8 +11,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Reviewed candidate; integration of rules PR155 remains a separate merge gate.
-  RULES_SHA: 515b52b2ec51aa60f02265bd5a1e6df057140ece
+  # Canonical operational rules main used for the physical qualification.
+  RULES_SHA: 259b51d076939033cc9060a7d24ae352e10fe6a6
   PYTHONDONTWRITEBYTECODE: "1"
 
 jobs:
