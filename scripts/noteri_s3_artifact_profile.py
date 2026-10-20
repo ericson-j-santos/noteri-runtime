@@ -29,6 +29,48 @@ REPOSITORY = "ericson-j-santos/noteri-runtime"
 WORKER_REPOSITORY = "ericson-j-santos/engineering-worker-pool"
 WORKER_SHA = "5ef413c1c18996bd022c20987fb75dbb9ec47712"
 RULES_SHA = "a430688c499077f5472841560f224c40766b0b78"
+RULES_VERSION = "1.6.12"
+GATEWAY_BUNDLE_NAME = "_gateway_bundle"
+GATEWAY_BUNDLE_SCHEMA = "1.0.0"
+GATEWAY_SOURCE_MAP = {
+    "scripts/command_gateway.py": "bin/command_gateway.py",
+    "scripts/host_health_check.py": "bin/host_health_check.py",
+    "scripts/runner_version_preflight.py": "bin/runner_version_preflight.py",
+    "scripts/session_bootstrap.py": "bin/session_bootstrap.py",
+    "scripts/session_launcher.py": "bin/session_launcher.py",
+    "scripts/session_preflight.py": "bin/session_preflight.py",
+    "config/command-gateway.policy.json": "config/policy.json",
+}
+GATEWAY_FILES = {
+    "bin/command_gateway.py": (
+        "14f1389a5c2447e0ec3ae707fd468c224e0f9f492fd7541de65906918c8ac4d1",
+        64_252,
+    ),
+    "bin/host_health_check.py": (
+        "82a12ed90b8f922fb6a44677b3fcf450c9418ca133e9b45441f3fe798b797b3f",
+        2_450,
+    ),
+    "bin/runner_version_preflight.py": (
+        "4ec5f4af67d7b8e5b859d7093241c6bcfa2dee9d9e37ec73f593b9c40784e09f",
+        12_120,
+    ),
+    "bin/session_bootstrap.py": (
+        "2148b5e8885b9b5a223007bf0733282199a919cae57e1622b4e107b3d6a83b36",
+        11_018,
+    ),
+    "bin/session_launcher.py": (
+        "076c8670fde811233918767ad3fda15584735d38a20be2720951e5516e77b257",
+        32_379,
+    ),
+    "bin/session_preflight.py": (
+        "57774599e388c034b929686f3d72dbb872f9b97fb19879a6f880a908dbde25d6",
+        6_957,
+    ),
+    "config/policy.json": (
+        "5320d3a87e1bcdfdc1508db80fa4f48337c4e4717a59b662829c577b97753100",
+        2_342,
+    ),
+}
 REQUIREMENTS_NAME = "requirements-s3-artifact.txt"
 REQUIREMENTS_BYTES = b"boto3==1.43.115\n"
 REQUIREMENTS_URL = (
@@ -488,24 +530,247 @@ def verify_contract(worker_root: Path) -> dict[str, Any]:
     }
 
 
-def validate_rules_checkout(
-    rules_root: Path, rules_sha: str
-) -> tuple[Path, Path, Path, Path]:
+def verify_gateway_contract(rules_root: Path) -> dict[str, Any]:
     unresolved = rules_root.absolute()
     reject_reparse(unresolved)
-    rules_root = unresolved.resolve()
-    require(git(rules_root, "rev-parse", "HEAD") == rules_sha, "rules_checkout_mismatch")
+    root = unresolved.resolve()
+    require(git(root, "rev-parse", "HEAD") == RULES_SHA, "rules_checkout_mismatch")
     require(
-        git(rules_root, "status", "--porcelain=v1", "--untracked-files=no") == "",
+        git(root, "status", "--porcelain=v1", "--untracked-files=no") == "",
         "rules_checkout_dirty",
     )
-    gateway_path = rules_root / "scripts" / "command_gateway.py"
-    launcher_path = rules_root / "scripts" / "session_launcher.py"
-    policy_path = rules_root / "config" / "command-gateway.policy.json"
-    for path in (gateway_path, launcher_path, policy_path):
-        require(path.is_file(), "rules_file_missing")
+    manifest_path = root / "MANIFEST.json"
+    reject_reparse(manifest_path)
+    try:
+        info = manifest_path.stat()
+        require(
+            stat.S_ISREG(info.st_mode) and 0 < info.st_size <= 1_048_576,
+            "rules_manifest_invalid",
+        )
+        raw = manifest_path.read_bytes()
+        require(len(raw) == info.st_size, "rules_manifest_changed")
+        manifest = json.loads(raw.decode("utf-8"))
+    except Blocked:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise Blocked("rules_manifest_invalid") from None
+    require(
+        isinstance(manifest, dict)
+        and manifest.get("version") == RULES_VERSION
+        and isinstance(manifest.get("files"), list),
+        "rules_manifest_invalid",
+    )
+    index = {
+        item.get("path"): item
+        for item in manifest["files"]
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    require(len(index) == len(manifest["files"]), "rules_manifest_invalid")
+    require(set(GATEWAY_SOURCE_MAP.values()) == set(GATEWAY_FILES),
+            "gateway_source_map_invalid")
+    for source, destination in GATEWAY_SOURCE_MAP.items():
+        entry = index.get(source)
+        expected_hash, expected_size = GATEWAY_FILES[destination]
+        require(
+            isinstance(entry, dict)
+            and entry.get("sha256") == expected_hash
+            and entry.get("size") == expected_size,
+            "gateway_manifest_file_mismatch",
+        )
+    return {
+        "result": "PERSISTENT_GATEWAY_CONTRACT_VERIFIED",
+        "rules_sha": RULES_SHA,
+        "rules_version": RULES_VERSION,
+        "managed_file_count": len(GATEWAY_FILES),
+        "secrets_read": False,
+    }
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(64 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        raise Blocked("gateway_file_read_failed") from None
+    return digest.hexdigest()
+
+
+def same_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(str(left.resolve())) == os.path.normcase(str(right.resolve()))
+
+
+def validate_gateway_bundle_shape(root: Path) -> None:
+    expected_files = set(GATEWAY_FILES) | {"bundle-manifest.json"}
+    expected_directories = {
+        str(Path(relative).parent).replace("\\", "/")
+        for relative in GATEWAY_FILES
+        if str(Path(relative).parent) != "."
+    }
+    observed_files: set[str] = set()
+    observed_directories: set[str] = set()
+    try:
+        for directory, names, files in os.walk(root, topdown=True, followlinks=False):
+            parent = Path(directory)
+            for name in names:
+                path = parent / name
+                reject_reparse(path)
+                info = path.lstat()
+                require(stat.S_ISDIR(info.st_mode), "gateway_bundle_entry_invalid")
+                observed_directories.add(path.relative_to(root).as_posix())
+            for name in files:
+                path = parent / name
+                reject_reparse(path)
+                info = path.lstat()
+                require(
+                    stat.S_ISREG(info.st_mode) and getattr(info, "st_nlink", 1) == 1,
+                    "gateway_bundle_entry_invalid",
+                )
+                observed_files.add(path.relative_to(root).as_posix())
+    except Blocked:
+        raise
+    except (OSError, ValueError):
+        raise Blocked("gateway_bundle_shape_unavailable") from None
+    require(observed_files == expected_files, "gateway_bundle_file_set_invalid")
+    require(observed_directories == expected_directories,
+            "gateway_bundle_directory_set_invalid")
+
+
+def gateway_bundle_binding() -> dict[str, object]:
+    sha, _branch, run, attempt = actions_context()
+    return {
+        "schema_version": GATEWAY_BUNDLE_SCHEMA,
+        "repository": REPOSITORY,
+        "runtime_sha": sha,
+        "rules_sha": RULES_SHA,
+        "rules_version": RULES_VERSION,
+        "run_id": int(run),
+        "run_attempt": int(attempt),
+    }
+
+
+def build_gateway_bundle(rules_root: Path, output: Path) -> dict[str, Any]:
+    contract = verify_gateway_contract(rules_root)
+    destination = output.absolute()
+    require(not destination.exists() and not destination.is_symlink(),
+            "gateway_bundle_destination_exists")
+    reject_reparse(destination.parent)
+    try:
+        destination.mkdir()
+        reject_reparse(destination)
+        files: dict[str, dict[str, object]] = {}
+        for source, relative in GATEWAY_SOURCE_MAP.items():
+            source_path = rules_root.resolve().joinpath(*source.split("/"))
+            reject_reparse(source_path)
+            raw = source_path.read_bytes()
+            expected_hash, expected_size = GATEWAY_FILES[relative]
+            require(
+                len(raw) == expected_size
+                and hashlib.sha256(raw).hexdigest() == expected_hash,
+                "gateway_source_changed",
+            )
+            target = destination.joinpath(*relative.split("/"))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            reject_reparse(target.parent)
+            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            files[relative] = {"sha256": expected_hash, "size": expected_size}
+        manifest = gateway_bundle_binding()
+        manifest["files"] = files
+        write_json(destination / "bundle-manifest.json", manifest)
+    except Blocked:
+        raise
+    except OSError:
+        raise Blocked("gateway_bundle_build_failed") from None
+    return {
+        **contract,
+        "result": "TRANSIENT_GATEWAY_BUNDLE_BUILT",
+        "bundle_name": GATEWAY_BUNDLE_NAME,
+        "file_count": len(GATEWAY_FILES),
+    }
+
+
+def validate_gateway_bundle(
+    gateway_root: Path,
+    rules_sha: str,
+    runtime_sha: str,
+    run_id: str,
+    run_attempt: str,
+) -> tuple[Path, Path, Path, Path]:
+    rules_sha = valid_sha(rules_sha, "rules_sha_invalid")
+    require(rules_sha == RULES_SHA, "rules_sha_unapproved")
+    unresolved = gateway_root.absolute()
+    reject_reparse(unresolved)
+    root = unresolved.resolve()
+    try:
+        root_info = root.stat()
+    except OSError:
+        raise Blocked("gateway_bundle_missing") from None
+    require(stat.S_ISDIR(root_info.st_mode), "gateway_bundle_invalid")
+    validate_gateway_bundle_shape(root)
+
+    manifest_path = root / "bundle-manifest.json"
+    reject_reparse(manifest_path)
+    try:
+        manifest_info = manifest_path.stat()
+        require(
+            stat.S_ISREG(manifest_info.st_mode) and 0 < manifest_info.st_size <= 65_536,
+            "gateway_bundle_manifest_invalid",
+        )
+        manifest_raw = manifest_path.read_bytes()
+        require(len(manifest_raw) == manifest_info.st_size, "gateway_bundle_manifest_changed")
+        manifest = json.loads(manifest_raw.decode("ascii"))
+    except Blocked:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise Blocked("gateway_bundle_manifest_invalid") from None
+    expected_binding = {
+        "schema_version": GATEWAY_BUNDLE_SCHEMA,
+        "repository": REPOSITORY,
+        "runtime_sha": runtime_sha,
+        "rules_sha": rules_sha,
+        "rules_version": RULES_VERSION,
+        "run_id": int(run_id),
+        "run_attempt": int(run_attempt),
+    }
+    require(
+        isinstance(manifest, dict)
+        and all(type(manifest.get(key)) is type(value) and manifest.get(key) == value
+                for key, value in expected_binding.items()),
+        "gateway_bundle_binding_mismatch",
+    )
+    files = manifest.get("files")
+    require(isinstance(files, dict) and set(files) == set(GATEWAY_FILES),
+            "gateway_bundle_files_invalid")
+
+    for relative, (expected_hash, expected_size) in GATEWAY_FILES.items():
+        metadata = files.get(relative)
+        require(
+            isinstance(metadata, dict)
+            and metadata.get("sha256") == expected_hash
+            and metadata.get("size") == expected_size,
+            "gateway_bundle_file_mismatch",
+        )
+        path = root.joinpath(*relative.split("/"))
         reject_reparse(path)
-    return rules_root, gateway_path, launcher_path, policy_path
+        try:
+            info = path.stat()
+        except OSError:
+            raise Blocked("gateway_file_missing") from None
+        require(
+            stat.S_ISREG(info.st_mode) and info.st_size == expected_size,
+            "gateway_file_invalid",
+        )
+        require(sha256_file(path) == expected_hash, "gateway_file_hash_mismatch")
+
+    gateway_path = root / "bin" / "command_gateway.py"
+    launcher_path = root / "bin" / "session_launcher.py"
+    policy_path = root / "config" / "policy.json"
+    return root, gateway_path, launcher_path, policy_path
 
 
 def actions_context() -> tuple[str, str, str, str]:
@@ -528,15 +793,23 @@ def actions_context() -> tuple[str, str, str, str]:
     return sha, branch, run, attempt
 
 
-def launch(rules_root: Path, rules_sha: str) -> int:
+def launch(gateway_root: Path, rules_sha: str, bundle_run_attempt: str) -> int:
     sha, branch, run, attempt = actions_context()
     rules_sha = valid_sha(rules_sha, "rules_sha_invalid")
     require(rules_sha == RULES_SHA, "rules_sha_unapproved")
+    require(bundle_run_attempt.isdigit() and int(bundle_run_attempt) > 0,
+            "gateway_bundle_attempt_invalid")
     require_noteri()
-    rules_root, gateway_path, launcher_path, policy_path = validate_rules_checkout(
-        rules_root, rules_sha
+    workspace = Path(os.environ.get("GITHUB_WORKSPACE", ""))
+    require(workspace.is_absolute(), "github_workspace_invalid")
+    require(
+        same_path(gateway_root, workspace / GATEWAY_BUNDLE_NAME),
+        "gateway_bundle_root_unapproved",
     )
-    sys.path.insert(0, str(rules_root / "scripts"))
+    gateway_root, gateway_path, launcher_path, policy_path = validate_gateway_bundle(
+        gateway_root, rules_sha, sha, run, bundle_run_attempt
+    )
+    sys.path.insert(0, str(gateway_root / "bin"))
     try:
         import command_gateway as cg  # type: ignore[import-not-found]
     except ImportError:
@@ -547,6 +820,7 @@ def launch(rules_root: Path, rules_sha: str) -> int:
         Path(cg.__file__).resolve() == gateway_path.resolve(),
         "command_gateway_origin_mismatch",
     )
+    validate_gateway_bundle(gateway_root, rules_sha, sha, run, bundle_run_attempt)
     correlation = f"noteri-s3-artifact-{run}-{attempt}"
     session_id = correlation
     launched = run_process(
@@ -562,6 +836,7 @@ def launch(rules_root: Path, rules_sha: str) -> int:
         env=isolated_environment(),
     )
     require(launched.returncode == 0, "session_launch_failed")
+    validate_gateway_bundle(gateway_root, rules_sha, sha, run, bundle_run_attempt)
     try:
         session = json.loads(launched.stdout.strip().splitlines()[-1])
     except (IndexError, json.JSONDecodeError):
@@ -613,10 +888,16 @@ def parser() -> argparse.ArgumentParser:
     subparsers = result.add_subparsers(dest="mode", required=True)
     launch_parser = subparsers.add_parser("launch")
     launch_parser.add_argument("--confirm", required=True)
-    launch_parser.add_argument("--rules-root", required=True, type=Path)
+    launch_parser.add_argument("--gateway-root", required=True, type=Path)
+    launch_parser.add_argument("--bundle-run-attempt", required=True)
     launch_parser.add_argument("--rules-sha", required=True)
     contract_parser = subparsers.add_parser("verify-contract")
     contract_parser.add_argument("--worker-root", required=True, type=Path)
+    gateway_contract_parser = subparsers.add_parser("verify-gateway-contract")
+    gateway_contract_parser.add_argument("--rules-root", required=True, type=Path)
+    bundle_parser = subparsers.add_parser("build-gateway-bundle")
+    bundle_parser.add_argument("--rules-root", required=True, type=Path)
+    bundle_parser.add_argument("--output", required=True, type=Path)
     probe_parser = subparsers.add_parser("probe-import")
     probe_parser.add_argument("--site-root", required=True, type=Path)
     for name in ("qualify", "readback"):
@@ -637,9 +918,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if arguments.mode == "launch":
             require(arguments.confirm == CONFIRM, "confirmation_required")
-            return launch(arguments.rules_root, arguments.rules_sha)
+            return launch(
+                arguments.gateway_root, arguments.rules_sha, arguments.bundle_run_attempt
+            )
         if arguments.mode == "verify-contract":
             result = verify_contract(arguments.worker_root)
+        elif arguments.mode == "verify-gateway-contract":
+            result = verify_gateway_contract(arguments.rules_root)
+        elif arguments.mode == "build-gateway-bundle":
+            result = build_gateway_bundle(arguments.rules_root, arguments.output)
         elif arguments.mode == "probe-import":
             result = probe_import(arguments.site_root)
         elif arguments.mode == "qualify":

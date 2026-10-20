@@ -14,7 +14,12 @@ the Git worktree.
    execution is limited to an owner push on the dedicated feature prefix or an
    explicit owner workflow dispatch.
 3. Runtime, canonical rules and Worker Pool sources use full immutable commit
-   identifiers. All checkouts disable persisted credentials.
+   identifiers. The hosted route builds a minimal transient Gateway artifact
+   from the pinned rules checkout after checking the canonical manifest. The
+   physical route binds that artifact to the same repository, runtime SHA, run
+   and attempt and revalidates every file hash/size, avoiding a second rules
+   checkout and any assumption about the host's persistent Gateway. All
+   checkouts disable persisted credentials.
 4. The physical entrypoint requires Session Launcher, runner-version preflight
    and Command Gateway. A blocked gate has no shell fallback.
 5. The Worker Pool requirement is downloaded from the exact pinned commit and

@@ -8,9 +8,15 @@ O workflow `noteri-s3-artifact-profile.yml` separa dois gates:
 
 - o job hospedado confere o contrato no SHA imutável do Worker Pool e executa os
   controles positivos e negativos;
+- o job hospedado também produz, a partir do checkout imutável das regras, um
+  bundle mínimo do Gateway vinculado ao mesmo run e com hashes/tamanhos
+  conferidos contra o `MANIFEST.json` canônico;
 - o job físico, permitido somente em push do proprietário no prefixo dedicado ou
-  em dispatch explícito, usa Session Launcher, preflight de versão do runner e
-  Command Gateway antes de instalar qualquer pacote.
+  em dispatch explícito, baixa esse artifact do próprio run, valida novamente a
+  vinculação e todos os bytes e então usa Session Launcher, preflight de versão
+  do runner e Command Gateway antes de instalar qualquer pacote. Não há segundo
+  checkout remoto de regras no PC e o Gateway persistente do host não é
+  presumido atual nem modificado por esta qualificação.
 
 No host, o script baixa apenas `requirements-s3-artifact.txt` do commit fixado,
 confere o conteúdo byte a byte e executa pip com arquivos de configuração

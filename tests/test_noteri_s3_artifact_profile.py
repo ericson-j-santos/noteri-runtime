@@ -208,22 +208,157 @@ def test_requirements_hash_is_stable() -> None:
     assert len(hashlib.sha256(m.REQUIREMENTS_BYTES).hexdigest()) == 64
 
 
-def test_rules_checkout_rejects_tracked_drift(tmp_path: Path) -> None:
+def gateway_bundle_fixture(tmp_path: Path) -> Path:
+    root = tmp_path / m.GATEWAY_BUNDLE_NAME
+    payloads = {
+        "bin/command_gateway.py": b"gateway",
+        "bin/session_launcher.py": b"launcher",
+        "config/policy.json": b"{}",
+    }
+    files = {}
+    for relative, payload in payloads.items():
+        path = root.joinpath(*relative.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        files[relative] = {
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size": len(payload),
+        }
+    manifest = {
+        "schema_version": m.GATEWAY_BUNDLE_SCHEMA,
+        "repository": m.REPOSITORY,
+        "runtime_sha": "a" * 40,
+        "rules_sha": m.RULES_SHA,
+        "rules_version": m.RULES_VERSION,
+        "run_id": 10,
+        "run_attempt": 1,
+        "files": files,
+    }
+    (root / "bundle-manifest.json").write_text(json.dumps(manifest), encoding="ascii")
+    return root
+
+
+def test_gateway_manifest_contract_matches_embedded_files(tmp_path: Path) -> None:
     rules = tmp_path / "rules"
-    (rules / "scripts").mkdir(parents=True)
-    (rules / "config").mkdir()
-    (rules / "scripts" / "command_gateway.py").write_text("", encoding="utf-8")
-    (rules / "scripts" / "session_launcher.py").write_text("", encoding="utf-8")
-    (rules / "config" / "command-gateway.policy.json").write_text("{}", encoding="utf-8")
+    rules.mkdir()
+    entries = [
+        {"path": source, "sha256": m.GATEWAY_FILES[destination][0],
+         "size": m.GATEWAY_FILES[destination][1]}
+        for source, destination in m.GATEWAY_SOURCE_MAP.items()
+    ]
+    manifest = {"version": m.RULES_VERSION, "files": entries}
+    (rules / "MANIFEST.json").write_text(json.dumps(manifest), encoding="utf-8")
 
     def fake_git(_repo, *arguments):
-        if arguments == ("rev-parse", "HEAD"):
-            return m.RULES_SHA
-        return " M scripts/command_gateway.py"
+        return m.RULES_SHA if arguments == ("rev-parse", "HEAD") else ""
 
     with patch.object(m, "git", side_effect=fake_git):
-        with pytest.raises(m.Blocked, match="rules_checkout_dirty"):
-            m.validate_rules_checkout(rules, m.RULES_SHA)
+        result = m.verify_gateway_contract(rules)
+        assert result["managed_file_count"] == len(m.GATEWAY_FILES)
+        manifest["files"][0]["sha256"] = "0" * 64
+        (rules / "MANIFEST.json").write_text(json.dumps(manifest), encoding="utf-8")
+        with pytest.raises(m.Blocked, match="gateway_manifest_file_mismatch"):
+            m.verify_gateway_contract(rules)
+
+
+def test_gateway_bundle_accepts_only_exact_binding_and_bytes(tmp_path: Path) -> None:
+    root = gateway_bundle_fixture(tmp_path)
+    expected = {
+        relative: (metadata["sha256"], metadata["size"])
+        for relative, metadata in json.loads(
+            (root / "bundle-manifest.json").read_text(encoding="ascii")
+        )["files"].items()
+    }
+    with patch.object(m, "GATEWAY_FILES", expected):
+        _, gateway, launcher, policy = m.validate_gateway_bundle(
+            root, m.RULES_SHA, "a" * 40, "10", "1"
+        )
+        assert gateway == root / "bin" / "command_gateway.py"
+        assert launcher == root / "bin" / "session_launcher.py"
+        assert policy == root / "config" / "policy.json"
+        (root / "extra.py").write_text("unexpected", encoding="utf-8")
+        with pytest.raises(m.Blocked, match="gateway_bundle_file_set_invalid"):
+            m.validate_gateway_bundle(root, m.RULES_SHA, "a" * 40, "10", "1")
+        (root / "extra.py").unlink()
+        gateway.write_bytes(b"tampered")
+        with pytest.raises(m.Blocked, match="gateway_file_invalid|gateway_file_hash_mismatch"):
+            m.validate_gateway_bundle(root, m.RULES_SHA, "a" * 40, "10", "1")
+
+
+def test_gateway_bundle_rejects_stale_run_binding(tmp_path: Path) -> None:
+    root = gateway_bundle_fixture(tmp_path)
+    manifest_path = root / "bundle-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="ascii"))
+    expected = {
+        relative: (metadata["sha256"], metadata["size"])
+        for relative, metadata in manifest["files"].items()
+    }
+    manifest["run_id"] = 9
+    manifest_path.write_text(json.dumps(manifest), encoding="ascii")
+    with patch.object(m, "GATEWAY_FILES", expected):
+        with pytest.raises(m.Blocked, match="gateway_bundle_binding_mismatch"):
+            m.validate_gateway_bundle(root, m.RULES_SHA, "a" * 40, "10", "1")
+
+
+def test_gateway_bundle_rejects_symlink(tmp_path: Path) -> None:
+    root = gateway_bundle_fixture(tmp_path)
+    expected = {
+        relative: (metadata["sha256"], metadata["size"])
+        for relative, metadata in json.loads(
+            (root / "bundle-manifest.json").read_text(encoding="ascii")
+        )["files"].items()
+    }
+    (root / "linked.py").symlink_to(root / "bin" / "command_gateway.py")
+    with patch.object(m, "GATEWAY_FILES", expected):
+        with pytest.raises(m.Blocked, match="reparse_path_rejected"):
+            m.validate_gateway_bundle(root, m.RULES_SHA, "a" * 40, "10", "1")
+
+
+def test_build_gateway_bundle_binds_current_run(tmp_path: Path) -> None:
+    rules = tmp_path / "rules"
+    rules.mkdir()
+    source_map = {
+        "scripts/command_gateway.py": "bin/command_gateway.py",
+        "scripts/session_launcher.py": "bin/session_launcher.py",
+        "config/command-gateway.policy.json": "config/policy.json",
+    }
+    files = {}
+    entries = []
+    for index, (source, destination) in enumerate(source_map.items()):
+        raw = f"payload-{index}".encode("ascii")
+        path = rules.joinpath(*source.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+        digest = hashlib.sha256(raw).hexdigest()
+        files[destination] = (digest, len(raw))
+        entries.append({"path": source, "sha256": digest, "size": len(raw)})
+    (rules / "MANIFEST.json").write_text(
+        json.dumps({"version": m.RULES_VERSION, "files": entries}), encoding="utf-8"
+    )
+    environment = {
+        "GITHUB_ACTIONS": "true",
+        "GITHUB_REPOSITORY": m.REPOSITORY,
+        "GITHUB_ACTOR": m.OWNER,
+        "GITHUB_EVENT_NAME": "push",
+        "GITHUB_REF_TYPE": "branch",
+        "GITHUB_SHA": "a" * 40,
+        "GITHUB_REF_NAME": "feat/noteri-s3-artifact-test",
+        "GITHUB_RUN_ID": "10",
+        "GITHUB_RUN_ATTEMPT": "1",
+    }
+
+    def fake_git(_repo, *arguments):
+        return m.RULES_SHA if arguments == ("rev-parse", "HEAD") else ""
+
+    output = tmp_path / m.GATEWAY_BUNDLE_NAME
+    with patch.object(m, "GATEWAY_SOURCE_MAP", source_map), patch.object(
+        m, "GATEWAY_FILES", files
+    ), patch.object(m, "git", side_effect=fake_git), patch.dict(
+        m.os.environ, environment, clear=True
+    ):
+        result = m.build_gateway_bundle(rules, output)
+        assert result["result"] == "TRANSIENT_GATEWAY_BUNDLE_BUILT"
+        m.validate_gateway_bundle(output, m.RULES_SHA, "a" * 40, "10", "1")
 
 
 def test_actions_context_rejects_pr_and_non_owner() -> None:

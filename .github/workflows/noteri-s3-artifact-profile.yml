@@ -35,6 +35,9 @@ jobs:
     name: Validate host profile contract
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      gateway_bundle_name: ${{ steps.bundle_identity.outputs.name }}
+      gateway_bundle_attempt: ${{ steps.bundle_identity.outputs.attempt }}
     steps:
       - name: Checkout exact evaluated runtime SHA
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -50,6 +53,14 @@ jobs:
           path: _worker_pool
           fetch-depth: 1
           persist-credentials: false
+      - name: Checkout exact canonical Gateway contract
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
       - name: Set up test Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
@@ -58,8 +69,36 @@ jobs:
         run: python -m pip install --disable-pip-version-check pytest==8.4.2
       - name: Verify exact Worker Pool contract
         run: python -B scripts/noteri_s3_artifact_profile.py verify-contract --worker-root _worker_pool
+      - name: Verify exact canonical Gateway contract
+        run: python -B scripts/noteri_s3_artifact_profile.py verify-gateway-contract --rules-root _rules
       - name: Run positive and negative contract controls
         run: python -m pytest -q tests/test_noteri_s3_artifact_profile.py tests/test_noteri_s3_artifact_profile_workflow.py
+      - name: Bind transient Gateway bundle identity
+        id: bundle_identity
+        if: >-
+          github.actor == 'ericson-j-santos' &&
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        run: |
+          echo "name=noteri-gateway-bundle-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+          echo "attempt=${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+      - name: Build exact transient Gateway bundle
+        if: >-
+          github.actor == 'ericson-j-santos' &&
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        run: >-
+          python -B scripts/noteri_s3_artifact_profile.py build-gateway-bundle
+          --rules-root _rules --output _gateway_bundle
+      - name: Upload exact transient Gateway bundle
+        if: >-
+          github.actor == 'ericson-j-santos' &&
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.bundle_identity.outputs.name }}
+          path: _gateway_bundle
+          include-hidden-files: false
+          if-no-files-found: error
+          retention-days: 1
 
   physical:
     name: Qualify minimal S3 profile on Noteri
@@ -79,22 +118,20 @@ jobs:
           ref: ${{ env.EVALUATED_SHA }}
           fetch-depth: 1
           persist-credentials: false
-      - name: Checkout exact canonical operational rules
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Download exact transient Gateway bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          repository: ericson-j-santos/chatgpt-operational-rules
-          ref: ${{ env.RULES_SHA }}
-          path: _rules
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Verify governed host qualification
+          name: ${{ needs.contract.outputs.gateway_bundle_name }}
+          path: _gateway_bundle
+      - name: Verify transient Gateway and governed host qualification
         id: qualify
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           python3 -I -B scripts/noteri_s3_artifact_profile.py launch `
             --confirm QUALIFY-NOTERI-S3-ARTIFACT-PROFILE `
-            --rules-root _rules `
+            --gateway-root _gateway_bundle `
+            --bundle-run-attempt "${{ needs.contract.outputs.gateway_bundle_attempt }}" `
             --rules-sha "$env:RULES_SHA"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload sanitized profile evidence
