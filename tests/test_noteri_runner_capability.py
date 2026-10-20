@@ -80,3 +80,16 @@ def test_idempotency_conflict_is_blocked(tmp_path,monkeypatch):
     monkeypatch.setattr(module,"checkpoint_path",lambda key:target)
     with pytest.raises(module.CapabilityError,match="idempotency_conflict"):
         module.execute(validated())
+
+
+def test_emit_request_uses_closed_expected_parameters(tmp_path):
+    path=tmp_path/"request.json"
+    payload=module.emit_request(path=path,source_sha="a"*40,
+        correlation_id="runner-install-20261019",idempotency_key="runner-install-20261019",
+        confirm=module.CONFIRM)
+    saved=json.loads(path.read_text(encoding="utf-8"))
+    assert saved["params"]==module.EXPECTED_PARAMS
+    assert saved["capability"]=="runner.install"
+    assert saved["target_host"]=="Noteri"
+    assert saved["environment"]=="dev"
+    assert payload=={k:v for k,v in saved.items() if k!="completed_at"}
