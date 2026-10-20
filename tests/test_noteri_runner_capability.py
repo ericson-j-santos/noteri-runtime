@@ -64,7 +64,7 @@ def test_readback_failure_does_not_write_success_checkpoint(tmp_path,monkeypatch
 
 
 def test_replay_revalidates_identity_and_api(tmp_path,monkeypatch):
-    target=tmp_path/"receipt.json";target.parent.mkdir(parents=True)
+    target=tmp_path/"receipt.json"
     target.write_text(json.dumps({"request_sha256":"b"*64,"status":"completed"}),encoding="utf-8")
     monkeypatch.setattr(module,"checkpoint_path",lambda key:target)
     monkeypatch.setattr(module.runner,"dedicated_home",lambda:tmp_path)
