@@ -6,7 +6,7 @@ não comprova conectividade ou pickup no GitHub. O caminho legado de registro
 continua separado; sua execução não foi homologada por este incremento.
 """
 from __future__ import annotations
-import argparse,json,os,shutil,socket,subprocess,time
+import argparse,json,os,shutil,socket,subprocess,time,zipfile
 import hashlib
 import stat
 from urllib.parse import urlsplit
@@ -15,10 +15,15 @@ from pathlib import Path
 EXPECTED_HOST="Noteri"
 EXPECTED_REPOSITORY="ericson-j-santos/noteri-runtime"
 EXPECTED_URL="https://github.com/ericson-j-santos/noteri-runtime"
-EXPECTED_NAME="Noteri"
-EXPECTED_LABELS=("noteri","reqsys-dev")
+EXPECTED_NAME="Noteri-runtime"
+EXPECTED_LABELS=("noteri","reqsys-dev","noteri-runtime")
 CONFIRM="REREGISTER-NOTERI-RUNNER"
 EXPECTED_GITHUB_LOGIN="ericson-j-santos"
+RUNNER_VERSION="2.338.0"
+RUNNER_PACKAGE_NAME=f"actions-runner-win-x64-{RUNNER_VERSION}.zip"
+RUNNER_PACKAGE_SHA256="f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f"
+RUNNER_PACKAGE_SIZE=104063355
+CONTROL_SCHEMA="noteri-runtime-runner/v1"
 
 class BootstrapError(RuntimeError): pass
 
@@ -90,6 +95,108 @@ def validate_home(root: Path) -> Path:
             raise BootstrapError("runner_home incompleto")
     return root.resolve()
 
+
+def local_root() -> Path:
+    local=os.environ.get("LOCALAPPDATA")
+    if not local: raise BootstrapError("localappdata_missing")
+    return Path(local)/"ReqSys"
+
+def runner_package_path() -> Path:
+    return local_root()/RUNNER_PACKAGE_NAME
+
+def dedicated_home() -> Path:
+    return local_root()/"NoteriRuntimeRunner"
+
+def control_root() -> Path:
+    return local_root()/"NoteriRuntimeRunnerControl"
+
+def _sha256_file(path:Path)->str:
+    digest=hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda:handle.read(1024*1024),b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def verify_package(path:Path)->dict:
+    _regular_path(path)
+    info=path.stat()
+    if not stat.S_ISREG(info.st_mode): raise BootstrapError("runner_package_not_regular")
+    if info.st_size!=RUNNER_PACKAGE_SIZE: raise BootstrapError("runner_package_size_mismatch")
+    digest=_sha256_file(path)
+    if digest!=RUNNER_PACKAGE_SHA256: raise BootstrapError("runner_package_hash_mismatch")
+    return {"version":RUNNER_VERSION,"sha256":digest,"size":info.st_size}
+
+def _safe_member(name:str)->Path:
+    normalized=name.replace("\\","/")
+    value=Path(normalized)
+    if not normalized or normalized.startswith("/") or ":" in value.parts[0] or any(part in ("","..") for part in value.parts):
+        raise BootstrapError("runner_archive_path_invalid")
+    return value
+
+def extract_package(package:Path,destination:Path)->None:
+    if destination.exists(): raise BootstrapError("runner_destination_exists")
+    staging=destination.with_name(destination.name+".stage")
+    if staging.exists(): raise BootstrapError("runner_staging_exists")
+    staging.mkdir(parents=True)
+    try:
+        with zipfile.ZipFile(package,"r") as archive:
+            for info in archive.infolist():
+                relative=_safe_member(info.filename)
+                unix_mode=(info.external_attr>>16)&0xFFFF
+                if stat.S_ISLNK(unix_mode): raise BootstrapError("runner_archive_link_rejected")
+                target=staging.joinpath(*relative.parts)
+                if info.is_dir():
+                    target.mkdir(parents=True,exist_ok=True);continue
+                target.parent.mkdir(parents=True,exist_ok=True)
+                with archive.open(info,"r") as source,target.open("wb") as output:
+                    shutil.copyfileobj(source,output,1024*1024)
+        validate_home(staging)
+        os.replace(staging,destination)
+    except Exception:
+        if staging.exists(): shutil.rmtree(staging,ignore_errors=True)
+        raise
+
+def runner_version(root:Path)->str:
+    listener=root/"bin"/"Runner.Listener.exe"
+    cp=subprocess.run([str(listener),"--version"],cwd=str(root),capture_output=True,text=True,
+        encoding="utf-8",errors="replace",timeout=30,check=False)
+    version=cp.stdout.strip().splitlines()[-1] if cp.returncode==0 and cp.stdout.strip() else ""
+    if version!=RUNNER_VERSION: raise BootstrapError("runner_version_mismatch")
+    return version
+
+def _atomic_json(path:Path,payload:dict)->None:
+    path.parent.mkdir(parents=True,exist_ok=True)
+    tmp=path.with_suffix(path.suffix+".tmp")
+    tmp.write_text(json.dumps(payload,sort_keys=True)+"\n",encoding="utf-8")
+    os.replace(tmp,path)
+
+def prepare_dedicated_home()->tuple[Path,bool]:
+    package=runner_package_path()
+    package_info=verify_package(package)
+    root=dedicated_home()
+    if root.exists():
+        validate_home(root);runner_version(root)
+        return root,False
+    extract_package(package,root)
+    runner_version(root)
+    _atomic_json(root/"package-receipt.json",{"schema_version":"1",**package_info})
+    return root,True
+
+def write_control_metadata(root:Path,*,source_sha:str,correlation_id:str,idempotency_key:str)->dict:
+    if not isinstance(source_sha,str) or len(source_sha)!=40 or any(c not in "0123456789abcdef" for c in source_sha):
+        raise BootstrapError("source_sha_invalid")
+    for value,code in ((correlation_id,"correlation_id_invalid"),(idempotency_key,"idempotency_key_invalid")):
+        if not isinstance(value,str) or not 8<=len(value)<=128 or any(not(c.isalnum() or c in "_.:-") for c in value):
+            raise BootstrapError(code)
+    identity=local_identity(root)
+    if identity is None: raise BootstrapError("runner_marker_missing")
+    payload={"schema_version":CONTROL_SCHEMA,"enabled":True,"host":EXPECTED_HOST,
+        "repository":EXPECTED_REPOSITORY,"runner_name":EXPECTED_NAME,"runner_home":str(root),
+        "labels":list(EXPECTED_LABELS),"source_sha":source_sha,"correlation_id":correlation_id,
+        "idempotency_key":idempotency_key,"package_sha256":RUNNER_PACKAGE_SHA256,
+        "runner_version":RUNNER_VERSION,"identity":identity}
+    _atomic_json(control_root()/"metadata.json",payload)
+    return payload
 
 def local_identity(root: Path) -> dict | None:
     """Only .runner metadata is opened; no credentials or logs are read."""
@@ -210,9 +317,9 @@ def configure(root:Path,gh:Path)->None:
     child_env=gh_env()
     child_env["ACTIONS_RUNNER_INPUT_TOKEN"]=token
     try:
-        cmd=[str(root/"config.cmd"),"--unattended","--url",EXPECTED_URL,
+        cmd=[str(root/"bin"/"Runner.Listener.exe"),"configure","--unattended","--url",EXPECTED_URL,
              "--name",EXPECTED_NAME,"--labels",",".join(EXPECTED_LABELS),
-             "--work","_work"]
+             "--work","_work","--disableupdate"]
         r=subprocess.run(cmd,cwd=str(root),env=child_env,capture_output=True,text=True,
                          encoding="utf-8",errors="replace",timeout=120,check=False)
     finally:
@@ -221,25 +328,48 @@ def configure(root:Path,gh:Path)->None:
     if r.returncode!=0: raise BootstrapError(f"config_failed:{classify_current_diag(root,before)}")
     if not configured(root): raise BootstrapError("runner_marker_missing")
 
-def start(root:Path)->None:
+def start(root:Path)->int:
     try:
-        subprocess.Popen([str(root/"run.cmd")],cwd=str(root),stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+        process=subprocess.Popen([str(root/"bin"/"Runner.Listener.exe"),"run"],cwd=str(root),
+                         stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
                          creationflags=subprocess.CREATE_NEW_PROCESS_GROUP|subprocess.DETACHED_PROCESS,
                          close_fds=True)
     except OSError as exc:
         raise BootstrapError("listener_failed") from exc
+    time.sleep(1.0)
+    if process.poll() is not None: raise BootstrapError("listener_failed")
+    return int(process.pid)
 
 def main()->int:
     p=argparse.ArgumentParser()
     source=p.add_mutually_exclusive_group(required=True)
     source.add_argument("--runner-home",type=Path)
     source.add_argument("--inspect-installed",action="store_true")
+    source.add_argument("--install-dedicated",action="store_true")
     p.add_argument("--inspect-only",action="store_true")
+    p.add_argument("--source-sha")
+    p.add_argument("--correlation-id")
+    p.add_argument("--idempotency-key")
     p.add_argument("--repository",default=EXPECTED_REPOSITORY); p.add_argument("--confirm",required=True)
     a=p.parse_args()
     try:
         validate(socket.gethostname(),a.repository,a.confirm)
+        if a.install_dedicated:
+            root,prepared=prepare_dedicated_home()
+            identity=local_identity(root)
+            registered=False
+            listener_pid=None
+            if identity is None:
+                gh=find_gh();configure(root,gh);registered=True;identity=local_identity(root)
+                listener_pid=start(root)
+            metadata=write_control_metadata(root,source_sha=a.source_sha or "",
+                correlation_id=a.correlation_id or "",idempotency_key=a.idempotency_key or "")
+            out={"ok":True,"result":"RUNNER_DEDICATED_INSTALLED","host":EXPECTED_HOST,
+                 **identity,"prepared_now":prepared,"registered_now":registered,
+                 "listener_pid":listener_pid,"metadata_written":True,
+                 "token_persisted":False,"registration_changed":registered}
+            out.update(actions_qualified=False,hml_verified=False)
+            print(json.dumps(out,sort_keys=True));return 0
         root=installed_home() if a.inspect_installed else validate_home(a.runner_home)
         identity=local_identity(root)
         if identity is not None:
@@ -260,7 +390,11 @@ def main()->int:
                  "config_failed:http_404","config_failed:already_configured","config_failed:network",
                  "config_failed:diag_unavailable","config_failed:runner_error",
                  "runner_marker_missing","listener_failed",
-                 "host invalido","repositorio invalido","confirmacao invalida")
+                 "host invalido","repositorio invalido","confirmacao invalida",
+                 "localappdata_missing","runner_package_not_regular","runner_package_size_mismatch",
+                 "runner_package_hash_mismatch","runner_archive_path_invalid","runner_archive_link_rejected",
+                 "runner_destination_exists","runner_staging_exists","runner_version_mismatch",
+                 "source_sha_invalid","correlation_id_invalid","idempotency_key_invalid")
         allowed += IDENTITY_ERRORS
         state=next((item for item in allowed if reason == item),"bootstrap_failed")
         print(json.dumps({"ok":False,"result":"RUNNER_REREGISTRATION_BLOCKED",
