@@ -108,13 +108,46 @@ def execute(validated:dict[str,Any])->dict[str,Any]:
     return output
 
 
+def emit_request(*,path:Path,source_sha:str,correlation_id:str,idempotency_key:str,confirm:str)->dict[str,Any]:
+    payload={
+        "schema_version":contract.SCHEMA,
+        "capability":CAPABILITY,
+        "target_host":"Noteri",
+        "environment":"dev",
+        "source_sha":source_sha,
+        "correlation_id":correlation_id,
+        "idempotency_key":idempotency_key,
+        "confirmation":confirm,
+        "params":dict(EXPECTED_PARAMS),
+    }
+    contract.validate_request(payload,capability=CAPABILITY,
+        allowed_environments={"local","dev"},expected_source_sha=source_sha,
+        allowed_params=set(EXPECTED_PARAMS),required_params=set(EXPECTED_PARAMS),
+        expected_confirmation=CONFIRM)
+    contract.atomic_receipt(path,payload)
+    return payload
+
+
 def main()->int:
     p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument("mode",choices=["emit","execute"])
     p.add_argument("--request",type=Path,required=True)
-    p.add_argument("--receipt",type=Path,required=True)
+    p.add_argument("--receipt",type=Path)
+    p.add_argument("--source-sha")
+    p.add_argument("--correlation-id")
+    p.add_argument("--idempotency-key")
+    p.add_argument("--confirm")
     a=p.parse_args()
     try:
-        raw=read_request(a.request);sha=repo_head()
+        sha=repo_head()
+        if a.mode=="emit":
+            result=emit_request(path=a.request,source_sha=a.source_sha or "",
+                correlation_id=a.correlation_id or "",idempotency_key=a.idempotency_key or "",
+                confirm=a.confirm or "")
+            print(json.dumps({"status":"request_emitted","request_sha256":contract.canonical_request_digest(result),
+                "source_sha":sha,"capability":CAPABILITY},sort_keys=True));return 0
+        if a.receipt is None: raise CapabilityError("receipt_required")
+        raw=read_request(a.request)
         validated=contract.validate_request(raw,capability=CAPABILITY,
             allowed_environments={"local","dev"},expected_source_sha=sha,
             allowed_params=set(EXPECTED_PARAMS),required_params=set(EXPECTED_PARAMS),
