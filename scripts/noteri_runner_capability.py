@@ -124,7 +124,7 @@ def emit_request(*,path:Path,source_sha:str,correlation_id:str,idempotency_key:s
         allowed_environments={"local","dev"},expected_source_sha=source_sha,
         allowed_params=set(EXPECTED_PARAMS),required_params=set(EXPECTED_PARAMS),
         expected_confirmation=CONFIRM)
-    contract.atomic_receipt(path,payload)
+    contract.atomic_request(path,payload)
     return payload
 
 

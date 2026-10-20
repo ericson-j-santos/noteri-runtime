@@ -86,12 +86,20 @@ def validate_request(
     }
 
 
-def atomic_receipt(path: Path, payload: Mapping[str, Any]) -> None:
+def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
     path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = dict(payload)
-    data["completed_at"] = datetime.now(timezone.utc).isoformat()
-    encoded = json.dumps(data, sort_keys=True, ensure_ascii=True) + "\n"
+    encoded = json.dumps(dict(payload), sort_keys=True, ensure_ascii=True) + "\n"
     temp = path.with_name(path.name + ".tmp")
     temp.write_text(encoded, encoding="utf-8")
     temp.replace(path)
+
+
+def atomic_request(path: Path, payload: Mapping[str, Any]) -> None:
+    _atomic_json(path, payload)
+
+
+def atomic_receipt(path: Path, payload: Mapping[str, Any]) -> None:
+    data = dict(payload)
+    data["completed_at"] = datetime.now(timezone.utc).isoformat()
+    _atomic_json(path, data)

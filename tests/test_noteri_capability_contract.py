@@ -98,3 +98,12 @@ def test_receipt_is_atomic_and_contains_completion_time(tmp_path):
     assert saved["correlation_id"] == "runner-install-20261019"
     assert "completed_at" in saved
     assert not target.with_name(target.name + ".tmp").exists()
+
+
+def test_atomic_request_does_not_add_receipt_metadata(tmp_path):
+    target=tmp_path/"request.json"
+    payload={"schema_version":module.SCHEMA,"capability":"runner.install"}
+    module.atomic_request(target,payload)
+    saved=json.loads(target.read_text(encoding="utf-8"))
+    assert saved==payload
+    assert "completed_at" not in saved
