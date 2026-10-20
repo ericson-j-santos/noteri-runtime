@@ -156,6 +156,25 @@ def extract_package(package:Path,destination:Path)->None:
         if staging.exists(): shutil.rmtree(staging,ignore_errors=True)
         raise
 
+def verify_extracted_files(package:Path,root:Path)->None:
+    required=("config.cmd","run.cmd","bin/Runner.Listener.exe")
+    with zipfile.ZipFile(package,"r") as archive:
+        names=set(archive.namelist())
+        for name in required:
+            if name not in names: raise BootstrapError("runner_package_contract_missing")
+            expected=hashlib.sha256(archive.read(name)).hexdigest()
+            target=root.joinpath(*name.split("/"))
+            if not target.is_file() or _sha256_file(target)!=expected:
+                raise BootstrapError("runner_extracted_hash_mismatch")
+
+def verify_package_receipt(root:Path,package_info:dict)->None:
+    receipt=root/"package-receipt.json"
+    if not receipt.is_file(): raise BootstrapError("runner_package_receipt_missing")
+    try: value=json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError,ValueError): raise BootstrapError("runner_package_receipt_invalid") from None
+    expected={"schema_version":"1",**package_info}
+    if value!=expected: raise BootstrapError("runner_package_receipt_invalid")
+
 def runner_version(root:Path)->str:
     listener=root/"bin"/"Runner.Listener.exe"
     cp=subprocess.run([str(listener),"--version"],cwd=str(root),capture_output=True,text=True,
@@ -175,11 +194,13 @@ def prepare_dedicated_home()->tuple[Path,bool]:
     package_info=verify_package(package)
     root=dedicated_home()
     if root.exists():
-        validate_home(root);runner_version(root)
+        validate_home(root);runner_version(root);verify_extracted_files(package,root)
+        verify_package_receipt(root,package_info)
         return root,False
     extract_package(package,root)
-    runner_version(root)
+    runner_version(root);verify_extracted_files(package,root)
     _atomic_json(root/"package-receipt.json",{"schema_version":"1",**package_info})
+    verify_package_receipt(root,package_info)
     return root,True
 
 def write_control_metadata(root:Path,*,source_sha:str,correlation_id:str,idempotency_key:str)->dict:
@@ -394,6 +415,8 @@ def main()->int:
                  "localappdata_missing","runner_package_not_regular","runner_package_size_mismatch",
                  "runner_package_hash_mismatch","runner_archive_path_invalid","runner_archive_link_rejected",
                  "runner_destination_exists","runner_staging_exists","runner_version_mismatch",
+                 "runner_package_contract_missing","runner_extracted_hash_mismatch",
+                 "runner_package_receipt_missing","runner_package_receipt_invalid",
                  "source_sha_invalid","correlation_id_invalid","idempotency_key_invalid")
         allowed += IDENTITY_ERRORS
         state=next((item for item in allowed if reason == item),"bootstrap_failed")
