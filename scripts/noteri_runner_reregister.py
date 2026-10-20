@@ -6,9 +6,10 @@ não comprova conectividade ou pickup no GitHub. O caminho legado de registro
 continua separado; sua execução não foi homologada por este incremento.
 """
 from __future__ import annotations
-import argparse,json,os,shutil,socket,subprocess,time,zipfile
+import argparse,json,os,shutil,socket,subprocess,time,zipfile,sys,getpass,ctypes
 import hashlib
 import stat
+from datetime import datetime,timezone,timedelta
 from urllib.parse import urlsplit
 from pathlib import Path
 
@@ -24,6 +25,17 @@ RUNNER_PACKAGE_NAME=f"actions-runner-win-x64-{RUNNER_VERSION}.zip"
 RUNNER_PACKAGE_SHA256="f48e0750a21812bca5f82de5f7f5aeae71abee647fab5a582f1742d07eba455f"
 RUNNER_PACKAGE_SIZE=104063355
 CONTROL_SCHEMA="noteri-runtime-runner/v1"
+KEEPALIVE_TASK="ReqSys-NoteriRuntimeRunnerKeepalive"
+RUN_VALUE_NAME="ReqSysNoteriRuntimeRunnerKeepalive"
+RUN_KEY=r"Software\Microsoft\Windows\CurrentVersion\Run"
+TASK_TRIGGER_BOOT=8
+TASK_TRIGGER_DAILY=2
+TASK_ACTION_EXEC=0
+TASK_LOGON_S4U=2
+TASK_RUNLEVEL_LUA=0
+TASK_CREATE_OR_UPDATE=6
+TASK_INSTANCES_IGNORE_NEW=2
+PROCESS_QUERY_LIMITED_INFORMATION=0x1000
 
 class BootstrapError(RuntimeError): pass
 
@@ -211,13 +223,119 @@ def write_control_metadata(root:Path,*,source_sha:str,correlation_id:str,idempot
             raise BootstrapError(code)
     identity=local_identity(root)
     if identity is None: raise BootstrapError("runner_marker_missing")
+    previous=read_control_metadata()
     payload={"schema_version":CONTROL_SCHEMA,"enabled":True,"host":EXPECTED_HOST,
         "repository":EXPECTED_REPOSITORY,"runner_name":EXPECTED_NAME,"runner_home":str(root),
         "labels":list(EXPECTED_LABELS),"source_sha":source_sha,"correlation_id":correlation_id,
         "idempotency_key":idempotency_key,"package_sha256":RUNNER_PACKAGE_SHA256,
-        "runner_version":RUNNER_VERSION,"identity":identity}
+        "runner_version":RUNNER_VERSION,"identity":identity,
+        "runner_pid":previous.get("runner_pid"),"restarts":int(previous.get("restarts") or 0)}
     _atomic_json(control_root()/"metadata.json",payload)
     return payload
+
+def _utc_now()->str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _process_image(pid:int)->str|None:
+    if os.name!="nt" or type(pid) is not int or pid<=0: return None
+    kernel32=ctypes.windll.kernel32
+    handle=kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,False,pid)
+    if not handle: return None
+    try:
+        size=ctypes.c_ulong(32768);buf=ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle,0,buf,ctypes.byref(size)): return None
+        return buf.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+def process_matches(pid:int,listener:Path)->bool:
+    observed=_process_image(pid)
+    if not observed: return False
+    try: return Path(observed).resolve()==listener.resolve()
+    except OSError: return False
+
+def read_control_metadata()->dict:
+    path=control_root()/"metadata.json"
+    if not path.is_file(): return {}
+    try: value=json.loads(path.read_text(encoding="utf-8"))
+    except (OSError,ValueError): return {}
+    return value if isinstance(value,dict) else {}
+
+def update_listener_metadata(pid:int,restarts:int)->dict:
+    metadata=read_control_metadata()
+    if metadata.get("schema_version")!=CONTROL_SCHEMA: raise BootstrapError("control_metadata_invalid")
+    metadata.update({"runner_pid":pid,"restarts":restarts,"runner_last_started_at":_utc_now()})
+    _atomic_json(control_root()/"metadata.json",metadata)
+    return metadata
+
+def ensure_listener(root:Path)->dict:
+    identity=local_identity(root)
+    if identity is None: raise BootstrapError("runner_marker_missing")
+    metadata=read_control_metadata()
+    prior_pid=metadata.get("runner_pid")
+    restarts=int(metadata.get("restarts") or 0)
+    listener=root/"bin"/"Runner.Listener.exe"
+    if type(prior_pid) is int and process_matches(prior_pid,listener):
+        return {"runner_pid":prior_pid,"reused":True,"restarts":restarts}
+    pid=start(root);restarts+=1;update_listener_metadata(pid,restarts)
+    return {"runner_pid":pid,"reused":False,"restarts":restarts}
+
+def _scheduler():
+    try: import win32com.client
+    except ImportError as exc: raise BootstrapError("pywin32_missing") from exc
+    service=win32com.client.Dispatch("Schedule.Service");service.Connect();return service
+
+def _current_user_id()->str:
+    computer=socket.gethostname().strip();user=getpass.getuser().strip()
+    if not computer or not user: raise BootstrapError("windows_identity_missing")
+    return f"{computer}\\{user}"
+
+def _stable_script()->Path:
+    target=control_root()/"runtime";target.mkdir(parents=True,exist_ok=True)
+    source=Path(__file__).resolve();destination=target/"noteri_runner_reregister.py"
+    shutil.copy2(source,destination)
+    if _sha256_file(source)!=_sha256_file(destination): raise BootstrapError("stable_script_hash_mismatch")
+    return destination
+
+def _keepalive_command(script:Path)->str:
+    return subprocess.list2cmdline([str(script),"--keepalive-dedicated","--confirm",CONFIRM])
+
+def install_run_key(script:Path)->dict:
+    if os.name!="nt": raise BootstrapError("windows_required")
+    import winreg
+    command=f'"{sys.executable}" {_keepalive_command(script)}'
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER,RUN_KEY,0,winreg.KEY_SET_VALUE) as key:
+        winreg.SetValueEx(key,RUN_VALUE_NAME,0,winreg.REG_SZ,command)
+    return {"mode":"hkcu_run","requires_user_logon":True}
+
+def install_keepalive()->dict:
+    script=_stable_script()
+    try:
+        service=_scheduler();root=service.GetFolder("\\");definition=service.NewTask(0)
+        definition.RegistrationInfo.Description="noteri-runtime GitHub runner keepalive"
+        definition.Settings.Enabled=True;definition.Settings.StartWhenAvailable=True
+        definition.Settings.DisallowStartIfOnBatteries=False;definition.Settings.StopIfGoingOnBatteries=False
+        definition.Settings.MultipleInstances=TASK_INSTANCES_IGNORE_NEW;definition.Settings.ExecutionTimeLimit="PT2M"
+        boot=definition.Triggers.Create(TASK_TRIGGER_BOOT);boot.Enabled=True;boot.Delay="PT20S"
+        daily=definition.Triggers.Create(TASK_TRIGGER_DAILY);daily.Enabled=True
+        daily.StartBoundary=(datetime.now().astimezone()+timedelta(seconds=30)).replace(microsecond=0).isoformat()
+        daily.DaysInterval=1;daily.Repetition.Interval="PT5M";daily.Repetition.Duration="P1D"
+        daily.Repetition.StopAtDurationEnd=False
+        action=definition.Actions.Create(TASK_ACTION_EXEC);action.Path=sys.executable
+        action.Arguments=_keepalive_command(script);action.WorkingDirectory=str(script.parent)
+        principal=definition.Principal;principal.UserId=_current_user_id()
+        principal.LogonType=TASK_LOGON_S4U;principal.RunLevel=TASK_RUNLEVEL_LUA
+        root.RegisterTaskDefinition(KEEPALIVE_TASK,definition,TASK_CREATE_OR_UPDATE,
+            principal.UserId,"",TASK_LOGON_S4U)
+        task=root.GetTask(KEEPALIVE_TASK)
+        return {"mode":"task_s4u_limited","requires_user_logon":False,"task":KEEPALIVE_TASK,
+            "enabled":bool(task.Enabled),"run_level":"limited"}
+    except Exception as exc:
+        text=repr(exc).casefold()
+        if "access" in text or "-2147024891" in text or "acesso negado" in text or isinstance(exc,ImportError):
+            return install_run_key(script)
+        if isinstance(exc,BootstrapError) and str(exc)=="pywin32_missing": return install_run_key(script)
+        raise
 
 def local_identity(root: Path) -> dict | None:
     """Only .runner metadata is opened; no credentials or logs are read."""
@@ -371,11 +489,14 @@ def install_dedicated(*,source_sha:str,correlation_id:str,idempotency_key:str)->
         listener_pid=start(root)
     metadata=write_control_metadata(root,source_sha=source_sha,
         correlation_id=correlation_id,idempotency_key=idempotency_key)
+    if listener_pid is not None: metadata=update_listener_metadata(listener_pid,int(metadata.get("restarts") or 0)+1)
+    persistence=install_keepalive()
     return {"ok":True,"result":"RUNNER_DEDICATED_INSTALLED","host":EXPECTED_HOST,
             **identity,"prepared_now":prepared,"registered_now":registered,
             "listener_pid":listener_pid,"metadata_written":True,
             "token_persisted":False,"registration_changed":registered,
-            "metadata":metadata,"actions_qualified":False,"hml_verified":False}
+            "metadata":metadata,"persistence":persistence,
+            "actions_qualified":False,"hml_verified":False}
 
 def main()->int:
     p=argparse.ArgumentParser()
@@ -383,6 +504,7 @@ def main()->int:
     source.add_argument("--runner-home",type=Path)
     source.add_argument("--inspect-installed",action="store_true")
     source.add_argument("--install-dedicated",action="store_true")
+    source.add_argument("--keepalive-dedicated",action="store_true")
     p.add_argument("--inspect-only",action="store_true")
     p.add_argument("--source-sha")
     p.add_argument("--correlation-id")
@@ -394,6 +516,11 @@ def main()->int:
         if a.install_dedicated:
             out=install_dedicated(source_sha=a.source_sha or "",
                 correlation_id=a.correlation_id or "",idempotency_key=a.idempotency_key or "")
+            print(json.dumps(out,sort_keys=True));return 0
+        if a.keepalive_dedicated:
+            root=dedicated_home();validate_home(root);state=ensure_listener(root)
+            out={"ok":True,"result":"RUNNER_KEEPALIVE_OK","host":EXPECTED_HOST,
+                 **state,"actions_qualified":False,"hml_verified":False}
             print(json.dumps(out,sort_keys=True));return 0
         root=installed_home() if a.inspect_installed else validate_home(a.runner_home)
         identity=local_identity(root)
@@ -421,7 +548,9 @@ def main()->int:
                  "runner_destination_exists","runner_staging_exists","runner_version_mismatch",
                  "runner_package_contract_missing","runner_extracted_hash_mismatch",
                  "runner_package_receipt_missing","runner_package_receipt_invalid",
-                 "source_sha_invalid","correlation_id_invalid","idempotency_key_invalid")
+                 "source_sha_invalid","correlation_id_invalid","idempotency_key_invalid",
+                 "control_metadata_invalid","pywin32_missing","windows_identity_missing",
+                 "stable_script_hash_mismatch","windows_required")
         allowed += IDENTITY_ERRORS
         state=next((item for item in allowed if reason == item),"bootstrap_failed")
         print(json.dumps({"ok":False,"result":"RUNNER_REREGISTRATION_BLOCKED",
