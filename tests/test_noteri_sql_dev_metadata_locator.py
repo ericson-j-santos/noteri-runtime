@@ -137,3 +137,37 @@ def test_replay_deterministic():
     left = m.inspect_connection(Connection())
     right = m.inspect_connection(Connection())
     assert left == right
+
+
+@pytest.mark.parametrize("state,details,expected", [
+    ("08001", "SSL Provider: certificate chain not trusted", "tls_certificate_validation_failed"),
+    ("08001", "cadeia de certificados inválida", "tls_certificate_validation_failed"),
+    ("28000", "Login failed user=private", "integrated_authentication_rejected"),
+    ("HYT00", "timeout to private-host", "sql_connection_timeout"),
+    ("IM002", "data source absent", "odbc_driver_configuration_unavailable"),
+    ("08S01", "connection unexpectedly closed", "sql_transport_or_tls_unavailable"),
+    ("42000", "denied", "sql_metadata_permission_rejected"),
+    ("XXXXX", "secret=not-for-logs", "odbc_error_unclassified"),
+])
+def test_driver_error_classification_is_sanitized(state, details, expected):
+    class DriverError(Exception):
+        pass
+    error = DriverError(state, details)
+    classification = m.classify_odbc_error(error)
+    assert classification == expected
+    assert details not in classification
+    assert "private" not in classification
+
+
+def test_guarded_connection_blocks_without_leaking_driver_diagnostics():
+    def fake_connect(*_args, **_kwargs):
+        raise RuntimeError("08001", "PWD=do-not-echo host=private")
+    with pytest.raises(m.Blocked) as exc:
+        m.guarded_connect(fake_connect, m.ODBC_LOCAL, timeout=5)
+    assert str(exc.value) == "odbc_error_unclassified"
+    assert "do-not-echo" not in str(exc.value)
+
+
+def test_guarded_connection_allows_successful_connect_without_mutation():
+    sentinel = object()
+    assert m.guarded_connect(lambda *_a, **_kw: sentinel, m.ODBC_LOCAL) is sentinel
