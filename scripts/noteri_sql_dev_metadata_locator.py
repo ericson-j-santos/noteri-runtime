@@ -116,6 +116,34 @@ def collect(expected_sha: str, correlation_id: str, connect: Callable[..., Any])
     }
 
 
+def classify_odbc_error(exc: Exception) -> str:
+    """Categorize a driver failure without emitting driver text or SQL identifiers."""
+    parts = getattr(exc, "args", ())
+    first = str(parts[0]).strip().upper() if parts else ""
+    state = first if re.fullmatch(r"[A-Z0-9]{5}", first) else ""
+    details = " ".join(str(part) for part in parts).casefold()
+    if any(word in details for word in ("certificate", "certificad")):
+        return "tls_certificate_validation_failed"
+    if state == "28000":
+        return "integrated_authentication_rejected"
+    if state in {"HYT00", "HYT01"}:
+        return "sql_connection_timeout"
+    if state in {"IM002", "IM003"}:
+        return "odbc_driver_configuration_unavailable"
+    if state in {"08001", "08004", "08S01"}:
+        return "sql_transport_or_tls_unavailable"
+    if state == "42000":
+        return "sql_metadata_permission_rejected"
+    return "odbc_error_unclassified"
+
+
+def guarded_connect(connect: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    try:
+        return connect(*args, **kwargs)
+    except Exception as exc:
+        raise Blocked(classify_odbc_error(exc)) from None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-sha", required=True)
@@ -124,7 +152,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         import pyodbc
         pyodbc.pooling = False
-        result = collect(args.expected_sha, args.correlation_id, pyodbc.connect)
+        result = collect(args.expected_sha, args.correlation_id,
+                         lambda *a, **k: guarded_connect(pyodbc.connect, *a, **k))
         code = 0
     except Blocked as exc:
         result = {"status": "blocked", "code": str(exc),
