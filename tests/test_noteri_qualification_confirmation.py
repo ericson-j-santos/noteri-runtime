@@ -32,5 +32,5 @@ if __name__ == "__main__":
 class WorkflowPinTests(unittest.TestCase):
     def test_probe_pins_canonical_rules_main_and_not_old_candidate(self):
         workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "noteri-control-plane-probe.yml").read_text(encoding="utf-8")
-        self.assertIn("RULES_SHA: 259b51d076939033cc9060a7d24ae352e10fe6a6", workflow)
+        self.assertIn("RULES_SHA: 6edb5990c777d487c41fb9ee48ccbf411b11d661", workflow)
         self.assertNotIn("515b52b2ec51aa60f02265bd5a1e6df057140ece", workflow)
