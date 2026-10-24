@@ -164,7 +164,7 @@ def test_guarded_connection_blocks_without_leaking_driver_diagnostics():
         raise RuntimeError("08001", "PWD=do-not-echo host=private")
     with pytest.raises(m.Blocked) as exc:
         m.guarded_connect(fake_connect, m.ODBC_LOCAL, timeout=5)
-    assert str(exc.value) == "odbc_error_unclassified"
+    assert str(exc.value) == "sql_transport_or_tls_unavailable"
     assert "do-not-echo" not in str(exc.value)
 
 
