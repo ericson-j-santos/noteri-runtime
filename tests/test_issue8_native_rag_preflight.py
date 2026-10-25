@@ -135,6 +135,7 @@ def test_source_blob_revalidated_before_any_model(monkeypatch,tmp_path):
         b"blob "+str(len(content)).encode()+b"\0"+content,
     ).hexdigest()
     monkeypatch.setattr(m,"SOURCE_BLOB_SHA",digest)
+    monkeypatch.setattr(m,"canonical_git_source",lambda _root: content)
     def get(root,*args):
         if args==("status","--porcelain","--untracked-files=no"):
             return ""
@@ -187,12 +188,12 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
     assert "types: [edited]" in t
     assert "github.actor == 'ericson-j-santos'" in t
     assert "github.event.changes.body.from != null" in t
-    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_RECOVERY_ONCE" in t
+    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_BLOB_NORMALIZATION_ONCE" in t
     assert "ISSUE8_SANITIZED_FAILURE=" in t
     assert "ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED" in t
     assert "gatewayStatus -ne 0" in t
     assert "2>&1" in t
-    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_RECOVERY_ONCE')" in t
+    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_BLOB_NORMALIZATION_ONCE')" in t
     assert "throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'" in t
     assert "runner_name" in t
     assert "Noteri-runtime" in t
@@ -244,7 +245,7 @@ def test_issue8_recovery_gate_is_scope_bound_and_fail_closed():
     assert "feat/issue8-native-rag-preflight-20261025" not in content
     assert "fix/issue8-native-rag-yaml-gate-20261025" in content
     assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_ONCE" not in content
-    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_RECOVERY_ONCE" in content
+    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_BLOB_NORMALIZATION_ONCE" in content
     assert "ISSUE8_SANITIZED_FAILURE=" in content
     assert "ISSUE8_GATEWAY_ENVELOPE_UNAVAILABLE" in content
     assert "gatewayStatus -ne 0" in content
@@ -254,3 +255,62 @@ def test_issue8_recovery_gate_is_scope_bound_and_fail_closed():
     assert "github.actor == 'ericson-j-santos'" in content
     assert "'scripts/issue8_native_rag_preflight.py'," in content
     assert "contents: write" not in content
+
+
+def test_git_blob_uses_binary_sha_bound_object_not_checkout(tmp_path, monkeypatch):
+    """A CRLF checkout must not change original Git blob bytes."""
+    m = module()
+    source = b"# authoritative source\nline two\n"
+    sha = hashlib.sha1(
+        b"blob " + str(len(source)).encode() + b"\0" + source
+    ).hexdigest()
+    monkeypatch.setattr(m, "SOURCE_BLOB_SHA", sha)
+    calls = []
+    def run_git(args, **kwargs):
+        calls.append(args)
+        assert args == ["git", "show", "HEAD:" + m.SOURCE_PATH]
+        assert kwargs["text"] is False
+        assert kwargs["check"] is False
+        assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        assert kwargs["env"]["GIT_OPTIONAL_LOCKS"] == "0"
+        return subprocess.CompletedProcess(args, 0, source, b"")
+    monkeypatch.setattr(m.subprocess, "run", run_git)
+    assert m.canonical_git_source(tmp_path) == source
+    assert calls == [["git", "show", "HEAD:" + m.SOURCE_PATH]]
+
+
+def test_crlf_checkout_accepted_only_if_exact_normalization(tmp_path, monkeypatch):
+    m = module()
+    env = valid_env(m, tmp_path)
+    (tmp_path / "session" / "scripts").mkdir(parents=True)
+    (tmp_path / "session" / "scripts" / "issue8_native_rag_preflight.py").write_text("pass\n")
+    worker = tmp_path / "_worker_pool"
+    (worker / "app").mkdir(parents=True)
+    (tmp_path / "_rules").mkdir()
+    canonical = b"line one\nline two\n"
+    (worker / m.SOURCE_PATH).write_bytes(canonical.replace(b"\n", b"\r\n"))
+    monkeypatch.setattr(m, "canonical_git_source", lambda _: canonical)
+    def git(root, *args):
+        if args == ("status", "--porcelain", "--untracked-files=no"):
+            return ""
+        return (env["EXPECTED_NOTERI_SHA"] if root.name == "session"
+                else m.WORKER_SHA if root.name == "_worker_pool" else m.RULES_SHA)
+    monkeypatch.setattr(m, "read_git", git)
+    assert m.verify_pinned_checkout(env, m.validate_environment(env))[1] == canonical
+    (worker / m.SOURCE_PATH).write_bytes(b"line one\r\nEVIL\r\n")
+    with pytest.raises(m.PreflightBlocked, match="issue8_checkout_bytes_drift"):
+        m.verify_pinned_checkout(env, m.validate_environment(env))
+
+
+def test_unexpected_git_blob_or_stderr_blocks_with_sanitized_reason(tmp_path, monkeypatch):
+    m = module()
+    source = b"approved\n"
+    monkeypatch.setattr(m, "SOURCE_BLOB_SHA", "a" * 40)
+    for result, reason in [
+        (subprocess.CompletedProcess([], 1, b"", b"secret"), "issue8_git_blob_invalid"),
+        (subprocess.CompletedProcess([], 0, source, b""), "issue8_source_blob_drift"),
+    ]:
+        monkeypatch.setattr(m.subprocess, "run", lambda *args, **kw: result)
+        with pytest.raises(m.PreflightBlocked, match="^" + reason + "$") as blocked:
+            m.canonical_git_source(tmp_path)
+        assert "secret" not in str(blocked.value)

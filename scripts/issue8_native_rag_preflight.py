@@ -107,6 +107,33 @@ def read_git(root: Path, *args: str) -> str:
     return r.stdout.strip()
 
 
+def canonical_git_source(worker: Path) -> bytes:
+    """Return exact pinned Git blob bytes, not platform-converted checkout."""
+    require(worker.is_dir() and not worker.is_symlink(),
+            "issue8_pinned_checkout_missing")
+    env = dict(os.environ)
+    env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"})
+    argv = ["git", "show", "HEAD:" + SOURCE_PATH]
+    try:
+        result = subprocess.run(
+            argv, cwd=worker, env=env, capture_output=True,
+            text=False, timeout=15, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise PreflightBlocked("issue8_git_blob_unavailable") from None
+    require(result.returncode == 0 and
+            type(result.stdout) is bytes and
+            type(result.stderr) is bytes and not result.stderr and
+            0 < len(result.stdout) <= 262_144,
+            "issue8_git_blob_invalid")
+    raw = result.stdout
+    blob = hashlib.sha1(
+        b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw
+    ).hexdigest()
+    require(blob == SOURCE_BLOB_SHA, "issue8_source_blob_drift")
+    return raw
+
+
 def verify_pinned_checkout(env: dict[str, str], identity: dict[str, str]) -> tuple[Path, bytes]:
     workspace = Path(identity["workspace"]).resolve(strict=True)
     rules = workspace / "_rules"
@@ -128,12 +155,14 @@ def verify_pinned_checkout(env: dict[str, str], identity: dict[str, str]) -> tup
     require(source.is_file() and not source.is_symlink()
             and source.resolve().is_relative_to(worker.resolve()),
             "issue8_source_missing")
-    raw = source.read_bytes()
-    require(0 < len(raw) <= 262_144, "issue8_source_invalid")
-    git_blob_sha = hashlib.sha1(
-        b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw,
-    ).hexdigest()
-    require(git_blob_sha == SOURCE_BLOB_SHA, "issue8_source_blob_drift")
+    # Git's object database is the canonical source. Git for Windows may
+    # materialize LF blobs as CRLF files without marking the worktree dirty.
+    # Never hash the checkout bytes and call them the Git blob.
+    raw = canonical_git_source(worker)
+    worktree = source.read_bytes()
+    require(worktree == raw or (
+                b"\r\n" not in raw and worktree == raw.replace(b"\n", b"\r\n")
+            ), "issue8_checkout_bytes_drift")
     return worker, raw
 
 
@@ -184,7 +213,7 @@ def run(env: dict[str, str]) -> dict[str, object]:
     from app.native_structured_ollama import NativeStructuredOllama
 
     # Independent live GitHub read; no synthetic issue or pre-authorized JSON.
-    public_api = official_issue_reader()
+    public_api = official_issue_reader(env.get("GITHUB_TOKEN") or None)
     now = datetime.now(timezone.utc)
     approved = admit(
         public_api.get_issue(ISSUE_NUMBER),
@@ -203,7 +232,7 @@ def run(env: dict[str, str]) -> dict[str, object]:
     # Real Ollama calls must occur ONLY after the above owner/HEAD/baseline
     # gates. NativeStructuredOllama checks GGUF digest and no cloud endpoints.
     NativeStructuredOllama.no_cloud()
-    receipt = research_issue(approved)
+    receipt = research_issue(approved, github_token=env.get("GITHUB_TOKEN") or None)
     require(type(receipt) is dict and
             receipt.get("schema_version") == "worker.rag.issue-context-v1"
             and receipt.get("head_sha") == WORKER_SHA
@@ -218,15 +247,15 @@ def run(env: dict[str, str]) -> dict[str, object]:
             "issue8_real_rag_not_verified")
 
     # Separate API client validates the exact cited bytes after inference.
-    independent = official_issue_reader()
+    independent = official_issue_reader(env.get("GITHUB_TOKEN") or None)
     citation = bind_issue_rag(
         approved, receipt,
         lambda path, sha: read_original_bytes(independent, path, sha),
     )
     current = independent.get_branch("main").get("commit", {}).get("sha")
     require(current == WORKER_SHA, "issue8_main_changed_after_rag")
-    require(read_git(worker, "status", "--porcelain", "--untracked-files=no") == "",
-            "issue8_worker_modified")
+    _, post_source = verify_pinned_checkout(env, identity)
+    require(post_source == original, "issue8_worker_modified")
     result = {
         "result": "ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED",
         "schema_version": "issue8.native.rag.readonly-v1",

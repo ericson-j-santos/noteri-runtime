@@ -58,3 +58,21 @@ Qualquer falha de bootstrap, Gateway, Ollama, GitHub API ou evidência bloqueia 
 Suíte simulada não equivale à inferência física. Mesmo um resultado positivo deste preflight NÃO prova a cadeia Issue→reparo→CAS Git bundle→Validator→draft PR. O próximo incremento é do Worker Pool e requer IssueRAGReceiptCAS e adapter_from_durable_issue_rag com lease/fencing, patch material, CAS real, 42/42 + 52/52, exatamente uma PR draft criada pelo agente e replay independente.
 
 Custo adicional máximo R$0,00. Nenhum Docker no Noteri, segredos no Git ou merge/deploy automático.
+## Correção: leitura canônica do objeto Git no Windows
+
+O canário #40245535354, já com diagnóstico sanitizado, encontrou
+`issue8_source_blob_drift`. A API oficial mantém blob
+`d9a25c574163c49f695e774609949160d94f4490`, portanto o
+problema ocorre na verificação dos bytes materializados pelo checkout.
+A hipótese técnica principal é `core.autocrlf` no Git for Windows: a
+árvore pode estar limpa apesar de LF ter sido convertido em CRLF.
+
+A correção usa `git show HEAD:app/portfolio_bridge.py` (comando fixo,
+somente leitura) para obter bytes do Git blob sob o commit verificado.
+Também exige que os bytes do checkout sejam **idênticos ao blob ou exatamente
+à sua variante CRLF**, não aceita alterações mistas, continua exigindo
+Git status limpo e revalida os três checkouts e os bytes após a inferência.
+Nenhum teste foi enfraquecido e nenhum comando é escolhido pelo modelo.
+
+Reexecução física deve usar o marcador novo `OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_BLOB_NORMALIZATION_ONCE` somente após CI
+passar no SHA corrente. Não reutilizar os gatilhos anteriores.
