@@ -12,7 +12,7 @@ Este incremento qualifica o primeiro elo que ainda não foi comprovado: issue #8
 - Blob Git do app/portfolio_bridge.py: d9a25c574163c49f695e774609949160d94f4490
 - Comentário OWNER issue #8: 6404265064, comando literal atrelado à main
 - Agent Core: 1fc032d4c412bdb4ed202cf1193caf0cb49490ce
-- Regras operacionais: 95ae14f7e90e01a5d6d1227fa2536246725ac68c (1.6.19)
+- Regras operacionais: 7a8dc26bdb26cf925472d800ea29066f7602dd0c (1.6.19)
 - Noteri Runtime base: 42e4f0eb3f6988e326c76b7160f9bbc9f2092a46
 
 Os SHAs são fixados. Avanço de branch, autorização ou arquivo exige novo commit, CI e readback. Não atualizar automaticamente os valores durante a execução física.

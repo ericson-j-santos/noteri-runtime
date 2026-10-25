@@ -213,7 +213,7 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
 
 def m_sha_in_text(t):
     return ("74035488dac6938bfc14957621e86168003cd0c6" in t
-            and "95ae14f7e90e01a5d6d1227fa2536246725ac68c" in t)
+            and "7a8dc26bdb26cf925472d800ea29066f7602dd0c" in t)
 
 
 def test_issue8_workflow_yaml_parses_with_hosted_runner_runtime(tmp_path):
@@ -252,5 +252,5 @@ def test_issue8_recovery_gate_is_scope_bound_and_fail_closed():
     assert "'--risk','1'" in content
     assert "d.head.sha!==sha" in content
     assert "github.actor == 'ericson-j-santos'" in content
-    assert "scripts/issue8_native_rag_preflight.py'," not in content
+    assert "'scripts/issue8_native_rag_preflight.py'," in content
     assert "contents: write" not in content

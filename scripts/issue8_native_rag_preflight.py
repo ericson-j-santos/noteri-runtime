@@ -22,7 +22,7 @@ from pathlib import Path
 HOST_REPOSITORY = "ericson-j-santos/noteri-runtime"
 WORKER_REPOSITORY = "ericson-j-santos/engineering-worker-pool"
 WORKER_SHA = "74035488dac6938bfc14957621e86168003cd0c6"
-RULES_SHA = "95ae14f7e90e01a5d6d1227fa2536246725ac68c"
+RULES_SHA = "7a8dc26bdb26cf925472d800ea29066f7602dd0c"
 SOURCE_PATH = "app/portfolio_bridge.py"
 SOURCE_BLOB_SHA = "d9a25c574163c49f695e774609949160d94f4490"
 ISSUE_NUMBER = 8
