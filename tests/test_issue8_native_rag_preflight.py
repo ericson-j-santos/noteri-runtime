@@ -188,12 +188,12 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
     assert "types: [edited]" in t
     assert "github.actor == 'ericson-j-santos'" in t
     assert "github.event.changes.body.from != null" in t
-    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_BLOB_NORMALIZATION_ONCE" in t
+    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_PHASE_DIAGNOSTIC_ONCE" in t
     assert "ISSUE8_SANITIZED_FAILURE=" in t
     assert "ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED" in t
     assert "gatewayStatus -ne 0" in t
     assert "2>&1" in t
-    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_BLOB_NORMALIZATION_ONCE')" in t
+    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_PHASE_DIAGNOSTIC_ONCE')" in t
     assert "throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'" in t
     assert "runner_name" in t
     assert "Noteri-runtime" in t
@@ -245,7 +245,7 @@ def test_issue8_recovery_gate_is_scope_bound_and_fail_closed():
     assert "feat/issue8-native-rag-preflight-20261025" not in content
     assert "fix/issue8-native-rag-yaml-gate-20261025" in content
     assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_ONCE" not in content
-    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_BLOB_NORMALIZATION_ONCE" in content
+    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_PHASE_DIAGNOSTIC_ONCE" in content
     assert "ISSUE8_SANITIZED_FAILURE=" in content
     assert "ISSUE8_GATEWAY_ENVELOPE_UNAVAILABLE" in content
     assert "gatewayStatus -ne 0" in content
@@ -314,3 +314,31 @@ def test_unexpected_git_blob_or_stderr_blocks_with_sanitized_reason(tmp_path, mo
         with pytest.raises(m.PreflightBlocked, match="^" + reason + "$") as blocked:
             m.canonical_git_source(tmp_path)
         assert "secret" not in str(blocked.value)
+
+
+def test_rejected_preflight_identifies_phase_without_secret(monkeypatch, tmp_path, capsys):
+    m = module()
+    env = valid_env(m, tmp_path)
+    def reject(*_):
+        raise m.PreflightBlocked("issue8_checkout_bytes_drift")
+    monkeypatch.setattr(m, "verify_pinned_checkout", reject)
+    monkeypatch.setattr(m.os, "environ", env)
+    assert m.main() == 2
+    value = json.loads(capsys.readouterr().out)
+    assert value["reason_code"] == "issue8_checkout_bytes_drift"
+    assert value["phase"] == "checkouts"
+    assert value["state_changed"] is False
+
+
+def test_unknown_exception_is_fixed_code_even_with_secret(monkeypatch, tmp_path, capsys):
+    m = module()
+    env = valid_env(m, tmp_path)
+    def reject(*_):
+        raise RuntimeError("secret=never-print")
+    monkeypatch.setattr(m, "verify_pinned_checkout", reject)
+    monkeypatch.setattr(m.os, "environ", env)
+    assert m.main() == 2
+    value = json.loads(capsys.readouterr().out)
+    assert value["reason_code"] == "issue8_native_dependency_unavailable"
+    assert value["phase"] == "checkouts"
+    assert "never-print" not in json.dumps(value)

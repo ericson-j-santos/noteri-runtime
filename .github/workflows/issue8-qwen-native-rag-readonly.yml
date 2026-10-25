@@ -48,9 +48,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'fix/issue8-native-rag-yaml-gate-20261025' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_BLOB_NORMALIZATION_ONCE') &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_PHASE_DIAGNOSTIC_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_BLOB_NORMALIZATION_ONCE')
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_PHASE_DIAGNOSTIC_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 4
     permissions:
@@ -84,7 +84,7 @@ jobs:
                 d.head.ref!=='fix/issue8-native-rag-yaml-gate-20261025' ||
                 d.head.sha!==sha || d.base.ref!=='main' ||
                 d.base.sha!==main.data.commit.sha ||
-                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_BLOB_NORMALIZATION_ONCE')) {
+                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_PHASE_DIAGNOSTIC_ONCE')) {
               core.setFailed('ISSUE8_NOTERI_PR_OR_BASE_DRIFT'); return;
             }
             const files=(await github.rest.pulls.listFiles({
@@ -285,6 +285,17 @@ jobs:
               }
             }
             Write-Output "ISSUE8_SANITIZED_FAILURE=$reason"
+            $phase='unknown'
+            if ($envelope.stdout) {
+              try {
+                $safe=$envelope.stdout | ConvertFrom-Json -ErrorAction Stop
+                if ($safe.result -eq 'ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED' -and
+                    $safe.phase -cin @('identity','checkouts','agent_core','imports','owner','baseline','model','research','readback')) {
+                  $phase=$safe.phase
+                }
+              } catch { }
+            }
+            Write-Output "ISSUE8_SANITIZED_PHASE=$phase"
             throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'
           }
           if ($envelope.state_changed -ne $false) { throw 'ISSUE8_GATEWAY_STATE_INVALID' }

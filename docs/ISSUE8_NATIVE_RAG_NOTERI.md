@@ -76,3 +76,15 @@ Nenhum teste foi enfraquecido e nenhum comando é escolhido pelo modelo.
 
 Reexecução física deve usar o marcador novo `OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_BLOB_NORMALIZATION_ONCE` somente após CI
 passar no SHA corrente. Não reutilizar os gatilhos anteriores.
+
+## Falha física seguinte: fase sanitizada
+
+O run #40246401909 falhou no Gateway com `issue8_native_dependency_unavailable`,
+sem voltar a registrar `issue8_source_blob_drift`. Isso demonstra mudança
+na classificação, mas não comprova a causa-raiz do próximo bloqueio.
+Agora cada fase interna do script é identificada por um nome fixo
+(`identity/checkouts/agent_core/imports/owner/baseline/model/research/readback`).
+O runner publica somente `ISSUE8_SANITIZED_PHASE` e `ISSUE8_SANITIZED_FAILURE`,
+sem logs livres ou segredos. A exceção de uma biblioteca sem código conhecido
+não se transforma em texto arbitrário. Um novo disparo só é elegível após
+CI e transição exclusiva do marcador `OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_PHASE_DIAGNOSTIC_ONCE`.
