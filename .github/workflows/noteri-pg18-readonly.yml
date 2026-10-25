@@ -16,9 +16,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'feat/noteri-pg18-service-observation-20261025' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body,'OWNER_NOTERI_PG18_READONLY_20261025_ONCE') &&
+      contains(github.event.pull_request.body,'OWNER_NOTERI_PG18_READONLY_R2_20261025_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from,'OWNER_NOTERI_PG18_READONLY_20261025_ONCE')
+      !contains(github.event.changes.body.from,'OWNER_NOTERI_PG18_READONLY_R2_20261025_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 4
     steps:
@@ -54,7 +54,7 @@ jobs:
           script: |
             const owner='ericson-j-santos',repo='noteri-runtime';
             const p=context.payload.pull_request,sha=p.head.sha;
-            const marker='OWNER_NOTERI_PG18_READONLY_20261025_ONCE';
+            const marker='OWNER_NOTERI_PG18_READONLY_R2_20261025_ONCE';
             const [pr,main,runs]=await Promise.all([
               github.rest.pulls.get({owner,repo,pull_number:p.number}),
               github.rest.repos.getBranch({owner,repo,branch:'main'}),
@@ -163,14 +163,23 @@ jobs:
           if($envelope.result -ne 'ok' -or $envelope.state_changed -ne $false -or
              $envelope.command_exit_code -ne 0){throw 'PG_GATEWAY_UNVERIFIED'}
           $r=([string]$envelope.stdout).Trim() | ConvertFrom-Json
-          if($r.result -ne 'NOTERI_PG18_NATIVE_READONLY' -or
-             $r.source_sha -ne $env:EXPECTED_SOURCE_SHA -or
-             $r.rules_sha -ne $env:RULES_SHA -or
-             $r.correlation_id -ne $env:CORRELATION_ID -or
-             $r.ready_for_pr -ne $false -or $r.db_connected -ne $false -or
-             $r.config_changed -ne $false -or $r.external_db_used -ne $false){
-             throw 'PG_READBACK_INVALID'
+          # Fixed nonsecret guard names only; never emit the report or its values.
+          $flags=[ordered]@{
+            result=($r.result -ceq 'NOTERI_PG18_NATIVE_READONLY')
+            source=($r.source_sha -ceq $env:EXPECTED_SOURCE_SHA)
+            rules=($r.rules_sha -ceq $env:RULES_SHA)
+            correlation=($r.correlation_id -ceq $env:CORRELATION_ID)
+            ready=($r.ready_for_pr -ceq $false)
+            db=($r.db_connected -ceq $false)
+            config=($r.config_changed -ceq $false)
+            external=($r.external_db_used -ceq $false)
+            docker=($r.docker_used -ceq $false)
+            packages=($r.packages_installed -ceq $false)
+            services=($r.service_changed -ceq $false)
           }
+          $failed=@($flags.Keys | Where-Object { $flags[$_] -ne $true })
+          Write-Output ('PG_READBACK_FIELD_RESULTS=' + ($failed -join ','))
+          if($failed.Count -gt 0){throw 'PG_READBACK_INVALID'}
           $bytes=[System.Text.Encoding]::UTF8.GetBytes(($r|ConvertTo-Json -Compress -Depth 6))
           if($bytes.Length -gt 2000){throw 'PG_REPORT_TOO_LARGE'}
           "receipt=$([Convert]::ToBase64String($bytes))" | Add-Content $env:GITHUB_OUTPUT
