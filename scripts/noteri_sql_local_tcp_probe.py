@@ -57,7 +57,7 @@ def check_listener(registry: Any, dial: Callable[..., Any]) -> dict[str, Any]:
     return {
         "status": "observed",
         "tcp_loopback_listener_responded": reachable,
-        "port_matches_1433": port == 1433,
+        "default_tcp_port_configured": port == 1433,
         "socket_attempted": True,
         "sql_login_attempted": False,
         "sql_connection_tested": False,
