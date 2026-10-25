@@ -66,10 +66,10 @@ def test_tcp_online_metadata_is_not_database_ready():
     assert data["status"] == "observed"
     assert data["tcp_enabled"] is True
     assert data["tcp_listen_port_configured_ipall"] is True
-    assert data["tcp_readiness_comprovable"] is True
+    assert data["tcp_registry_port_candidate"] is True
     assert data["named_pipes_enabled"] is False
     assert data["shared_memory_enabled"] is True
-    for field in ("database_connection_tested", "sql_permissions_verified",
+    for field in ("network_reachability_verified", "database_connection_tested", "sql_permissions_verified",
                   "certificate_validated", "registry_modified", "production_touched"):
         assert data[field] is False
     serialized = json.dumps(data)
@@ -79,13 +79,13 @@ def test_tcp_online_metadata_is_not_database_ready():
 def test_tcp_disabled_is_not_promoted_even_if_port_set():
     result = m.read_network(Registry(tcp=0))
     assert result["tcp_enabled"] is False
-    assert result["tcp_readiness_comprovable"] is False
+    assert result["tcp_registry_port_candidate"] is False
 
 
 def test_no_configured_port_is_not_tcp_ready():
     result = m.read_network(Registry(port=""))
     assert result["tcp_listen_port_configured_ipall"] is False
-    assert result["tcp_readiness_comprovable"] is False
+    assert result["tcp_registry_port_candidate"] is False
 
 
 def test_missing_instance_identity_fails_closed():
@@ -101,7 +101,7 @@ def test_registry_missing_protocol_is_unknown_not_enabled():
     del reg.rows[base + r"\Tcp"]
     value = m.read_network(reg)
     assert value["tcp_enabled"] is None
-    assert value["tcp_readiness_comprovable"] is False
+    assert value["tcp_registry_port_candidate"] is False
 
 
 @pytest.mark.parametrize("invalid", ["host:1433", "x" * 65, 1433])
