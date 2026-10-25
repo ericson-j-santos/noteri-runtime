@@ -151,6 +151,17 @@ def test_existing_symlink_blocks_before_read(tmp_path: Path) -> None:
         invoke(repo, tmp_path, dry_run=False)
 
 
+def test_parent_symlink_blocks_stage_before_destination_creation(tmp_path: Path) -> None:
+    repo = source_tree(tmp_path)
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real_parent, target_is_directory=True)
+    with pytest.raises(stage.StageBlocked, match="release_link_forbidden"):
+        invoke(repo, tmp_path, releases=alias / "releases", dry_run=False)
+    assert not (real_parent / "releases").exists()
+
+
 def test_lock_collision_fails_closed_without_overwrite(tmp_path: Path) -> None:
     repo = source_tree(tmp_path)
     releases = tmp_path / "releases"

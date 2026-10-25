@@ -43,6 +43,12 @@ def is_link(path: Path) -> bool:
     return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
 
 
+def ensure_no_link_components(path: Path) -> None:
+    for component in (path, *path.parents):
+        if is_link(component):
+            raise StageBlocked("release_link_forbidden")
+
+
 def git_read(source: Path, *args: str) -> str:
     try:
         result = subprocess.run(
@@ -171,8 +177,7 @@ def stage(
     files = safe_source_files(source)
     manifest = build_manifest(expected_sha, files)
     release = releases / expected_sha
-    if is_link(releases) or is_link(release):
-        raise StageBlocked("release_link_forbidden")
+    ensure_no_link_components(release)
     if release.exists():
         if not validate_staged(release, manifest):
             raise StageBlocked("existing_release_integrity_mismatch")
@@ -189,6 +194,7 @@ def stage(
         }
 
     releases.mkdir(parents=True, exist_ok=True)
+    ensure_no_link_components(release)
     lock = releases / ".stage.lock"
     try:
         handle = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -216,6 +222,7 @@ def stage(
             raise StageBlocked("stage_manifest_invalid")
         if release.exists():
             raise StageBlocked("concurrent_release_present")
+        ensure_no_link_components(release)
         os.rename(temporary, release)
         temporary = None
         return {
