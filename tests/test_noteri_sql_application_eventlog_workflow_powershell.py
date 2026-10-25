@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PROBE = ROOT / "scripts" / "noteri_sql_application_eventlog.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "noteri-sql-application-eventlog.yml"
+
+requires_windows_powershell_51 = pytest.mark.skipif(
+    sys.platform != "win32", reason="requires Windows PowerShell 5.1"
+)
 
 
 def _parser_block() -> str:
@@ -79,6 +84,7 @@ def test_probe_help_runs_with_workflow_python_isolation_flags() -> None:
     assert "--expected-sha" in completed.stdout
 
 
+@requires_windows_powershell_51
 @pytest.mark.parametrize(
     "records",
     [
@@ -94,6 +100,7 @@ def test_windows_powershell_51_parses_one_or_two_root_array_records(
     assert json.loads(completed.stdout) == records
 
 
+@requires_windows_powershell_51
 def test_windows_powershell_51_accepts_int32_and_int64_ids() -> None:
     records = [_record(0), _record(26013), _record(4294967295)]
     completed = _run_parser(records)
@@ -101,6 +108,7 @@ def test_windows_powershell_51_accepts_int32_and_int64_ids() -> None:
     assert json.loads(completed.stdout) == records
 
 
+@requires_windows_powershell_51
 @pytest.mark.parametrize(
     ("payload", "error"),
     [
@@ -117,6 +125,7 @@ def test_windows_powershell_51_rejects_invalid_root_or_count(
     assert error in completed.stderr
 
 
+@requires_windows_powershell_51
 @pytest.mark.parametrize(
     "event_id",
     [
