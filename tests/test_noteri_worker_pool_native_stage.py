@@ -213,7 +213,6 @@ def test_generic_io_error_is_sanitized_without_publishing_path(monkeypatch, tmp_
     profile.parent.mkdir(parents=True)
     profile.write_text('{"profile":"NORMAL"}', encoding="utf-8")
     monkeypatch.setattr(stage.socket, "gethostname", lambda: "Noteri")
-    monkeypatch.setattr(stage.os, "name", "nt", raising=False)
     monkeypatch.setattr(stage, "stage", lambda **kwargs: (_ for _ in ()).throw(
         PermissionError(f"denied: {private_path}")
     ))
