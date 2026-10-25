@@ -75,11 +75,23 @@ class NativeVenvTests(unittest.TestCase):
         def fail(root: Path, _requirements: Path):
             root.mkdir()
             (root / "partial").write_text("partial", encoding="utf-8")
-            raise native.Blocked("install_failed")
+            raise native.Blocked("venv_pip_install_failed")
 
         result = self.run_case(mode="prepare", confirm=native.CONFIRM, install=fail)
         self.assertEqual(result["result"], "BLOCKED_PREPARE_ROLLED_BACK")
+        self.assertEqual(result["phase"], "install")
+        self.assertEqual(result["failure_code"], "venv_pip_install_failed")
         self.assertFalse((self.root / native.ROOT_RELATIVE / "venvs" / native.SOURCE_SHA).exists())
+
+    def test_unexpected_failure_is_sanitized(self):
+        def fail(root: Path, _requirements: Path):
+            root.mkdir()
+            raise RuntimeError("private detail that must not leave the host")
+
+        result = self.run_case(mode="prepare", confirm=native.CONFIRM, install=fail)
+        self.assertEqual(result["result"], "BLOCKED_PREPARE_ROLLED_BACK")
+        self.assertEqual(result["failure_code"], "unexpected_failure")
+        self.assertNotIn("private detail", str(result))
 
     def test_tampered_release_and_unconfirmed_prepare_fail_closed(self):
         self.assertEqual(self.run_case(mode="prepare")["result"], "BLOCKED_ACTION")
