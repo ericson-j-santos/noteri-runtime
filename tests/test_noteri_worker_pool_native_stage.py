@@ -96,6 +96,7 @@ def test_context_and_activation_are_denied_before_writes(
         lambda _: ("b" * 40, ORIGIN, ""),
         lambda _: (SHA, "https://github.com/untrusted/repo", ""),
         lambda _: (SHA, ORIGIN, " M app/main.py"),
+        lambda _: (SHA, ORIGIN, "?? app/untracked.py"),
     ],
 )
 def test_sha_remote_and_clean_tree_are_required(
@@ -181,3 +182,45 @@ def test_source_does_not_install_start_or_rotate_credentials() -> None:
     assert "schtasks " not in raw
     assert "subprocess.popen" not in raw
     assert "token_urlsafe" not in raw
+
+
+def test_git_identity_rejects_untracked_files_not_just_tracked_changes(monkeypatch, tmp_path: Path) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_read(_source: Path, *args: str) -> str:
+        calls.append(args)
+        if args[0] == "rev-parse":
+            return SHA
+        if args[0] == "remote":
+            return ORIGIN
+        return "?? app/untracked.py"
+
+    monkeypatch.setattr(stage, "git_read", fake_read)
+    assert stage.git_identity(tmp_path) == (SHA, ORIGIN, "?? app/untracked.py")
+    assert ("status", "--porcelain", "--untracked-files=all") in calls
+
+
+def test_generic_io_error_is_sanitized_without_publishing_path(monkeypatch, tmp_path: Path, capsys) -> None:
+    private_path = tmp_path / "private" / "do-not-log"
+    private_path.parent.mkdir()
+    private_path.write_text("fixture", encoding="utf-8")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("GITHUB_REPOSITORY", stage.EXPECTED_CONTEXT_REPO)
+    monkeypatch.setenv("GITHUB_REF", "refs/heads/main")
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    profile = tmp_path / "ReqSys" / "TodoGlobal24x7" / "host-profile.json"
+    profile.parent.mkdir(parents=True)
+    profile.write_text('{"profile":"NORMAL"}', encoding="utf-8")
+    monkeypatch.setattr(stage.socket, "gethostname", lambda: "Noteri")
+    monkeypatch.setattr(stage.os, "name", "nt", raising=False)
+    monkeypatch.setattr(stage, "stage", lambda **kwargs: (_ for _ in ()).throw(
+        PermissionError(f"denied: {private_path}")
+    ))
+    monkeypatch.setattr("sys.argv", [
+        "stage", "--source-sha", SHA, "--mode", "plan",
+    ])
+    assert stage.main() == 2
+    output = capsys.readouterr().out
+    assert '"reason": "stage_io_unavailable"' in output
+    assert str(private_path) not in output
