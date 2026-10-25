@@ -146,7 +146,7 @@ def test_source_blob_revalidated_before_any_model(monkeypatch,tmp_path):
     worker,raw=m.verify_pinned_checkout(env,identity)
     assert worker.name=="_worker_pool" and raw==content
     (workspace/"_worker_pool"/m.SOURCE_PATH).write_bytes(content+b"tampered")
-    with pytest.raises(m.PreflightBlocked,match="issue8_source_blob_drift"):
+    with pytest.raises(m.PreflightBlocked,match="issue8_checkout_bytes_drift"):
         m.verify_pinned_checkout(env,identity)
 
 
