@@ -214,3 +214,33 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
 def m_sha_in_text(t):
     return ("74035488dac6938bfc14957621e86168003cd0c6" in t
             and "95ae14f7e90e01a5d6d1227fa2536246725ac68c" in t)
+
+
+def test_issue8_workflow_yaml_parses_with_hosted_runner_runtime():
+    """Catch syntactically broken Action files even if source-code tests pass."""
+    import shutil
+    ruby = shutil.which("ruby")
+    assert ruby is not None, "Ubuntu hosted CI must have Ruby/Psych for YAML gate"
+    check = subprocess.run(
+        [ruby, "-e", "require 'yaml'; Psych.parse_file(ARGV.fetch(0))", str(WORKFLOW)],
+        capture_output=True, text=True, timeout=20, check=False,
+    )
+    assert check.returncode == 0, check.stderr
+    assert WORKFLOW.read_text(encoding="utf-8").rstrip().endswith("}));")
+
+
+def test_issue8_recovery_gate_is_scope_bound_and_fail_closed():
+    content = WORKFLOW.read_text(encoding="utf-8")
+    assert "feat/issue8-native-rag-preflight-20261025" not in content
+    assert "fix/issue8-native-rag-yaml-gate-20261025" in content
+    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_ONCE" not in content
+    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_RECOVERY_ONCE" in content
+    assert "ISSUE8_SANITIZED_FAILURE=" in content
+    assert "ISSUE8_GATEWAY_ENVELOPE_UNAVAILABLE" in content
+    assert "gatewayStatus -ne 0" in content
+    assert "2>&1" in content
+    assert "'--risk','1'" in content
+    assert "d.head.sha!==sha" in content
+    assert "github.actor == 'ericson-j-santos'" in content
+    assert "scripts/issue8_native_rag_preflight.py'," not in content
+    assert "contents: write" not in content

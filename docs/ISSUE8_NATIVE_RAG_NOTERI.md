@@ -45,6 +45,14 @@ Qualquer falha de bootstrap, Gateway, Ollama, GitHub API ou evidência bloqueia 
 - O disparo original `OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_ONCE` permanece no histórico. A correção só admite nova transição ausência→presença do marcador `OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_RECOVERY_ONCE`, pelo OWNER, em PR draft, após testes CI concluídos no novo SHA e revalidação da main. Não incluir o novo marcador antecipadamente.
 - Esta etapa é recuperação diagnóstica; não comprova inferência Ollama nem readback independente até um novo E2E físico com recibo validado.
 
+
+## Recuperação de integridade do workflow após integração da PR #59
+
+- O run físico #40242823952 comprovou que houve pickup do runner Noteri e que o Session Launcher/venv passaram, mas o comando Risk1 falhou. O código de rejeição interno foi perdido pelo tratamento de exceções do workflow anterior.
+- A PR #59 foi integrada no commit `78ebd2e3cb7ebe2629af54184e91bc319875e294` com uma regressão acidental: uma substituição de texto duplicou o fim do arquivo YAML. A CI existente passou porque não executava análise sintática real do workflow.
+- Esta recuperação reconstrói o YAML a partir da versão íntegra, mantendo os controles de admissão. Adiciona teste de parsing real com Ruby/Psych na suíte obrigatória de CI e leitura de motivo de falha sanitizado (`ISSUE8_SANITIZED_FAILURE`), sem mostrar mensagens potencialmente sensíveis ou permitir sucesso quando houver bloqueio.
+- Novo canário permitido somente na branch `fix/issue8-native-rag-yaml-gate-20261025`, com nova transição de marcador apenas após CI no SHA novo. Nenhum marcador de disparo deve constar inicialmente no corpo da PR. Não considerar testes estáticos como substituição da prova física.
+
 ## Limites
 
 Suíte simulada não equivale à inferência física. Mesmo um resultado positivo deste preflight NÃO prova a cadeia Issue→reparo→CAS Git bundle→Validator→draft PR. O próximo incremento é do Worker Pool e requer IssueRAGReceiptCAS e adapter_from_durable_issue_rag com lease/fencing, patch material, CAS real, 42/42 + 52/52, exatamente uma PR draft criada pelo agente e replay independente.
