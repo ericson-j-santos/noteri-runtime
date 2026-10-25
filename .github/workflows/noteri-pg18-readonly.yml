@@ -1,0 +1,220 @@
+name: Noteri PostgreSQL 18 bounded native read-only inventory
+on:
+  pull_request:
+    types: [edited]
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: noteri-pg18-observation-${{ github.event.pull_request.head.ref }}
+  cancel-in-progress: false
+jobs:
+  contract:
+    name: Native PG fixed-probe safety tests
+    if: >-
+      github.actor == 'ericson-j-santos' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feat/noteri-pg18-service-observation-20261025' &&
+      github.event.pull_request.draft == true &&
+      contains(github.event.pull_request.body,'OWNER_NOTERI_PG18_READONLY_20261025_ONCE') &&
+      github.event.changes.body.from != null &&
+      !contains(github.event.changes.body.from,'OWNER_NOTERI_PG18_READONLY_20261025_ONCE')
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Verify bounded probe safety
+        run: |
+          python -m pip install --disable-pip-version-check pytest==8.4.2
+          python -m py_compile scripts/noteri_pg18_readonly.py tests/test_noteri_pg18_readonly.py
+          python -m pytest -q tests/test_noteri_pg18_readonly.py
+  admission:
+    needs: contract
+    if: needs.contract.result == 'success'
+    name: Owner exact-CI Noteri PG admission
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      admitted_at: ${{ steps.gate.outputs.admitted_at }}
+    steps:
+      - name: Verify original owner and current main
+        id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner='ericson-j-santos',repo='noteri-runtime';
+            const p=context.payload.pull_request,sha=p.head.sha;
+            const marker='OWNER_NOTERI_PG18_READONLY_20261025_ONCE';
+            const [pr,main,runs]=await Promise.all([
+              github.rest.pulls.get({owner,repo,pull_number:p.number}),
+              github.rest.repos.getBranch({owner,repo,branch:'main'}),
+              github.rest.actions.listWorkflowRuns({
+                owner,repo,workflow_id:'ci.yml',head_sha:sha,
+                event:'pull_request',status:'completed',per_page:100})
+            ]);
+            if(context.actor!==owner||p.head.ref!=='feat/noteri-pg18-service-observation-20261025'||
+              !pr.data.draft||pr.data.state!=='open'||pr.data.head.sha!==sha||
+              pr.data.head.repo?.full_name!==owner+'/'+repo||
+              pr.data.base.sha!==main.data.commit.sha||
+              !pr.data.body?.includes(marker)||
+              context.payload.changes?.body?.from?.includes(marker))
+              throw Error('PG_NOTERI_OWNER_OR_SHA_INVALID');
+            let ci=false;
+            for(const run of runs.data.workflow_runs.filter(x=>x.conclusion==='success'&&x.head_sha===sha)){
+              const j=(await github.rest.actions.listJobsForWorkflowRun({
+                owner,repo,run_id:run.id,per_page:100})).data;
+              if(j.total_count===j.jobs.length&&j.jobs.some(x=>
+                x.name==='tests'&&x.status==='completed'&&x.conclusion==='success'&&
+                x.steps?.some(s=>s.name==='Run tests'&&s.conclusion==='success')))
+                ci=true;
+            }
+            if(!ci)throw Error('PG_NOTERI_REAL_CI_REQUIRED');
+            core.setOutput('admitted_at',new Date().toISOString());
+  physical:
+    needs: admission
+    if: needs.admission.result == 'success'
+    name: Governed Noteri PostgreSQL 18 SCM read
+    runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
+    timeout-minutes: 7
+    permissions:
+      contents: read
+    env:
+      EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+      RULES_SHA: 95ae14f7e90e01a5d6d1227fa2536246725ac68c
+      NOTERI_PG_ADMITTED_AT: ${{ needs.admission.outputs.admitted_at }}
+      CORRELATION_ID: noteri-pg-${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      receipt: ${{ steps.probe.outputs.receipt }}
+    steps:
+      - name: Exact Noteri host
+        shell: powershell
+        run: |
+          if($env:COMPUTERNAME -ne 'Noteri' -or
+             -not $env:RUNNER_NAME.ToLowerInvariant().StartsWith('noteri')){
+             throw 'NOTERI_HOST_INVALID'
+          }
+      - name: Immutable source checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ env.EXPECTED_SOURCE_SHA }}
+          persist-credentials: false
+      - name: Pinned operational rules checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          persist-credentials: false
+      - name: Session Launcher and exact runner preflight
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $policy=Join-Path $root 'config/command-gateway.policy.json'
+          $launcher=Join-Path $root 'scripts/session_launcher.py'
+          $args=@('--policy',$policy,'--repo',$env:GITHUB_WORKSPACE,
+            '--session-prefix','noteri-pg18',
+            '--correlation-id',$env:CORRELATION_ID,
+            '--expected-head',$env:EXPECTED_SOURCE_SHA,
+            '--sync-ref','origin/feat/noteri-pg18-service-observation-20261025',
+            '--require-runner-version-preflight')
+          $raw=@(& python3 -B $launcher @args)
+          if($LASTEXITCODE -ne 0 -or -not $raw){throw 'PG_SESSION_BLOCKED'}
+          $s=@($raw)[-1] | ConvertFrom-Json
+          if($s.result -ne 'SESSION_LAUNCH_OK' -or
+             $s.head -ne $env:EXPECTED_SOURCE_SHA -or
+             $s.state_validated -ne $true -or
+             $s.runner_version_preflight.ok -ne $true){throw 'PG_SESSION_INVALID'}
+          "target=$($s.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session=$($s.session_id)" | Add-Content $env:GITHUB_OUTPUT
+      - name: Read native PostgreSQL service via risk1 Gateway
+        id: probe
+        shell: powershell
+        env:
+          SESSION_TARGET_PATH: ${{ steps.session.outputs.target }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+          SESSION_LAUNCH_RESULT: SESSION_LAUNCH_OK
+          SESSION_STATE_VALIDATED: 'true'
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $args=@('--policy',(Join-Path $root 'config/command-gateway.policy.json'),
+            '--correlation-id',$env:CORRELATION_ID,'run',
+            '--cwd',$env:SESSION_TARGET_PATH,
+            '--session-id',$env:SESSION_ID,'--risk','1',
+            '--timeout','60','--expected-head',$env:EXPECTED_SOURCE_SHA,'--',
+            'python3','-B',(Join-Path $env:SESSION_TARGET_PATH 'scripts/noteri_pg18_readonly.py'))
+          $raw=@(& python3 -B (Join-Path $root 'scripts/command_gateway.py') @args)
+          if($LASTEXITCODE -ne 0 -or -not $raw){throw 'PG_GATEWAY_BLOCKED'}
+          $envelope=@($raw)[-1] | ConvertFrom-Json
+          if($envelope.result -ne 'ok' -or $envelope.state_changed -ne $false -or
+             $envelope.command_exit_code -ne 0){throw 'PG_GATEWAY_UNVERIFIED'}
+          $r=([string]$envelope.stdout).Trim() | ConvertFrom-Json
+          if($r.result -ne 'NOTERI_PG18_NATIVE_READONLY' -or
+             $r.source_sha -ne $env:EXPECTED_SOURCE_SHA -or
+             $r.rules_sha -ne $env:RULES_SHA -or
+             $r.correlation_id -ne $env:CORRELATION_ID -or
+             $r.ready_for_pr -ne $false -or $r.db_connected -ne $false -or
+             $r.config_changed -ne $false -or $r.external_db_used -ne $false){
+             throw 'PG_READBACK_INVALID'
+          }
+          $bytes=[System.Text.Encoding]::UTF8.GetBytes(($r|ConvertTo-Json -Compress -Depth 6))
+          if($bytes.Length -gt 2000){throw 'PG_REPORT_TOO_LARGE'}
+          "receipt=$([Convert]::ToBase64String($bytes))" | Add-Content $env:GITHUB_OUTPUT
+          Write-Output ('PG18_INVENTORY service='+$r.postgres.service_state)
+  readback:
+    needs: physical
+    if: needs.physical.result == 'success'
+    name: Independent native PostgreSQL physical readback
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Validate receipt and real Noteri runner identity
+        uses: actions/github-script@v7
+        env:
+          RECEIPT: ${{ needs.physical.outputs.receipt }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          script: |
+            const b64=process.env.RECEIPT||'';
+            if(!b64||b64.length>3500||!/^[A-Za-z0-9+/]*={0,2}$/.test(b64))
+              throw Error('PG_RECEIPT_MISSING');
+            const r=JSON.parse(Buffer.from(b64,'base64').toString('utf8'));
+            if(r.result!=='NOTERI_PG18_NATIVE_READONLY'||
+               r.source_sha!==process.env.SHA||r.host===undefined&&false||
+               r.rules_sha!=='95ae14f7e90e01a5d6d1227fa2536246725ac68c'||
+               r.run_id!==String(context.runId)||
+               r.correlation_id!=='noteri-pg-'+context.runId+'-'+context.runAttempt||
+               r.ready_for_pr!==false||r.db_connected!==false||
+               r.config_changed!==false||r.external_db_used!==false||
+               r.docker_used!==false)
+               throw Error('PG_REPORT_IDENTITY_OR_SCOPE_MISMATCH');
+            const {data:jobs}=await github.rest.actions.listJobsForWorkflowRun({
+              owner:context.repo.owner,repo:context.repo.repo,
+              run_id:context.runId,per_page:100});
+            const physical=jobs.jobs.find(j=>
+              j.name==='Governed Noteri PostgreSQL 18 SCM read'&&
+              j.status==='completed'&&j.conclusion==='success'&&
+              String(j.runner_name||'').toLowerCase().startsWith('noteri')&&
+              j.steps?.some(s=>s.name==='Read native PostgreSQL service via risk1 Gateway'&&
+                s.conclusion==='success'));
+            if(jobs.total_count!==jobs.jobs.length||!physical)
+              throw Error('PG_ACTUAL_NOTERI_JOB_UNVERIFIED');
+            core.info('PG_PHYSICAL_READBACK_OK service='+r.postgres.service_state+
+              ' ready_for_pr=false');
