@@ -58,7 +58,7 @@ def git_identity(source: Path) -> tuple[str, str, str]:
     return (
         git_read(source, "rev-parse", "HEAD"),
         git_read(source, "remote", "get-url", "origin"),
-        git_read(source, "status", "--porcelain", "--untracked-files=no"),
+        git_read(source, "status", "--porcelain", "--untracked-files=all"),
     )
 
 
@@ -264,6 +264,9 @@ def main() -> int:
         return 0
     except StageBlocked as exc:
         print(json.dumps({"result": "STAGE_BLOCKED", "reason": str(exc)}, sort_keys=True))
+        return 2
+    except OSError:
+        print(json.dumps({"result": "STAGE_BLOCKED", "reason": "stage_io_unavailable"}, sort_keys=True))
         return 2
 
 
