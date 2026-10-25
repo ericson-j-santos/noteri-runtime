@@ -64,13 +64,24 @@ class ActivationTests(unittest.TestCase):
             observed.append(args[0])
             return subprocess.CompletedProcess(args, 1, stdout=b"")
         with patch.object(activation, "qualify", return_value=(self.root, self.venv, self.token)), \
-                patch.object(activation, "schtasks", side_effect=scheduled):
+                patch.object(activation, "schtasks", side_effect=scheduled), \
+                patch.object(activation, "task_absent", return_value=True):
             result = activation.activate(self.path, self.source)
         self.assertEqual(result["result"], "BLOCKED_ACTIVATION_ROLLED_BACK")
         self.assertEqual(result["phase"], "register")
         self.assertEqual(observed, ["/Create", "/Query"])
         self.assertFalse((self.root / "bin").exists())
         self.assertFalse((self.root / "data").exists())
+
+    def test_ambiguous_registration_preserves_action_files(self):
+        def scheduled(*args):
+            return subprocess.CompletedProcess(args, 1, stdout=b"")
+        with patch.object(activation, "qualify", return_value=(self.root, self.venv, self.token)), \
+                patch.object(activation, "schtasks", side_effect=scheduled), \
+                patch.object(activation, "task_absent", return_value=False):
+            result = activation.activate(self.path, self.source)
+        self.assertEqual(result["result"], "BLOCKED_REGISTRATION_AMBIGUOUS")
+        self.assertTrue((self.root / "bin" / activation.RUNNER_FILES[0]).is_file())
 
     def test_task_readback_mismatch_deletes_only_new_task(self):
         observed = []

@@ -326,6 +326,9 @@ def activate(local: Path, source: Path) -> dict:
                     return {"result": "BLOCKED_REGISTRATION_AMBIGUOUS", "phase": phase,
                             "activated": False, "state_changed": True}
                 registered = True
+            elif not task_absent(Path(os.environ.get("WINDIR", "C:\\Windows"))):
+                return {"result": "BLOCKED_REGISTRATION_AMBIGUOUS", "phase": phase,
+                        "activated": False, "state_changed": True}
             raise Blocked("register")
         registered = True
         xml_path.unlink()
