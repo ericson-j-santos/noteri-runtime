@@ -66,6 +66,35 @@ Esse passo não registra tarefa, não inicia API e não altera o Python global.
 A ativação persistente ainda exige capability própria, autorização Risk3
 específica quando aplicável, readback de saúde/contrato/autenticação e rollback.
 
+### Ativação nativa controlada
+
+`scripts/noteri_worker_pool_native_activation.py --mode plan` confirma release,
+venv, credencial privada, perfil NORMAL, ausência da tarefa fixa e ausência de
+listener TCP na porta 8097. O plano não altera o host.
+
+`--mode activate --confirm ACTIVATE-NOTERI-WORKER-POOL-API` requer aprovação
+específica para registrar a tarefa `\Automation\NoteriWorkerPoolApi` no Task
+Scheduler. A capability copia dois scripts versionados para um `bin` privado,
+registra uma tarefa de boot S4U com privilégio limitado e executa uma única
+inicialização. O runner valida os hashes da release e do venv e a referência
+da credencial antes de iniciar Uvicorn em `127.0.0.1:8097`. O banco SQLite fica
+em `data/pool.db` na árvore privada do Worker Pool.
+
+A ativação só confirma sucesso quando a definição S4U relida corresponde à
+ação registrada, o listener pertence ao processo filho do Python lançado
+pela tarefa, `/health` indica pronto, `/v1/contract` autenticado retorna v1
+e um token inválido recebe 401. Em falha, a capability encerra e remove a
+tarefa recém-criada, espera a porta ficar livre e remove somente `bin` e
+`data` que não existiam antes da invocação. Falha ou ambiguidade no rollback
+é relatada como bloqueio e preserva os arquivos necessários para diagnóstico.
+`--mode status` é somente leitura; `--mode restore` exige a mesma confirmação
+fixa e só inicia uma tarefa existente cuja definição e scripts correspondem
+ao código publicado.
+
+A prova de persistência após reboot continua separada e exige autorização de
+reinicialização. Esta capability não habilita fenced cutover nem enfileira a
+task ReqSys #3096.
+
 - Qualificar uma release instalável com dependências fixadas, Python nativo, serviço de API protegido em `127.0.0.1:8097` e startup persistente. O stage-only não realiza essa ativação.
 - Reutilizar somente uma referência aprovada a arquivo protegido, fora do repositório e do artifact; se não existir, registrar uma **única decisão de provisionamento de credencial** e não criar/rotacionar automaticamente.
 - Qualquer alteração de tarefa administrativa, ACL, elevação, serviço de sistema ou reboot requer autorização específica e replay/readback. Não usar Docker, GUI/RDC ou shell arbitrário.
