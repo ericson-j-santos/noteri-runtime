@@ -24,7 +24,7 @@ def assert_readonly_contract(text: str) -> None:
     assert "4e6091a133f8d7d157abe6f83c31ca597812e0a4" in text
     assert "repository: ericson-j-santos/engineering-worker-pool" in text
     assert "path: _worker_pool" in text
-    assert text.count("persist-credentials: false") == 3
+    assert text.count("persist-credentials: false") == 4
     assert "SESSION_LAUNCH_OK" in text
     assert "--require-runner-version-preflight" in text
     assert "command_gateway.py" in text
@@ -35,6 +35,10 @@ def assert_readonly_contract(text: str) -> None:
     assert "activated -ne $false" in text
     assert "secrets_read -ne $false" in text
     assert "noteri-worker-pool-plan-" in text
+    assert "independent-readback:" in text
+    assert "needs: native-plan" in text
+    assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in text
+    assert "validate_noteri_worker_pool_plan_artifact.py" in text
     assert "'--mode', 'stage'" not in text
     assert "--confirm" not in text
     assert "sudo" not in text.lower()
