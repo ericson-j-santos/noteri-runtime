@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-src = Path(__file__).with_name("noteri_sql_handshake_metadata.py")
+src = Path(__file__).resolve().parents[1] / "scripts" / "noteri_sql_handshake_metadata.py"
 
 class StubError(ValueError):
     pass
