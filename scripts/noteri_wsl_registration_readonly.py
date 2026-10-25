@@ -69,7 +69,13 @@ def collect(registry=None, *, platform_name=None, hostname=None) -> dict:
 
     report = _empty()
     try:
-        with reg.OpenKey(reg.HKEY_CURRENT_USER, KEY, 0, reg.KEY_READ) as root:
+        root_key = reg.OpenKey(reg.HKEY_CURRENT_USER, KEY, 0, reg.KEY_READ)
+    except FileNotFoundError:
+        return report
+    except OSError:
+        raise Blocked("WSL_REGISTRY_READ_UNAVAILABLE") from None
+    try:
+        with root_key as root:
             count = reg.QueryInfoKey(root)[0]
             if type(count) is not int or not 0 <= count <= MAX_DISTROS:
                 raise Blocked("WSL_REGISTRATION_LIMIT")
@@ -114,7 +120,7 @@ def collect(registry=None, *, platform_name=None, hostname=None) -> dict:
                     "state": "unknown",
                 })
     except FileNotFoundError:
-        return report
+        raise Blocked("WSL_REGISTRY_INCONSISTENT") from None
     except (OSError, TypeError, ValueError, IndexError) as exc:
         if isinstance(exc, Blocked):
             raise
