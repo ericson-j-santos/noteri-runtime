@@ -187,12 +187,12 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
     assert "types: [edited]" in t
     assert "github.actor == 'ericson-j-santos'" in t
     assert "github.event.changes.body.from != null" in t
-    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_RECOVERY_ONCE" in t
+    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_SYNTAX_RECOVERY_ONCE" in t
     assert "ISSUE8_SANITIZED_FAILURE=" in t
     assert "ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED" in t
     assert "gatewayStatus -ne 0" in t
     assert "2>&1" in t
-    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_RECOVERY_ONCE')" in t
+    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_SYNTAX_RECOVERY_ONCE')" in t
     assert "throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'" in t
     assert "runner_name" in t
     assert "Noteri-runtime" in t
@@ -213,4 +213,56 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
 
 def m_sha_in_text(t):
     return ("74035488dac6938bfc14957621e86168003cd0c6" in t
-            and "95ae14f7e90e01a5d6d1227fa2536246725ac68c" in t)
+            and "7a8dc26bdb26cf925472d800ea29066f7602dd0c" in t)
+
+
+def test_sanitized_phase_on_bounded_preflight_failure(monkeypatch, tmp_path, capsys):
+    m = module()
+    env = valid_env(m, tmp_path)
+    def deny(*_):
+        raise m.PreflightBlocked('issue8_source_blob_drift')
+    monkeypatch.setattr(m, 'verify_pinned_checkout', deny)
+    monkeypatch.setattr(m.os, 'environ', env)
+    assert m.main() == 2
+    result = json.loads(capsys.readouterr().out)
+    assert result['phase'] == 'checkouts'
+    assert result['reason_code'] == 'issue8_source_blob_drift'
+    assert result['state_changed'] is False
+    assert result['draft_pr_created'] is False
+
+
+def _strict_yaml(source):
+    import yaml
+    class NoDuplicateKeys(yaml.SafeLoader):
+        def construct_mapping(self, node, deep=False):
+            values = {}
+            for key_node, value_node in node.value:
+                key = self.construct_object(key_node, deep=deep)
+                if key in values:
+                    raise ValueError('duplicate workflow key')
+                values[key] = self.construct_object(value_node, deep=deep)
+            return values
+    return yaml.load(source, Loader=NoDuplicateKeys)
+
+
+def test_issue8_workflow_is_valid_yaml_with_one_step_graph():
+    source = WORKFLOW.read_text(encoding='utf-8')
+    data = _strict_yaml(source)
+    assert set(data['jobs']) == {
+        'contract','admission','physical','watchdog','independent_readback',
+    }
+    assert data['jobs']['physical']['needs'] == 'admission'
+    assert data['jobs']['independent_readback']['needs'] == ['admission','physical']
+    assert source.count('  watchdog:') == 1
+    assert source.count('  independent_readback:') == 1
+    assert 'ISSUE8_SANITIZED_PHASE=' in source
+    assert 'GITHUB_TOKEN: ${{ github.token }}' in source
+
+
+def test_issue8_workflow_yaml_parser_rejects_duplicate_jobs_and_syntax_error():
+    import yaml
+    source = WORKFLOW.read_text(encoding='utf-8')
+    with pytest.raises(ValueError, match='duplicate workflow key'):
+        _strict_yaml(source + '\njobs:\n  forged: {}\n')
+    with pytest.raises(yaml.YAMLError):
+        _strict_yaml(source + '\ninvalid: [unclosed\n')

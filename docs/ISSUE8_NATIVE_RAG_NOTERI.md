@@ -50,3 +50,19 @@ Qualquer falha de bootstrap, Gateway, Ollama, GitHub API ou evidência bloqueia 
 Suíte simulada não equivale à inferência física. Mesmo um resultado positivo deste preflight NÃO prova a cadeia Issue→reparo→CAS Git bundle→Validator→draft PR. O próximo incremento é do Worker Pool e requer IssueRAGReceiptCAS e adapter_from_durable_issue_rag com lease/fencing, patch material, CAS real, 42/42 + 52/52, exatamente uma PR draft criada pelo agente e replay independente.
 
 Custo adicional máximo R$0,00. Nenhum Docker no Noteri, segredos no Git ou merge/deploy automático.
+## Recuperação do workflow inválido após merge — 25/10/2026
+
+A PR #59 foi integrada após o teste físico ter falhado. A alteração de
+diagnóstico então deixou o workflow com duplicação de jobs e uma expressão
+PowerShell incompleta; os runs #40244383730 e #40244621470 terminaram
+sem jobs. Estes resultados não aprovam a execução física.
+
+Esta PR corretiva reconstrói os cinco jobs da última versão que foi executada
+(run #40242823952), impõe parser PyYAML com rejeição de chaves duplicadas
+no CI e expõe somente códigos e fases sanitizados do Gateway. Nenhuma
+resposta bruta, token ou comando arbitrário é publicado nos logs.
+
+A fonte canônica das regras passou a 7a8dc26bdb26cf925472d800ea29066f7602dd0c; os blobs do Launcher,
+Gateway e política são idênticos aos do SHA anterior.
+Nova transição única para recuperação física: OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_SYNTAX_RECOVERY_ONCE.
+Sem merge, deploy ou repetição automática.
