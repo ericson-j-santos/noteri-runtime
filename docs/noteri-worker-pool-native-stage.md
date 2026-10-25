@@ -45,6 +45,20 @@ Instalar dependências no Python global do runner não é uma etapa autorizada
 desta sonda. A próxima capability deve preparar um ambiente isolado,
 persistente e verificável com essas versões exatas antes de avaliar start.
 
+### Ambiente isolado, ainda sem start
+
+`scripts/noteri_worker_pool_native_venv.py` tem os modos `plan` e `prepare`.
+O plano é somente leitura. A preparação exige confirmação fixa, valida release
+e credencial sem abrir os bytes do token, usa exclusivamente o `requirements.txt`
+da release imutável e cria `LOCALAPPDATA/ReqSys/NoteriWorkerPool/venvs/<sha>`.
+Ela instala as dependências nesse venv, executa `pip check`, relê versões e
+registra um manifesto com hashes. Repetição íntegra é idempotente; uma falha
+de instalação remove somente o novo venv criado por essa invocação.
+
+Esse passo não registra tarefa, não inicia API e não altera o Python global.
+A ativação persistente ainda exige capability própria, autorização Risk3
+específica quando aplicável, readback de saúde/contrato/autenticação e rollback.
+
 - Qualificar uma release instalável com dependências fixadas, Python nativo, serviço de API protegido em `127.0.0.1:8097` e startup persistente. O stage-only não realiza essa ativação.
 - Reutilizar somente uma referência aprovada a arquivo protegido, fora do repositório e do artifact; se não existir, registrar uma **única decisão de provisionamento de credencial** e não criar/rotacionar automaticamente.
 - Qualquer alteração de tarefa administrativa, ACL, elevação, serviço de sistema ou reboot requer autorização específica e replay/readback. Não usar Docker, GUI/RDC ou shell arbitrário.
