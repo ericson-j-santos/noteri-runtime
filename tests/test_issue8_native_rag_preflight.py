@@ -216,7 +216,7 @@ def m_sha_in_text(t):
             and "95ae14f7e90e01a5d6d1227fa2536246725ac68c" in t)
 
 
-def test_issue8_workflow_yaml_parses_with_hosted_runner_runtime():
+def test_issue8_workflow_yaml_parses_with_hosted_runner_runtime(tmp_path):
     """Catch syntactically broken Action files even if source-code tests pass."""
     import shutil
     ruby = shutil.which("ruby")
@@ -227,6 +227,16 @@ def test_issue8_workflow_yaml_parses_with_hosted_runner_runtime():
     )
     assert check.returncode == 0, check.stderr
     assert WORKFLOW.read_text(encoding="utf-8").rstrip().endswith("}));")
+    # Mutation control: the same parser MUST reject the previous failure class.
+    negative_file = tmp_path / "invalid_issue8_workflow.yml"
+    negative_file.write_text(
+        WORKFLOW.read_text(encoding="utf-8") + "\n) {\n", encoding="utf-8",
+    )
+    negative = subprocess.run(
+        [ruby, "-e", "require 'yaml'; Psych.parse_file(ARGV.fetch(0))", str(negative_file)],
+        capture_output=True, text=True, timeout=20, check=False,
+    )
+    assert negative.returncode != 0, "Parser ignored malformed workflow"
 
 
 def test_issue8_recovery_gate_is_scope_bound_and_fail_closed():
