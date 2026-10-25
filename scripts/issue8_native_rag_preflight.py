@@ -1,0 +1,281 @@
+"""Read-only physical admission and real issue-scoped Qwen RAG on Noteri.
+
+Everything here is deliberately pre-PR: no lease, commands chosen by a model,
+CAS writes, code modification, Git push or deployment. The trusted Builder/
+Validator/CAS code lives exclusively in the SHA-pinned Worker Pool checkout.
+
+Run ONLY via the canonical Session Launcher + Command Gateway on an authorized
+Noteri runner after hosted owner/HEAD and CI admission.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+HOST_REPOSITORY = "ericson-j-santos/noteri-runtime"
+WORKER_REPOSITORY = "ericson-j-santos/engineering-worker-pool"
+WORKER_SHA = "74035488dac6938bfc14957621e86168003cd0c6"
+RULES_SHA = "95ae14f7e90e01a5d6d1227fa2536246725ac68c"
+SOURCE_PATH = "app/portfolio_bridge.py"
+SOURCE_BLOB_SHA = "d9a25c574163c49f695e774609949160d94f4490"
+ISSUE_NUMBER = 8
+OWNER_COMMENT_ID = 6404265064
+MODEL_PIN = "dae161e27b0e"
+SHA40 = re.compile(r"[a-f0-9]{40}\Z")
+SHA64 = re.compile(r"[a-f0-9]{64}\Z")
+CORRELATION = re.compile(r"[a-z0-9][a-z0-9-]{7,120}\Z")
+
+
+class PreflightBlocked(RuntimeError):
+    """Never contain user input, remote API body, paths, or credentials."""
+
+
+def require(ok: bool, code: str) -> None:
+    if not ok:
+        raise PreflightBlocked(code)
+
+
+def validate_environment(env: dict[str, str]) -> dict[str, str]:
+    require(env.get("GITHUB_ACTIONS") == "true"
+            and env.get("GITHUB_REPOSITORY") == HOST_REPOSITORY,
+            "issue8_actions_repository_invalid")
+    require(env.get("RUNNER_NAME") == "Noteri-runtime",
+            "issue8_wrong_runner")
+    require(env.get("NATIVE_OLLAMA_DEV") == "1"
+            and env.get("NATIVE_MODEL_DIGEST_PREFIX") == MODEL_PIN,
+            "issue8_model_not_approved")
+    require(env.get("SESSION_LAUNCH_RESULT") == "SESSION_LAUNCH_OK"
+            and env.get("SESSION_STATE_VALIDATED") == "true"
+            and env.get("SESSION_GATEWAY_BOUND") == "true",
+            "issue8_session_or_gateway_unverified")
+    session = env.get("SESSION_ID", "")
+    snapshot = env.get("SESSION_SNAPSHOT_SHA256", "")
+    correlation = env.get("CORRELATION_ID", "")
+    runtime_sha = env.get("EXPECTED_NOTERI_SHA", "")
+    run, attempt = env.get("GITHUB_RUN_ID", ""), env.get("GITHUB_RUN_ATTEMPT", "")
+    require(bool(re.fullmatch(r"[A-Za-z0-9._-]{3,64}", session)),
+            "issue8_session_invalid")
+    require(bool(SHA64.fullmatch(snapshot)),
+            "issue8_session_snapshot_invalid")
+    require(bool(CORRELATION.fullmatch(correlation)),
+            "issue8_correlation_invalid")
+    require(bool(SHA40.fullmatch(runtime_sha)),
+            "issue8_host_sha_invalid")
+    require(run.isdigit() and len(run) <= 20
+            and attempt.isdigit() and 1 <= int(attempt) <= 20,
+            "issue8_run_identity_invalid")
+    require(env.get("WORKER_POOL_SHA") == WORKER_SHA
+            and env.get("RULES_SHA") == RULES_SHA,
+            "issue8_pinned_source_mismatch")
+    workspace = env.get("GITHUB_WORKSPACE", "")
+    require(bool(workspace), "issue8_checkout_path_missing")
+    return {
+        "runtime_sha": runtime_sha, "correlation_id": correlation,
+        "session_id": session, "snapshot_sha256": snapshot,
+        "run_id": run, "attempt": attempt, "workspace": workspace,
+    }
+
+
+def read_git(root: Path, *args: str) -> str:
+    require(root.is_dir() and not root.is_symlink(),
+            "issue8_pinned_checkout_missing")
+    actions = {
+        ("rev-parse", "HEAD"): "sha",
+        ("status", "--porcelain", "--untracked-files=no"): "status",
+    }
+    action = actions.get(tuple(args))
+    require(action is not None, "issue8_git_action_not_allowlisted")
+    local_env = dict(os.environ)
+    local_env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0"})
+    try:
+        r = subprocess.run(
+            ["git", *args], cwd=root, env=local_env,
+            capture_output=True, text=True, check=False, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise PreflightBlocked(f"issue8_git_{action}_unavailable") from None
+    require(r.returncode == 0 and not r.stderr.strip()
+            and len(r.stdout) <= 4096,
+            f"issue8_git_{action}_invalid")
+    return r.stdout.strip()
+
+
+def verify_pinned_checkout(env: dict[str, str], identity: dict[str, str]) -> tuple[Path, bytes]:
+    workspace = Path(identity["workspace"]).resolve(strict=True)
+    rules = workspace / "_rules"
+    worker = workspace / "_worker_pool"
+    host = Path(env.get("SESSION_TARGET_PATH", "")).resolve(strict=True)
+    require(host.is_dir() and host != workspace
+            and (host / "scripts" / "issue8_native_rag_preflight.py").is_file(),
+            "issue8_governed_worktree_invalid")
+    for repo, pinned in (
+        (host, identity["runtime_sha"]),
+        (worker, WORKER_SHA),
+        (rules, RULES_SHA),
+    ):
+        require(read_git(repo, "rev-parse", "HEAD") == pinned,
+                "issue8_checkout_sha_drift")
+        require(read_git(repo, "status", "--porcelain", "--untracked-files=no") == "",
+                "issue8_checkout_dirty")
+    source = worker / SOURCE_PATH
+    require(source.is_file() and not source.is_symlink()
+            and source.resolve().is_relative_to(worker.resolve()),
+            "issue8_source_missing")
+    raw = source.read_bytes()
+    require(0 < len(raw) <= 262_144, "issue8_source_invalid")
+    git_blob_sha = hashlib.sha1(
+        b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw,
+    ).hexdigest()
+    require(git_blob_sha == SOURCE_BLOB_SHA, "issue8_source_blob_drift")
+    return worker, raw
+
+
+def read_original_bytes(reader: object, path: str, sha: str) -> bytes:
+    require(sha == WORKER_SHA and
+            path in {"README.md", "AGENTS.md",
+                     "docs/ISSUE_QWEN7B_DRAFT_HANDOFF.md"},
+            "issue8_independent_path_invalid")
+    try:
+        obj = reader.get_text_file(WORKER_REPOSITORY, path, sha)
+        require(type(obj) is dict and obj.get("type") == "file"
+                and obj.get("path") == path
+                and obj.get("encoding") == "base64"
+                and type(obj.get("size")) is int
+                and 0 < obj["size"] <= 65536
+                and type(obj.get("content")) is str,
+                "issue8_independent_blob_invalid")
+        raw = base64.b64decode(
+            obj["content"].replace("\n", ""), validate=True,
+        )
+        require(len(raw) == obj["size"], "issue8_independent_blob_invalid")
+        require(hashlib.sha1(
+            b"blob " + str(len(raw)).encode("ascii") + b"\0" + raw,
+        ).hexdigest() == obj.get("sha"),
+                "issue8_independent_blob_drift")
+        return raw
+    except PreflightBlocked:
+        raise
+    except Exception:
+        raise PreflightBlocked("issue8_independent_api_unavailable") from None
+
+
+def run(env: dict[str, str]) -> dict[str, object]:
+    identity = validate_environment(env)
+    worker, original = verify_pinned_checkout(env, identity)
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, str(worker))
+    agent = Path(identity["workspace"]) / "_agent_core"
+    require(read_git(agent, "rev-parse", "HEAD")
+            == "1fc032d4c412bdb4ed202cf1193caf0cb49490ce",
+            "issue8_agent_core_sha_drift")
+    sys.path.insert(0, str(agent))
+
+    from app.issue_draft_pr import admit, trusted_task
+    from app.structured_code_worker import validate
+    from app.issue_rag_research import official_issue_reader, research_issue
+    from app.issue_rag_handoff import bind_issue_rag
+    from app.native_structured_ollama import NativeStructuredOllama
+
+    # Independent live GitHub read; no synthetic issue or pre-authorized JSON.
+    public_api = official_issue_reader()
+    now = datetime.now(timezone.utc)
+    approved = admit(
+        public_api.get_issue(ISSUE_NUMBER),
+        public_api.get_comment(OWNER_COMMENT_ID),
+        public_api.get_branch("main"),
+        base_sha=WORKER_SHA,
+        observed_at=now.isoformat(), now=now,
+    )
+    task = trusted_task(approved, original)
+    baseline = validate(original.decode("utf-8"), task)
+    require(type(baseline) is dict and baseline.get("total") == 42
+            and type(baseline.get("passed")) is int
+            and 0 <= baseline["passed"] < 42,
+            "issue8_baseline_not_reproducible")
+
+    # Real Ollama calls must occur ONLY after the above owner/HEAD/baseline
+    # gates. NativeStructuredOllama checks GGUF digest and no cloud endpoints.
+    NativeStructuredOllama.no_cloud()
+    receipt = research_issue(approved)
+    require(type(receipt) is dict and
+            receipt.get("schema_version") == "worker.rag.issue-context-v1"
+            and receipt.get("head_sha") == WORKER_SHA
+            and receipt.get("issue_number") == ISSUE_NUMBER
+            and receipt.get("state") == "supported"
+            and receipt.get("model_process_verified") is True
+            and receipt.get("issue_head_readback_stable") is True
+            and receipt.get("execution_authorized") is False
+            and receipt.get("state_changed") is False
+            and type(receipt.get("model_calls")) is int
+            and 2 <= receipt["model_calls"] <= 4,
+            "issue8_real_rag_not_verified")
+
+    # Separate API client validates the exact cited bytes after inference.
+    independent = official_issue_reader()
+    citation = bind_issue_rag(
+        approved, receipt,
+        lambda path, sha: read_original_bytes(independent, path, sha),
+    )
+    current = independent.get_branch("main").get("commit", {}).get("sha")
+    require(current == WORKER_SHA, "issue8_main_changed_after_rag")
+    require(read_git(worker, "status", "--porcelain", "--untracked-files=no") == "",
+            "issue8_worker_modified")
+    result = {
+        "result": "ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED",
+        "schema_version": "issue8.native.rag.readonly-v1",
+        "issue_number": ISSUE_NUMBER,
+        "worker_sha": WORKER_SHA,
+        "runtime_sha": identity["runtime_sha"],
+        "rules_sha": RULES_SHA,
+        "model_calls": receipt["model_calls"],
+        "model_digest_prefix": citation.model_digest[:12],
+        "baseline_total": baseline["total"],
+        "baseline_passed": baseline["passed"],
+        "citation_path": citation.source_path,
+        "citation_line": citation.line,
+        "source_sha256": citation.source_sha256,
+        "receipt_sha256": citation.receipt_sha256,
+        "independent_git_source_readback": True,
+        "session_result": "SESSION_LAUNCH_OK",
+        "session_id": identity["session_id"],
+        "snapshot_sha256": identity["snapshot_sha256"],
+        "correlation_id": identity["correlation_id"],
+        "run_id": identity["run_id"],
+        "run_attempt": identity["attempt"],
+        "state_changed": False,
+        "cas_write": False,
+        "draft_pr_created": False,
+        "model_commands_authorized": False,
+    }
+    return result
+
+
+def main() -> int:
+    try:
+        observed = run(dict(os.environ))
+    except Exception as exc:
+        code = (
+            str(exc) if type(exc) is PreflightBlocked and
+            re.fullmatch(r"[a-z][a-z0-9_]{3,100}", str(exc))
+            else "issue8_native_dependency_unavailable"
+        )
+        print(json.dumps({
+            "result": "ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED",
+            "reason_code": code,
+            "state_changed": False,
+            "draft_pr_created": False,
+        }, sort_keys=True))
+        return 2
+    print(json.dumps(observed, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
