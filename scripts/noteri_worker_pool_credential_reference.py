@@ -93,7 +93,8 @@ def qualify(*, localappdata: Path, hostname: str, profile: str,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.parse_args()
+    parser.add_argument("--preflight", action="store_true")
+    args = parser.parse_args()
     local = os.environ.get("LOCALAPPDATA", "")
     if not local:
         payload = _receipt("BLOCKED_HOST")
@@ -108,7 +109,9 @@ def main() -> int:
             profile=profile, platform=os.name,
         )
     print(json.dumps(payload, sort_keys=True))
-    return 0 if payload["result"] == "REFERENCE_PRIVATE_UNREAD" else 2
+    if payload["result"] == "REFERENCE_PRIVATE_UNREAD":
+        return 0
+    return 0 if args.preflight and payload["result"] == "BLOCKED_TOKEN_REFERENCE" else 2
 
 
 if __name__ == "__main__":
