@@ -1,0 +1,153 @@
+name: Noteri Worker Pool Native Stage Only
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: noteri-worker-pool-native-stage-only
+  cancel-in-progress: false
+
+env:
+  WORKER_POOL_SHA: 21fd68dec6f0da92b3e7da201463401ac5429d64
+  RULES_SHA: 4e6091a133f8d7d157abe6f83c31ca597812e0a4
+  CORRELATION_ID: noteri-pool-stage-${{ github.run_id }}-${{ github.run_attempt }}
+  EVIDENCE_FILE: artifacts/noteri-pool-stage-only/evidence.json
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  native-stage:
+    if: >-
+      github.repository == 'ericson-j-santos/noteri-runtime' &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.actor == 'ericson-j-santos'
+    name: Prepare immutable Worker Pool release without activation
+    runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout current trusted Noteri main
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout pinned shared Worker Pool
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/engineering-worker-pool
+          ref: ${{ env.WORKER_POOL_SHA }}
+          path: _worker_pool
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout immutable operational rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bootstrap mandatory Session Launcher
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules/config/command-gateway.policy.json'
+          $launcher = Join-Path $env:GITHUB_WORKSPACE '_rules/scripts/session_launcher.py'
+          $args = @('--policy', $policy, '--repo', $env:GITHUB_WORKSPACE, '--session-prefix', 'noteri-pool-stage', '--correlation-id', $env:CORRELATION_ID, '--expected-head', $env:GITHUB_SHA, '--sync-ref', 'origin/main', '--require-runner-version-preflight')
+          $raw = & python3 -B $launcher @args
+          if ($LASTEXITCODE -ne 0) { throw 'SESSION_LAUNCH_EXIT_NONZERO' }
+          $receipt = @($raw)[-1] | ConvertFrom-Json
+          if ($receipt.result -ne 'SESSION_LAUNCH_OK' -or $receipt.state_validated -ne $true -or $receipt.head -ne $env:GITHUB_SHA) { throw 'SESSION_LAUNCH_BLOCKED' }
+          "worktree=$($receipt.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session=$($receipt.session_id)" | Add-Content $env:GITHUB_OUTPUT
+
+      - name: Stage release through Command Gateway Risk2
+        id: stage
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.worktree }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:TARGET_PATH -or -not $env:SESSION_ID) { throw 'SESSION_READBACK_MISSING' }
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $gateway = Join-Path $rules 'scripts/command_gateway.py'
+          $policy = Join-Path $rules 'config/command-gateway.policy.json'
+          $script = Join-Path $env:TARGET_PATH 'scripts/noteri_worker_pool_native_stage.py'
+          $argv = @('--policy', $policy, '--correlation-id', $env:CORRELATION_ID, 'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID, '--risk', '2', '--timeout', '90', '--expected-head', $env:GITHUB_SHA, '--', 'python3', '-B', $script, '--source-sha', $env:WORKER_POOL_SHA, '--mode', 'stage', '--confirm', 'STAGE-NOTERI-WORKER-POOL')
+          $raw = & python3 -B $gateway @argv
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'STAGE_GATEWAY_BLOCKED' }
+          $envelope = @($raw)[-1] | ConvertFrom-Json
+          $staged = $envelope.stdout | ConvertFrom-Json
+          if ($envelope.state_changed -ne $false -or $staged.result -notin @('STAGED_ONLY', 'ALREADY_STAGED') -or $staged.source_sha -ne $env:WORKER_POOL_SHA -or $staged.activated -ne $false -or $staged.secrets_read -ne $false) { throw 'STAGE_EVIDENCE_INVALID' }
+          if (($staged.result -eq 'STAGED_ONLY') -ne $staged.state_changed) { throw 'STAGE_STATE_MISMATCH' }
+
+          $readArgs = @('--policy', $policy, '--correlation-id', $env:CORRELATION_ID, 'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID, '--risk', '1', '--timeout', '45', '--expected-head', $env:GITHUB_SHA, '--', 'python3', '-B', $script, '--source-sha', $env:WORKER_POOL_SHA, '--mode', 'plan')
+          $readRaw = & python3 -B $gateway @readArgs
+          if ($LASTEXITCODE -ne 0 -or -not $readRaw) { throw 'STAGE_READBACK_BLOCKED' }
+          $readEnvelope = @($readRaw)[-1] | ConvertFrom-Json
+          $observed = $readEnvelope.stdout | ConvertFrom-Json
+          if ($readEnvelope.state_changed -ne $false -or $observed.result -ne 'ALREADY_STAGED' -or $observed.source_sha -ne $env:WORKER_POOL_SHA -or $observed.file_count -ne $staged.file_count -or $observed.state_changed -ne $false -or $observed.activated -ne $false -or $observed.secrets_read -ne $false) { throw 'STAGE_READBACK_INVALID' }
+
+          $evidence = [ordered]@{
+            schema_version = '1'
+            stage_result = $staged.result
+            readback_result = $observed.result
+            source_sha = $env:WORKER_POOL_SHA
+            file_count = $observed.file_count
+            state_changed = $staged.state_changed
+            activated = $false
+            secrets_read = $false
+            workflow_sha = $env:GITHUB_SHA
+            run_id = "$env:GITHUB_RUN_ID"
+          }
+          New-Item -ItemType Directory -Force (Split-Path $env:EVIDENCE_FILE) | Out-Null
+          $evidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $env:EVIDENCE_FILE -Encoding UTF8
+
+      - name: Upload sanitized stage and readback receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: noteri-worker-pool-stage-${{ github.run_id }}
+          path: artifacts/noteri-pool-stage-only/evidence.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  independent-readback:
+    name: Independently validate stage and readback receipt
+    needs: native-stage
+    if: >-
+      needs.native-stage.result == 'success' &&
+      github.repository == 'ericson-j-santos/noteri-runtime' &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout exact producer SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Download artifact from this run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: noteri-worker-pool-stage-${{ github.run_id }}
+          path: .tmp/noteri-stage-readback
+      - name: Validate exact sanitized JSON and log receipt
+        run: >-
+          python3 -B scripts/validate_noteri_worker_pool_stage_artifact.py
+          --evidence .tmp/noteri-stage-readback/evidence.json
+          --source-sha "$WORKER_POOL_SHA"
+          --workflow-sha "${{ github.sha }}"
+          --run-id "${{ github.run_id }}"
