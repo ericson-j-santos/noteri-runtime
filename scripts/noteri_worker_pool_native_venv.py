@@ -28,6 +28,12 @@ CONFIRM = "PREPARE-NOTERI-WORKER-POOL-VENV"
 SCHEMA = "1"
 MIN_FREE_BYTES = 1024 * 1024 * 1024
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+SAFE_PREPARE_FAILURES = frozenset({
+    "concurrent_venv_present", "venv_pip_install_failed",
+    "venv_pip_check_failed", "venv_pip_list_failed",
+    "venv_package_inventory_invalid", "venv_versions_mismatch",
+    "venv_readback_failed",
+})
 
 
 class Blocked(RuntimeError):
@@ -158,29 +164,41 @@ def prepare(*, localappdata: Path, hostname: str, platform: str, profile: str | 
             return {**base, "result": "BLOCKED_CONCURRENT_PREPARE"}
         os.close(fd)
         created = False
+        phase = "before_create"
         try:
             if venv_root.exists():
                 raise Blocked("concurrent_venv_present")
             created = True
             installer = install or _install
+            phase = "install"
             installer(venv_root, release / "requirements.txt")
             python = _python(venv_root)
+            phase = "package_inventory"
             installed = _installed(python)
             if not all(installed.get(name) == version for name, version in required.items()):
                 raise Blocked("venv_versions_mismatch")
+            phase = "manifest"
             manifest = {"schema_version": SCHEMA, "source_sha": SOURCE_SHA,
                         "requirements_sha256": requirements_hash,
                         "python_sha256": _hash_file(python)}
             (venv_root / "noteri-venv-manifest.json").write_text(
                 json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+            phase = "readback"
             if not _verify(venv_root, requirements_hash, required):
                 raise Blocked("venv_readback_failed")
             return {**base, "result": "VENV_PREPARED", "state_changed": True,
                     "requirements_sha256": requirements_hash}
-        except Exception:
-            if created:
-                _safe_rollback(venv_root, parent)
-            return {**base, "result": "BLOCKED_PREPARE_ROLLED_BACK"}
+        except Exception as exc:
+            try:
+                if created:
+                    _safe_rollback(venv_root, parent)
+            except Exception:
+                return {**base, "result": "BLOCKED_ROLLBACK", "phase": phase}
+            code = str(exc) if isinstance(exc, Blocked) else "unexpected_failure"
+            if code not in SAFE_PREPARE_FAILURES:
+                code = "unexpected_failure"
+            return {**base, "result": "BLOCKED_PREPARE_ROLLED_BACK",
+                    "phase": phase, "failure_code": code}
         finally:
             lock.unlink(missing_ok=True)
     except (OSError, ValueError, TypeError, KeyError, stage.StageBlocked, Blocked):
