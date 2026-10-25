@@ -38,6 +38,13 @@ A versão canônica de session_launcher.py no SHA acima (1.6.19) já contém con
 
 Qualquer falha de bootstrap, Gateway, Ollama, GitHub API ou evidência bloqueia sem fallback por terminal/RDC/UAC. Nenhum disparo será repetido sem mudança material comprovada e novo CI.
 
+## Recuperação governada do run #40242823952
+
+- O job físico inicial confirmou pickup do Noteri, Session Launcher e instalação isolada de dependências, mas falhou na etapa Risk1 como `ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED`.
+- O workflow anterior lançava erro antes de extrair o JSON sanitizado do Gateway, escondendo o código de rejeição do preflight. A recuperação expõe apenas `ISSUE8_SANITIZED_FAILURE=issue8_...` com validação estrita; qualquer falha continua bloqueante.
+- O disparo original `OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_ONCE` permanece no histórico. A correção só admite nova transição ausência→presença do marcador `OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_RECOVERY_ONCE`, pelo OWNER, em PR draft, após testes CI concluídos no novo SHA e revalidação da main. Não incluir o novo marcador antecipadamente.
+- Esta etapa é recuperação diagnóstica; não comprova inferência Ollama nem readback independente até um novo E2E físico com recibo validado.
+
 ## Limites
 
 Suíte simulada não equivale à inferência física. Mesmo um resultado positivo deste preflight NÃO prova a cadeia Issue→reparo→CAS Git bundle→Validator→draft PR. O próximo incremento é do Worker Pool e requer IssueRAGReceiptCAS e adapter_from_durable_issue_rag com lease/fencing, patch material, CAS real, 42/42 + 52/52, exatamente uma PR draft criada pelo agente e replay independente.

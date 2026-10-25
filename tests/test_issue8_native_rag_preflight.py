@@ -187,7 +187,13 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
     assert "types: [edited]" in t
     assert "github.actor == 'ericson-j-santos'" in t
     assert "github.event.changes.body.from != null" in t
-    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_ONCE" in t
+    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_RECOVERY_ONCE" in t
+    assert "ISSUE8_SANITIZED_FAILURE=" in t
+    assert "ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED" in t
+    assert "gatewayStatus -ne 0" in t
+    assert "2>&1" in t
+    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_RECOVERY_ONCE')" in t
+    assert "throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'" in t
     assert "runner_name" in t
     assert "Noteri-runtime" in t
     assert "6404265064" in t

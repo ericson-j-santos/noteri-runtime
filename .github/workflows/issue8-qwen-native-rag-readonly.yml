@@ -48,9 +48,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'feat/issue8-native-rag-preflight-20261025' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_ONCE') &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_RECOVERY_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_ONCE')
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_RECOVERY_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 4
     permissions:
@@ -84,7 +84,7 @@ jobs:
                 d.head.ref!=='feat/issue8-native-rag-preflight-20261025' ||
                 d.head.sha!==sha || d.base.ref!=='main' ||
                 d.base.sha!==main.data.commit.sha ||
-                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_ONCE')) {
+                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_RECOVERY_ONCE')) {
               core.setFailed('ISSUE8_NOTERI_PR_OR_BASE_DRIFT'); return;
             }
             const files=(await github.rest.pulls.listFiles({
@@ -246,11 +246,204 @@ jobs:
             'run','--cwd',$env:SESSION_TARGET_PATH,'--session-id',$env:SESSION_ID,
             '--risk','1','--timeout','300',
             '--expected-head',$env:EXPECTED_NOTERI_SHA,'--',$py,'-B',$script)
-          $raw=& python3 -B $gateway @args
-          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED' }
-          $envelope=@($raw)[-1] | ConvertFrom-Json
-          if ($envelope.state_changed -ne $false -or
-              $envelope.gateway_exit_code -ne 0) { throw 'ISSUE8_GATEWAY_STATE_INVALID' }
+          # Capture the Gateway's already-redacted JSON without dumping native
+          # stderr, executable paths, credentials, or arbitrary subprocess text.
+          $savedPreference=$ErrorActionPreference
+          try {
+            $ErrorActionPreference='Continue'
+            $raw=& python3 -B $gateway @args 2>&1
+            $gatewayStatus=$LASTEXITCODE
+          } finally {
+            $ErrorActionPreference=$savedPreference
+          }
+          $envelope=$null
+          foreach ($line in @($raw)) {
+            try {
+              $candidate=$line.ToString() | ConvertFrom-Json -ErrorAction Stop
+              if ($candidate.PSObject.Properties.Name -contains 'gateway_exit_code') {
+                $envelope=$candidate
+              }
+            } catch {
+              # No raw diagnostic output: only static result codes may be logged.
+            }
+          }
+          if ($null -eq $envelope) { throw 'ISSUE8_GATEWAY_ENVELOPE_UNAVAILABLE' }
+          if ($gatewayStatus -ne 0 -or $envelope.gateway_exit_code -ne 0) {
+            $reason='issue8_gateway_execution_unavailable'
+            if ($envelope.result -eq 'blocked') {
+              $reason='issue8_gateway_policy_blocked'
+            } elseif ($envelope.stdout) {
+              try {
+                $diag=$envelope.stdout | ConvertFrom-Json -ErrorAction Stop
+                if ($diag.result -eq 'ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED' -and
+                    $diag.reason_code -cmatch '^issue8_[a-z0-9_]{4,100}
+          $out=$envelope.stdout | ConvertFrom-Json
+          if ($out.result -ne 'ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED' -or
+              $out.worker_sha -ne $env:WORKER_POOL_SHA -or
+              $out.runtime_sha -ne $env:EXPECTED_NOTERI_SHA -or
+              $out.baseline_total -ne 42 -or $out.baseline_passed -ge 42 -or
+              $out.model_calls -lt 2 -or $out.model_calls -gt 4 -or
+              $out.independent_git_source_readback -ne $true -or
+              $out.cas_write -ne $false -or
+              $out.draft_pr_created -ne $false -or $out.state_changed -ne $false) {
+            throw 'ISSUE8_NATIVE_RAG_RECEIPT_INVALID'
+          }
+          New-Item -ItemType Directory -Force (Join-Path $env:GITHUB_WORKSPACE 'artifacts\issue8-rag') | Out-Null
+          $out | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $env:GITHUB_WORKSPACE 'artifacts\issue8-rag\receipt.json') -Encoding UTF8
+          Write-Output 'ISSUE8_NATIVE_RAG_RECEIPT_ACCEPTED'
+
+      - name: Upload sanitized result for independent hosted readback
+        if: steps.probe.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue8-native-rag-${{ github.run_id }}
+          path: artifacts/issue8-rag/receipt.json
+          if-no-files-found: error
+          retention-days: 2
+
+  watchdog:
+    name: Noteri runner pickup watchdog 300s
+    needs: admission
+    if: needs.admission.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Stop stale job without self-hosted pickup
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const started=Date.now(),limit=300000;
+            while (Date.now()-started<limit) {
+              const {data}=await github.rest.actions.listJobsForWorkflowRun({
+                owner:context.repo.owner,repo:context.repo.repo,
+                run_id:context.runId,per_page:100
+              });
+              const job=data.jobs.find(j=>j.name==='Noteri Qwen issue8 native RAG read-only');
+              if (job && job.runner_name==='Noteri-runtime' &&
+                  Number(job.runner_id)===21 &&
+                  (job.status==='in_progress'||job.status==='completed')) {
+                core.info('ISSUE8_NOTERI_REAL_PICKUP_OBSERVED');return;
+              }
+              await new Promise(resolve=>setTimeout(resolve,15000));
+            }
+            core.setFailed('ISSUE8_NOTERI_RUNNER_NOT_PICKED_300S');
+            await github.rest.actions.cancelWorkflowRun({
+              owner:context.repo.owner,repo:context.repo.repo,run_id:context.runId
+            });
+
+  independent_readback:
+    name: Independent Noteri issue8 RAG source and job readback
+    needs: [admission, physical]
+    if: needs.admission.result == 'success' && needs.physical.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: issue8-native-rag-${{ github.run_id }}
+          path: .tmp/issue8-rag-readback
+      - name: Compare real job and immutable GitHub source from fresh API
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const fs=require('fs'),crypto=require('crypto');
+            const raw=fs.readFileSync('.tmp/issue8-rag-readback/receipt.json','utf8');
+            if (raw.length>10000) {core.setFailed('ISSUE8_RECEIPT_UNBOUNDED');return;}
+            const r=JSON.parse(raw);
+            const owner='ericson-j-santos',worker='engineering-worker-pool';
+            const workerSHA='74035488dac6938bfc14957621e86168003cd0c6';
+            const thisSHA=context.payload.pull_request.head.sha;
+            if (r.result!=='ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED' ||
+                r.schema_version!=='issue8.native.rag.readonly-v1' ||
+                r.issue_number!==8 || r.worker_sha!==workerSHA ||
+                r.runtime_sha!==thisSHA ||
+                r.rules_sha!=='95ae14f7e90e01a5d6d1227fa2536246725ac68c' ||
+                r.model_digest_prefix!=='dae161e27b0e' ||
+                r.baseline_total!==42 || !Number.isInteger(r.baseline_passed) ||
+                r.baseline_passed<0 || r.baseline_passed>=42 ||
+                !Number.isInteger(r.model_calls) ||
+                r.model_calls<2||r.model_calls>4||
+                !/^[0-9a-f]{64}$/.test(r.source_sha256||'') ||
+                !/^[0-9a-f]{64}$/.test(r.receipt_sha256||'') ||
+                r.session_result!=='SESSION_LAUNCH_OK' ||
+                !/^[0-9a-f]{64}$/.test(r.snapshot_sha256||'') ||
+                r.run_id!==String(context.runId) ||
+                r.run_attempt!==String(context.runAttempt) ||
+                r.independent_git_source_readback!==true ||
+                r.cas_write!==false || r.draft_pr_created!==false ||
+                r.model_commands_authorized!==false || r.state_changed!==false) {
+              core.setFailed('ISSUE8_RECEIPT_IDENTITY_INVALID');return;
+            }
+            const [jobs,main,wm,comment,issue,source]=await Promise.all([
+              github.rest.actions.listJobsForWorkflowRun({
+                owner,repo:context.repo.repo,run_id:context.runId,per_page:100}),
+              github.rest.repos.getBranch({owner,repo:context.repo.repo,branch:'main'}),
+              github.rest.repos.getBranch({owner,repo:worker,branch:'main'}),
+              github.rest.issues.getComment({owner,repo:worker,comment_id:6404265064}),
+              github.rest.issues.get({owner,repo:worker,issue_number:8}),
+              github.rest.repos.getContent({owner,repo:worker,path:r.citation_path,ref:workerSHA})
+            ]);
+            const j=jobs.data.jobs.find(x=>x.name==='Noteri Qwen issue8 native RAG read-only');
+            const needed=[
+              'Verify real qualified Noteri runner',
+              'Canonical Session Launcher and real runner version preflight',
+              'Create isolated Python venv and pin httpx through Gateway',
+              'Execute issue8 Qwen RAG and failing baseline via Risk1 Gateway',
+              'Upload sanitized result for independent hosted readback'
+            ];
+            if (!j || j.status!=='completed'||j.conclusion!=='success'||
+                j.runner_name!=='Noteri-runtime'||j.runner_id!==21||
+                j.head_sha!==thisSHA ||
+                !needed.every(n=>j.steps?.some(s=>s.name===n&&
+                  s.status==='completed'&&s.conclusion==='success')) ||
+                main.data.commit.sha!==context.payload.pull_request.base.sha||
+                wm.data.commit.sha!==workerSHA||
+                comment.data.user?.login!==owner ||
+                comment.data.author_association!=='OWNER' ||
+                comment.data.body!=='/local-agent authorize bridge.property.v1 sha:'+workerSHA ||
+                issue.data.state!=='open'||!!issue.data.pull_request) {
+              core.setFailed('ISSUE8_INDEPENDENT_JOB_OR_OWNER_DRIFT');return;
+            }
+            if (source.data.type!=='file' || source.data.path!==r.citation_path) {
+              core.setFailed('ISSUE8_INDEPENDENT_SOURCE_MISSING');return;
+            }
+            const decoded=Buffer.from(source.data.content.replace(/\s+/g,''),'base64');
+            const sha256=crypto.createHash('sha256').update(decoded).digest('hex');
+            const gitBlob=crypto.createHash('sha1').update(
+              Buffer.concat([Buffer.from('blob '+decoded.length+'\0'),decoded])
+            ).digest('hex');
+            const lines=decoded.toString('utf8').split(/\r?\n/);
+            if (sha256!==r.source_sha256 || gitBlob!==source.data.sha ||
+                source.data.size!==decoded.length ||
+                !Number.isInteger(r.citation_line) ||
+                r.citation_line<1 || r.citation_line>lines.length) {
+              core.setFailed('ISSUE8_INDEPENDENT_SOURCE_DRIFT');return;
+            }
+            core.info(JSON.stringify({
+              result:'ISSUE8_NATIVE_RAG_INDEPENDENT_READBACK_VERIFIED',
+              physical_job_id:j.id,runner_id:j.runner_id,
+              worker_sha:workerSHA,source_sha256:sha256,
+              model_calls:r.model_calls,baseline_passed:r.baseline_passed,
+              correlation_id:r.correlation_id
+            }));
+) {
+                  $reason=$diag.reason_code
+                }
+              } catch {
+                # Malformed or untrusted output never bypasses this failure gate.
+              }
+            }
+            Write-Output "ISSUE8_SANITIZED_FAILURE=$reason"
+            throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'
+          }
+          if ($envelope.state_changed -ne $false) { throw 'ISSUE8_GATEWAY_STATE_INVALID' }
           $out=$envelope.stdout | ConvertFrom-Json
           if ($out.result -ne 'ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED' -or
               $out.worker_sha -ne $env:WORKER_POOL_SHA -or
