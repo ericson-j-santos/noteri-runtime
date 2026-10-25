@@ -81,7 +81,7 @@ class Registry:
 
 def test_registered_path_uses_allowlisted_fields_and_does_not_mutate():
     r = Registry()
-    assert m.registered_path(r) == ERRORLOG
+    assert m.registered_path(r) == (ERRORLOG, True)
     assert r.seen[:2] == [m.SETUP, "SQLPath"]
     assert "SQLArg1" in r.seen
     assert all("Blob" not in str(x) for x in r.seen)
@@ -134,10 +134,11 @@ def test_symlink_is_rejected_before_read(tmp_path):
 def test_real_collection_contract_with_fake_log():
     content = b"Server A self-generated certificate was successfully loaded for encryption.\nPRIVATE-SERVER"
     with patch.object(m.os, "name", "nt"), patch.object(m.socket, "gethostname", return_value="Noteri"), \
-         patch.object(m, "registered_path", return_value=ERRORLOG), \
+         patch.object(m, "registered_path", return_value=(ERRORLOG, True)), \
          patch.object(m, "_safe_regular_file", return_value=content):
         value = m.collect("a" * 40, "sqlcert-log-20261025", Registry())
     assert value["status"] == "observed"
+    assert value["startup_log_argument_verified"] is True
     assert value["certificate_startup_log_classification"] == "self_generated_loaded"
     assert value["sql_authenticated"] is False and value["production_touched"] is False
     assert "PRIVATE-SERVER" not in json.dumps(value)
@@ -181,3 +182,40 @@ def test_missing_errorlog_file_classified_without_path_exposure(tmp_path):
     with pytest.raises(m.Blocked, match="sql_errorlog_file_absent") as exc:
         m._safe_regular_file(target)
     assert str(target) not in str(exc.value)
+
+def test_registry_denied_uses_setup_candidate_without_claiming_binding():
+    class DeniedParameters(Registry):
+        def OpenKey(self, hive, path, zero, access):
+            if path == m.PARAMETERS:
+                raise PermissionError("private details")
+            return super().OpenKey(hive, path, zero, access)
+    result = m.registered_path(DeniedParameters())
+    assert result == (ERRORLOG, False)
+
+
+def test_registry_denied_with_untrusted_setup_still_fails_closed():
+    r = Registry()
+    r.fields["SQLPath"] = r"C:\Other\MSSQL17.MSSQLSERVER\MSSQL"
+    class DeniedParameters(Registry):
+        def OpenKey(self, hive, path, zero, access):
+            if path == m.PARAMETERS:
+                raise PermissionError
+            return super().OpenKey(hive, path, zero, access)
+    denied = DeniedParameters()
+    denied.fields["SQLPath"] = r"D:\Other\MSSQL17.OTHER\MSSQL"
+    with pytest.raises(m.Blocked, match="sql_instance_path_unverified"):
+        m.registered_path(denied)
+
+
+def test_unverified_candidate_never_promotes_to_current_certificate(tmp_path):
+    file = tmp_path / "ERRORLOG"
+    file.write_text("Server A self-generated certificate was successfully loaded for encryption.")
+    with patch.object(m.os, "name", "nt"), patch.object(m.socket, "gethostname", return_value="Noteri"), \
+         patch.object(m, "registered_path", return_value=(ERRORLOG, False)), \
+         patch.object(m, "_safe_regular_file", return_value=file.read_bytes()):
+        result = m.collect("a" * 40, "sqlcert-log-20261025", Registry())
+    assert result["certificate_startup_log_classification"] == "self_generated_loaded"
+    assert result["startup_log_argument_verified"] is False
+    assert result["log_source"] == "unverified_setup_candidate"
+    assert result["current_service_generation_verified"] is False
+    assert result["actual_tls_certificate_verified"] is False

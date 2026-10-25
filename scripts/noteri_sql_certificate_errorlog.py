@@ -50,7 +50,7 @@ def log_target(sql_path: str, startup_args: list[str]) -> str:
     return roots[0]
 
 
-def registered_path(registry: Any) -> str:
+def registered_path(registry: Any) -> tuple[str, bool]:
     """Bounded HKLM read; no SQLArg values are emitted outside this function."""
     access = registry.KEY_READ | registry.KEY_WOW64_64KEY
     try:
@@ -72,8 +72,11 @@ def registered_path(registry: Any) -> str:
     except FileNotFoundError:
         raise Blocked("sql_startup_parameters_absent") from None
     except PermissionError:
-        raise Blocked("sql_startup_parameters_denied") from None
-    return log_target(base, args)
+        # No elevation or bypass: a best-effort candidate under the SQLPath
+        # read earlier, NOT verified as the active -e startup argument.
+        default_path = ntpath.join(str(base).rstrip("\\/"), "Log", "ERRORLOG")
+        return log_target(base, ["-e" + default_path]), False
+    return log_target(base, args), True
 
 
 def _safe_regular_file(path: Path) -> bytes:
@@ -148,12 +151,14 @@ def collect(expected_sha: str, correlation_id: str, registry: Any) -> dict[str, 
         for x in sql.get("instances", [])
     ):
         raise Blocked("local_sql2025_not_running")
-    configured = registered_path(registry)
+    configured, argument_verified = registered_path(registry)
     raw = _safe_regular_file(Path(configured))
     result = classify_cert_log(decode_log(raw))
     return {
         "status": "observed", "schema": "noteri-sql-certificate-log-inventory/v1",
         "host": "Noteri", "source_sha": expected_sha, "correlation_id": correlation_id,
+        "startup_log_argument_verified": argument_verified,
+        "log_source": "registered_argument" if argument_verified else "unverified_setup_candidate",
         **result,
         "sql_authenticated": False, "business_data_read": False,
         "registry_modified": False, "production_touched": False,
