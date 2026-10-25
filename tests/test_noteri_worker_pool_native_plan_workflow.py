@@ -15,7 +15,7 @@ def workflow() -> str:
 def assert_readonly_contract(text: str) -> None:
     assert "workflow_dispatch:" in text
     assert "branches: [main]" in text
-    assert "github.ref == 'refs/heads/main'" in text
+    assert text.count("github.ref == 'refs/heads/main'") == 2
     assert "github.repository == 'ericson-j-santos/noteri-runtime'" in text
     assert "github.actor == 'ericson-j-santos'" in text
     assert "runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]" in text
