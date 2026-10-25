@@ -37,6 +37,13 @@ class Blocked(RuntimeError):
     pass
 
 
+def is_admin() -> bool:
+    try:
+        return os.name == "nt" and bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        return False
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -297,6 +304,8 @@ def wait_api(token_file: Path, python: Path, runner: Path, seconds: float = 30) 
 
 
 def activate(local: Path, source: Path) -> dict:
+    if not is_admin():
+        raise Blocked("elevation_required")
     root, venv_root, token_file = qualify(local, source)
     bin_dir = root / "bin"
     python = venv._python(venv_root)
@@ -420,6 +429,10 @@ def main() -> int:
                 ready = existing is not None and verify_api(*existing[1:])
                 payload = {**base, "result": "ALREADY_ACTIVE" if ready else "BLOCKED_EXISTING",
                            "activated": ready}
+    except Blocked as exc:
+        payload = {**base, "result": ("BLOCKED_ELEVATION_REQUIRED"
+                                     if str(exc) == "elevation_required"
+                                     else "BLOCKED_PRECONDITION")}
     except Exception:
         payload = {**base, "result": "BLOCKED_PRECONDITION"}
     print(json.dumps(payload, sort_keys=True))

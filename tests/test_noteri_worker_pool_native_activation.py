@@ -25,6 +25,17 @@ class ActivationTests(unittest.TestCase):
         self.venv = self.root / "venvs" / "pinned"
         self.token = self.root / "credentials" / "api-token.txt"
         self.user = f"{socket.gethostname()}\\{getpass.getuser()}"
+        admin = patch.object(activation, "is_admin", return_value=True)
+        admin.start()
+        self.addCleanup(admin.stop)
+
+    def test_unelevated_activation_stops_before_writing(self):
+        with patch.object(activation, "is_admin", return_value=False), \
+                patch.object(activation, "qualify") as qualify:
+            with self.assertRaisesRegex(activation.Blocked, "elevation_required"):
+                activation.activate(self.path, self.source)
+            qualify.assert_not_called()
+        self.assertFalse((self.root / "bin").exists())
 
     def test_xml_requires_limited_s4u_boot_and_exact_action(self):
         python = self.venv / "Scripts" / "python.exe"

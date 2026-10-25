@@ -80,6 +80,15 @@ inicialização. O runner valida os hashes da release e do venv e a referência
 da credencial antes de iniciar Uvicorn em `127.0.0.1:8097`. O banco SQLite fica
 em `data/pool.db` na árvore privada do Worker Pool.
 
+O registro exige token administrativo elevado. Uma chamada direta sem elevação
+retorna `BLOCKED_ELEVATION_REQUIRED` antes de copiar arquivos. Em uma sessão
+interativa autorizada, `scripts/noteri_worker_pool_api_uac.py --confirm
+LAUNCH-NOTERI-WORKER-POOL-API-UAC` faz o preflight de leitura e solicita UAC
+para essa única ativação. O prompt é visível ao operador; a tarefa resultante
+continua com `LeastPrivilege`. O launcher aceita sucesso somente após reler a
+tarefa e validar a API, e retorna um resultado sanitizado se UAC for cancelado
+ou a ativação não ficar pronta no prazo.
+
 A ativação só confirma sucesso quando a definição S4U relida corresponde à
 ação registrada, o listener pertence ao processo filho do Python lançado
 pela tarefa, `/health` indica pronto, `/v1/contract` autenticado retorna v1
