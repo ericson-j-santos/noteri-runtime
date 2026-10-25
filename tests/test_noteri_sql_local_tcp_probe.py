@@ -85,7 +85,7 @@ def test_valid_local_socket_proves_only_listener():
     assert seen == [(("127.0.0.1", 1433), 2.0)]
     assert sock.closed
     assert result["tcp_loopback_listener_responded"] is True
-    assert result["port_matches_1433"] is True
+    assert result["default_tcp_port_configured"] is True
     for field in ("sql_login_attempted", "sql_connection_tested",
                   "sql_permissions_verified", "tls_certificate_verified",
                   "database_identity_verified", "fabric_identity_verified",
@@ -116,7 +116,7 @@ def test_valid_explicit_nonstandard_port_is_not_default():
     with patch.object(m.network, "read_network", return_value=META):
         result = m.check_listener(Registry(port="1444"), lambda *_a, **_k: Sock())
     assert result["tcp_loopback_listener_responded"] is True
-    assert result["port_matches_1433"] is False
+    assert result["default_tcp_port_configured"] is False
 
 
 @pytest.mark.parametrize("changes", [
