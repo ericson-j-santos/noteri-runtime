@@ -22,7 +22,7 @@ from pathlib import Path
 HOST_REPOSITORY = "ericson-j-santos/noteri-runtime"
 WORKER_REPOSITORY = "ericson-j-santos/engineering-worker-pool"
 WORKER_SHA = "74035488dac6938bfc14957621e86168003cd0c6"
-RULES_SHA = "95ae14f7e90e01a5d6d1227fa2536246725ac68c"
+RULES_SHA = "7a8dc26bdb26cf925472d800ea29066f7602dd0c"
 SOURCE_PATH = "app/portfolio_bridge.py"
 SOURCE_BLOB_SHA = "d9a25c574163c49f695e774609949160d94f4490"
 ISSUE_NUMBER = 8
@@ -32,6 +32,15 @@ SHA40 = re.compile(r"[a-f0-9]{40}\Z")
 SHA64 = re.compile(r"[a-f0-9]{64}\Z")
 CORRELATION = re.compile(r"[a-z0-9][a-z0-9-]{7,120}\Z")
 
+
+_PHASE = 'identity'
+_PHASES = frozenset(('identity','checkouts','agent_core','imports','owner','baseline','model','research','readback'))
+
+def _set_phase(value: str) -> None:
+    global _PHASE
+    if value not in _PHASES:
+        raise PreflightBlocked('issue8_phase_invalid')
+    _PHASE = value
 
 class PreflightBlocked(RuntimeError):
     """Never contain user input, remote API body, paths, or credentials."""
@@ -167,16 +176,20 @@ def read_original_bytes(reader: object, path: str, sha: str) -> bytes:
 
 
 def run(env: dict[str, str]) -> dict[str, object]:
+    _set_phase('identity')
     identity = validate_environment(env)
+    _set_phase('checkouts')
     worker, original = verify_pinned_checkout(env, identity)
     sys.dont_write_bytecode = True
     sys.path.insert(0, str(worker))
+    _set_phase('agent_core')
     agent = Path(identity["workspace"]) / "_agent_core"
     require(read_git(agent, "rev-parse", "HEAD")
             == "1fc032d4c412bdb4ed202cf1193caf0cb49490ce",
             "issue8_agent_core_sha_drift")
     sys.path.insert(0, str(agent))
 
+    _set_phase('imports')
     from app.issue_draft_pr import admit, trusted_task
     from app.structured_code_worker import validate
     from app.issue_rag_research import official_issue_reader, research_issue
@@ -184,7 +197,8 @@ def run(env: dict[str, str]) -> dict[str, object]:
     from app.native_structured_ollama import NativeStructuredOllama
 
     # Independent live GitHub read; no synthetic issue or pre-authorized JSON.
-    public_api = official_issue_reader()
+    _set_phase('owner')
+    public_api = official_issue_reader(env.get('GITHUB_TOKEN') or None)
     now = datetime.now(timezone.utc)
     approved = admit(
         public_api.get_issue(ISSUE_NUMBER),
@@ -194,6 +208,7 @@ def run(env: dict[str, str]) -> dict[str, object]:
         observed_at=now.isoformat(), now=now,
     )
     task = trusted_task(approved, original)
+    _set_phase('baseline')
     baseline = validate(original.decode("utf-8"), task)
     require(type(baseline) is dict and baseline.get("total") == 42
             and type(baseline.get("passed")) is int
@@ -202,8 +217,10 @@ def run(env: dict[str, str]) -> dict[str, object]:
 
     # Real Ollama calls must occur ONLY after the above owner/HEAD/baseline
     # gates. NativeStructuredOllama checks GGUF digest and no cloud endpoints.
+    _set_phase('model')
     NativeStructuredOllama.no_cloud()
-    receipt = research_issue(approved)
+    _set_phase('research')
+    receipt = research_issue(approved, github_token=env.get('GITHUB_TOKEN') or None)
     require(type(receipt) is dict and
             receipt.get("schema_version") == "worker.rag.issue-context-v1"
             and receipt.get("head_sha") == WORKER_SHA
@@ -218,7 +235,8 @@ def run(env: dict[str, str]) -> dict[str, object]:
             "issue8_real_rag_not_verified")
 
     # Separate API client validates the exact cited bytes after inference.
-    independent = official_issue_reader()
+    _set_phase('readback')
+    independent = official_issue_reader(env.get('GITHUB_TOKEN') or None)
     citation = bind_issue_rag(
         approved, receipt,
         lambda path, sha: read_original_bytes(independent, path, sha),
@@ -262,13 +280,26 @@ def main() -> int:
         observed = run(dict(os.environ))
     except Exception as exc:
         code = (
-            str(exc) if type(exc) is PreflightBlocked and
-            re.fullmatch(r"[a-z][a-z0-9_]{3,100}", str(exc))
+            str(exc) if (
+                (
+                    type(exc) is PreflightBlocked or
+                    (type(exc).__module__, type(exc).__name__) in {
+                        ("app.issue_draft_pr", "HandoffBlocked"),
+                        ("app.structured_code_worker", "StructuredBlocked"),
+                        ("app.agent_rag_consumer", "ResearchBlocked"),
+                        ("agent_core.core", "Blocked"),
+                    }
+                ) and re.fullmatch(
+                    r"(?:issue8_|rag_|main_|owner_|native_|github_|context_)[a-z0-9_]{2,95}",
+                    str(exc),
+                )
+            )
             else "issue8_native_dependency_unavailable"
         )
         print(json.dumps({
             "result": "ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED",
             "reason_code": code,
+            "phase": _PHASE if _PHASE in _PHASES else "identity",
             "state_changed": False,
             "draft_pr_created": False,
         }, sort_keys=True))
