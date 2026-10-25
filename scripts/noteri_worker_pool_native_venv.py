@@ -14,8 +14,6 @@ import re
 import shutil
 import socket
 import subprocess
-import sys
-import venv
 from pathlib import Path
 
 from scripts import noteri_worker_pool_activation_preflight as preflight
@@ -27,12 +25,15 @@ ROOT_RELATIVE = Path("ReqSys") / "NoteriWorkerPool"
 CONFIRM = "PREPARE-NOTERI-WORKER-POOL-VENV"
 SCHEMA = "1"
 MIN_FREE_BYTES = 1024 * 1024 * 1024
+BASE_PYTHON_RELATIVE = Path("uv") / "python" / "cpython-3.11.15-windows-x86_64-none" / "python.exe"
+BASE_PYTHON_SHA256 = "ae7e969410d751d010c2ca03394fe5c53230fbf48ca7d368b897e455eca14fba"
+BASE_PYTHON_VERSION = "Python 3.11.15"
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 SAFE_PREPARE_FAILURES = frozenset({
     "concurrent_venv_present", "venv_pip_install_failed",
     "venv_pip_check_failed", "venv_pip_list_failed",
     "venv_package_inventory_invalid", "venv_versions_mismatch",
-    "venv_readback_failed",
+    "venv_readback_failed", "venv_create_failed",
 })
 
 
@@ -77,6 +78,24 @@ def _python(venv_root: Path) -> Path:
     return venv_root / "Scripts" / "python.exe"
 
 
+def _base_python() -> Path:
+    appdata = os.environ.get("APPDATA", "")
+    if not appdata:
+        raise Blocked("base_python_unqualified")
+    python = Path(appdata) / BASE_PYTHON_RELATIVE
+    try:
+        stage.ensure_no_link_components(python)
+        if not python.is_file() or _hash_file(python) != BASE_PYTHON_SHA256:
+            raise Blocked("base_python_unqualified")
+        result = subprocess.run([str(python), "--version"], capture_output=True,
+                                text=True, timeout=10, check=False)
+        if result.returncode != 0 or result.stdout.strip() != BASE_PYTHON_VERSION:
+            raise Blocked("base_python_unqualified")
+    except (OSError, subprocess.TimeoutExpired, stage.StageBlocked) as exc:
+        raise Blocked("base_python_unqualified") from exc
+    return python
+
+
 def _installed(python: Path) -> dict[str, str]:
     result = subprocess.run(
         [str(python), "-B", "-m", "pip", "list", "--format=json", "--disable-pip-version-check"],
@@ -111,6 +130,7 @@ def _verify(venv_root: Path, requirements_hash: str, required: dict[str, str]) -
                 or manifest.get("schema_version") != SCHEMA
                 or manifest.get("source_sha") != SOURCE_SHA
                 or manifest.get("requirements_sha256") != requirements_hash
+                or manifest.get("base_python_sha256") != BASE_PYTHON_SHA256
                 or manifest.get("python_sha256") != _hash_file(python)):
             return False
         installed = _installed(python)
@@ -129,19 +149,17 @@ def _safe_rollback(venv_root: Path, venv_parent: Path) -> None:
 
 
 def prepare(*, localappdata: Path, hostname: str, platform: str, profile: str | None,
-            mode: str, confirm: str = "", python_version: tuple[int, int] | None = None,
-            install=None) -> dict:
+            mode: str, confirm: str = "", install=None) -> dict:
     base = {"schema_version": SCHEMA, "source_sha": SOURCE_SHA,
             "activated": False, "token_bytes_read": False, "state_changed": False}
     if platform != "nt" or hostname.casefold() != "noteri" or profile != "NORMAL":
         return {**base, "result": "BLOCKED_HOST_PROFILE"}
     if mode not in {"plan", "prepare"} or (mode == "prepare" and confirm != CONFIRM):
         return {**base, "result": "BLOCKED_ACTION"}
-    if (python_version or sys.version_info[:2]) < (3, 11):
-        return {**base, "result": "BLOCKED_PYTHON_VERSION"}
     root, release, venv_root = _paths(localappdata)
     try:
         requirements_hash = _check_release(release)
+        base_python = _base_python()
         credential = reference.qualify(localappdata=localappdata, hostname=hostname,
                                        profile=profile, platform=platform)
         if credential["result"] != "REFERENCE_PRIVATE_UNREAD":
@@ -171,7 +189,7 @@ def prepare(*, localappdata: Path, hostname: str, platform: str, profile: str | 
             created = True
             installer = install or _install
             phase = "install"
-            installer(venv_root, release / "requirements.txt")
+            installer(venv_root, release / "requirements.txt", base_python)
             python = _python(venv_root)
             phase = "package_inventory"
             installed = _installed(python)
@@ -180,6 +198,7 @@ def prepare(*, localappdata: Path, hostname: str, platform: str, profile: str | 
             phase = "manifest"
             manifest = {"schema_version": SCHEMA, "source_sha": SOURCE_SHA,
                         "requirements_sha256": requirements_hash,
+                        "base_python_sha256": BASE_PYTHON_SHA256,
                         "python_sha256": _hash_file(python)}
             (venv_root / "noteri-venv-manifest.json").write_text(
                 json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
@@ -205,11 +224,17 @@ def prepare(*, localappdata: Path, hostname: str, platform: str, profile: str | 
         return {**base, "result": "BLOCKED_INTEGRITY"}
 
 
-def _install(venv_root: Path, requirements: Path) -> None:
-    venv.EnvBuilder(with_pip=True, clear=False, symlinks=False).create(venv_root)
+def _install(venv_root: Path, requirements: Path, base_python: Path) -> None:
+    created = subprocess.run(
+        [str(base_python), "-B", "-m", "venv", str(venv_root)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120, check=False,
+    )
+    if created.returncode != 0:
+        raise Blocked("venv_create_failed")
     result = subprocess.run(
         [str(_python(venv_root)), "-B", "-m", "pip", "install", "--isolated",
-         "--no-input", "--disable-pip-version-check", "-r", str(requirements)],
+         "--no-input", "--disable-pip-version-check", "--only-binary=:all:",
+         "-r", str(requirements)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300, check=False,
     )
     if result.returncode != 0:

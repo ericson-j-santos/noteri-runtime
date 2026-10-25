@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -42,9 +43,10 @@ class NativeVenvTests(unittest.TestCase):
 
     def run_case(self, **changes):
         options = dict(localappdata=self.root, hostname="Noteri", platform="nt",
-                       profile="NORMAL", python_version=(3, 14), mode="plan")
+                       profile="NORMAL", mode="plan")
         options.update(changes)
-        with patch.object(reference, "qualify", return_value={"result": "REFERENCE_PRIVATE_UNREAD"}):
+        with patch.object(reference, "qualify", return_value={"result": "REFERENCE_PRIVATE_UNREAD"}), \
+                patch.object(native, "_base_python", return_value=self.root / "qualified-python.exe"):
             return native.prepare(**options)
 
     def test_plan_has_no_effect_and_rejects_study(self):
@@ -57,8 +59,9 @@ class NativeVenvTests(unittest.TestCase):
         self.assertEqual(self.run_case(profile="ESTUDO")["result"], "BLOCKED_HOST_PROFILE")
 
     def test_prepare_replay_and_version_readback(self):
-        def install(root: Path, requirements: Path):
+        def install(root: Path, requirements: Path, base_python: Path):
             self.assertTrue(requirements.is_file())
+            self.assertEqual(base_python, self.root / "qualified-python.exe")
             python = native._python(root)
             python.parent.mkdir(parents=True)
             python.write_bytes(b"fixed-python")
@@ -72,7 +75,7 @@ class NativeVenvTests(unittest.TestCase):
             self.assertFalse(replay["state_changed"])
 
     def test_failed_install_rolls_back_only_new_environment(self):
-        def fail(root: Path, _requirements: Path):
+        def fail(root: Path, _requirements: Path, _base_python: Path):
             root.mkdir()
             (root / "partial").write_text("partial", encoding="utf-8")
             raise native.Blocked("venv_pip_install_failed")
@@ -84,7 +87,7 @@ class NativeVenvTests(unittest.TestCase):
         self.assertFalse((self.root / native.ROOT_RELATIVE / "venvs" / native.SOURCE_SHA).exists())
 
     def test_unexpected_failure_is_sanitized(self):
-        def fail(root: Path, _requirements: Path):
+        def fail(root: Path, _requirements: Path, _base_python: Path):
             root.mkdir()
             raise RuntimeError("private detail that must not leave the host")
 
@@ -109,6 +112,35 @@ class NativeVenvTests(unittest.TestCase):
         lock.unlink()
         (parent / native.SOURCE_SHA).mkdir()
         self.assertEqual(self.run_case()["result"], "BLOCKED_EXISTING_VENV")
+
+    def test_base_python_requires_pinned_digest_and_version(self):
+        python = self.root / native.BASE_PYTHON_RELATIVE
+        python.parent.mkdir(parents=True)
+        python.write_bytes(b"trusted-executable")
+        with patch.dict(native.os.environ, {"APPDATA": str(self.root)}), \
+                patch.object(native, "BASE_PYTHON_SHA256", hashlib.sha256(b"trusted-executable").hexdigest()), \
+                patch.object(native.subprocess, "run", return_value=subprocess.CompletedProcess(
+                    [], 0, stdout=native.BASE_PYTHON_VERSION, stderr="")):
+            self.assertEqual(native._base_python(), python)
+            python.write_bytes(b"tampered")
+            with self.assertRaisesRegex(native.Blocked, "base_python_unqualified"):
+                native._base_python()
+
+    def test_install_uses_base_only_to_create_venv_and_binary_wheels(self):
+        calls = []
+        def run(args, **_kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0)
+        target = self.root / "venv"
+        requirements = self.root / "requirements.txt"
+        base = self.root / "base-python.exe"
+        with patch.object(native.subprocess, "run", side_effect=run):
+            native._install(target, requirements, base)
+        self.assertEqual(calls[0], [str(base), "-B", "-m", "venv", str(target)])
+        self.assertEqual(calls[1][0], str(native._python(target)))
+        self.assertIn("--only-binary=:all:", calls[1])
+        self.assertNotIn("--break-system-packages", calls[1])
+        self.assertEqual(calls[2][0], str(native._python(target)))
 
 
 if __name__ == "__main__":

@@ -55,6 +55,13 @@ Ela instala as dependências nesse venv, executa `pip check`, relê versões e
 registra um manifesto com hashes. Repetição íntegra é idempotente; uma falha
 de instalação remove somente o novo venv criado por essa invocação.
 
+O venv é criado pelo Python 3.11.15 já existente no Noteri em
+`%APPDATA%/uv/python/cpython-3.11.15-windows-x86_64-none/python.exe`.
+A capability confere o SHA-256 fixado do executável e sua versão antes de
+prosseguir. `pip` roda somente dentro do venv e aceita apenas wheels binários;
+uma dependência sem wheel compatível bloqueia e reverte a preparação. Isso
+evita o build de `pydantic==2.11.4` observado com o Python 3.14 do sistema.
+
 Esse passo não registra tarefa, não inicia API e não altera o Python global.
 A ativação persistente ainda exige capability própria, autorização Risk3
 específica quando aplicável, readback de saúde/contrato/autenticação e rollback.
