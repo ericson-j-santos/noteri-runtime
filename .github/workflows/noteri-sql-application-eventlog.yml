@@ -1,0 +1,125 @@
+name: Noteri SQL Application EventLog TLS Probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: noteri-sql-application-eventlog
+  cancel-in-progress: false
+
+env:
+  RULES_SHA: 95ae14f7e90e01a5d6d1227fa2536246725ac68c
+  CORRELATION_ID: noteri-sql-eventlog-${{ github.run_id }}-${{ github.run_attempt }}
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  collect:
+    name: Collect sanitized SQL TLS startup classifications
+    if: >-
+      github.repository == 'ericson-j-santos/noteri-runtime' &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.actor == 'ericson-j-santos'
+    runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
+    timeout-minutes: 6
+    steps:
+      - name: Checkout immutable runtime SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout immutable operational rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bootstrap mandatory governed session
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules/config/command-gateway.policy.json'
+          $launcher = Join-Path $env:GITHUB_WORKSPACE '_rules/scripts/session_launcher.py'
+          $args = @(
+            '--policy', $policy,
+            '--repo', $env:GITHUB_WORKSPACE,
+            '--session-prefix', 'noteri-sql-eventlog',
+            '--correlation-id', $env:CORRELATION_ID,
+            '--expected-head', $env:GITHUB_SHA,
+            '--sync-ref', 'origin/main',
+            '--require-runner-version-preflight'
+          )
+          $raw = & python3 -B $launcher @args
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'SESSION_LAUNCH_BLOCKED' }
+          $receipt = @($raw)[-1] | ConvertFrom-Json
+          if (
+            $receipt.result -ne 'SESSION_LAUNCH_OK' -or
+            $receipt.state_validated -ne $true -or
+            $receipt.head -ne $env:GITHUB_SHA -or
+            -not $receipt.target_path -or
+            -not $receipt.session_id
+          ) { throw 'SESSION_READBACK_INVALID' }
+          "worktree=$($receipt.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session=$($receipt.session_id)" | Add-Content $env:GITHUB_OUTPUT
+
+      - name: Collect and emit only minimized classifications
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.worktree }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:TARGET_PATH -or -not $env:SESSION_ID) { throw 'SESSION_READBACK_MISSING' }
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $gateway = Join-Path $rules 'scripts/command_gateway.py'
+          $policy = Join-Path $rules 'config/command-gateway.policy.json'
+          $probe = Join-Path $env:TARGET_PATH 'scripts/noteri_sql_application_eventlog.py'
+          $argv = @(
+            '--policy', $policy,
+            '--correlation-id', $env:CORRELATION_ID,
+            'run', '--cwd', $env:TARGET_PATH,
+            '--session-id', $env:SESSION_ID,
+            '--risk', '1', '--timeout', '30',
+            '--expected-head', $env:GITHUB_SHA,
+            '--', 'python3', '-I', '-B', $probe,
+            '--expected-sha', $env:GITHUB_SHA
+          )
+          $raw = & python3 -B $gateway @argv
+          $gatewayExit = $LASTEXITCODE
+          if (-not $raw) { throw 'GATEWAY_RECEIPT_MISSING' }
+          $envelope = @($raw)[-1] | ConvertFrom-Json
+          if (
+            $envelope.state_changed -ne $false -or
+            $envelope.before.head -ne $env:GITHUB_SHA -or
+            $envelope.after.head -ne $env:GITHUB_SHA -or
+            -not $envelope.stdout
+          ) { throw 'GATEWAY_READBACK_INVALID' }
+          $records = @($envelope.stdout | ConvertFrom-Json)
+          if ($records.Count -lt 1 -or $records.Count -gt 16) { throw 'OUTPUT_COUNT_INVALID' }
+          $allowed = @(
+            'self_generated_certificate_loaded', 'store_certificate_loaded',
+            'configured_certificate_load_failed', 'certificate_load_failed',
+            'encryption_initialization_failed', 'not_observed',
+            'eventlog_access_denied', 'eventlog_timeout', 'eventlog_unavailable',
+            'noteri_windows_required', 'source_sha_invalid', 'source_sha_mismatch',
+            'normal_profile_required', 'local_sql2025_not_running'
+          )
+          $sanitized = foreach ($record in $records) {
+            $names = @($record.PSObject.Properties.Name | Sort-Object)
+            if (($names -join ',') -ne 'classification,date,id') { throw 'OUTPUT_SCHEMA_INVALID' }
+            if ($record.classification -notin $allowed) { throw 'OUTPUT_CLASSIFICATION_INVALID' }
+            if ($null -ne $record.date -and $record.date -notmatch '^\d{4}-\d{2}-\d{2}T.*Z$') { throw 'OUTPUT_DATE_INVALID' }
+            if ($record.id -isnot [long] -or $record.id -lt 0 -or $record.id -gt 4294967295) { throw 'OUTPUT_ID_INVALID' }
+            [ordered]@{ classification = [string]$record.classification; date = $record.date; id = [long]$record.id }
+          }
+          ConvertTo-Json -InputObject @($sanitized) -Compress
+          if ($gatewayExit -ne 0 -or $envelope.command_exit_code -ne 0 -or $envelope.result -ne 'ok') { exit 1 }
