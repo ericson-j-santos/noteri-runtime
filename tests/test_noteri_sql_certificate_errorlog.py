@@ -161,3 +161,23 @@ def test_repeat_classification_identical_and_source_nondestructive():
     for item in ("SetValueEx", "SQL INSERT", "CREATE DATABASE", "ALTER LOGIN",
                  "TrustServerCertificate=Yes", "Encrypt=No", "shell=True", "Popen(", "os.system("):
         assert item not in code
+
+
+def test_absent_setup_or_parameters_classified_without_leak():
+    with patch.object(Registry, "OpenKey", side_effect=FileNotFoundError):
+        with pytest.raises(m.Blocked, match="sql_setup_path_absent"):
+            m.registered_path(Registry())
+    class MissingParameters(Registry):
+        def OpenKey(self, hive, path, zero, access):
+            if path == m.PARAMETERS:
+                raise FileNotFoundError
+            return super().OpenKey(hive, path, zero, access)
+    with pytest.raises(m.Blocked, match="sql_startup_parameters_absent"):
+        m.registered_path(MissingParameters())
+
+
+def test_missing_errorlog_file_classified_without_path_exposure(tmp_path):
+    target = tmp_path / "ERRORLOG"
+    with pytest.raises(m.Blocked, match="sql_errorlog_file_absent") as exc:
+        m._safe_regular_file(target)
+    assert str(target) not in str(exc.value)

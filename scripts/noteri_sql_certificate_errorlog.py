@@ -53,30 +53,45 @@ def log_target(sql_path: str, startup_args: list[str]) -> str:
 def registered_path(registry: Any) -> str:
     """Bounded HKLM read; no SQLArg values are emitted outside this function."""
     access = registry.KEY_READ | registry.KEY_WOW64_64KEY
-    with registry.OpenKey(registry.HKEY_LOCAL_MACHINE, SETUP, 0, access) as key:
-        base = registry.QueryValueEx(key, "SQLPath")[0]
+    try:
+        with registry.OpenKey(registry.HKEY_LOCAL_MACHINE, SETUP, 0, access) as key:
+            base = registry.QueryValueEx(key, "SQLPath")[0]
+    except FileNotFoundError:
+        raise Blocked("sql_setup_path_absent") from None
+    except PermissionError:
+        raise Blocked("sql_setup_path_denied") from None
     args = []
-    with registry.OpenKey(registry.HKEY_LOCAL_MACHINE, PARAMETERS, 0, access) as key:
-        for i in range(MAX_ARGS):
-            try:
-                value = registry.QueryValueEx(key, f"SQLArg{i}")[0]
-            except FileNotFoundError:
-                continue
-            args.append(value)
+    try:
+        with registry.OpenKey(registry.HKEY_LOCAL_MACHINE, PARAMETERS, 0, access) as key:
+            for i in range(MAX_ARGS):
+                try:
+                    value = registry.QueryValueEx(key, f"SQLArg{i}")[0]
+                except FileNotFoundError:
+                    continue
+                args.append(value)
+    except FileNotFoundError:
+        raise Blocked("sql_startup_parameters_absent") from None
+    except PermissionError:
+        raise Blocked("sql_startup_parameters_denied") from None
     return log_target(base, args)
 
 
 def _safe_regular_file(path: Path) -> bytes:
     """Refuse reparse points/junctions and limit bytes; do not return path/log."""
-    for item in (path, *path.parents):
-        info = item.lstat()
-        if stat.S_ISLNK(info.st_mode) or (getattr(info, "st_file_attributes", 0) & 0x400):
-            raise Blocked("errorlog_reparse_point")
-    info = path.stat()
-    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BYTES:
-        raise Blocked("errorlog_size_or_type_unverified")
-    with path.open("rb") as f:
-        raw = f.read(MAX_BYTES + 1)
+    try:
+        for item in (path, *path.parents):
+            info = item.lstat()
+            if stat.S_ISLNK(info.st_mode) or (getattr(info, "st_file_attributes", 0) & 0x400):
+                raise Blocked("errorlog_reparse_point")
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BYTES:
+            raise Blocked("errorlog_size_or_type_unverified")
+        with path.open("rb") as f:
+            raw = f.read(MAX_BYTES + 1)
+    except FileNotFoundError:
+        raise Blocked("sql_errorlog_file_absent") from None
+    except PermissionError:
+        raise Blocked("sql_errorlog_file_denied") from None
     if len(raw) != info.st_size or len(raw) > MAX_BYTES:
         raise Blocked("errorlog_changed_during_read")
     return raw
@@ -160,6 +175,9 @@ def main(argv: list[str] | None = None) -> int:
             "noteri_windows_required", "source_sha_invalid", "source_sha_mismatch",
             "correlation_invalid", "normal_profile_required", "local_sql2025_not_running",
             "sql_install_path_invalid", "sql_startup_arguments_invalid",
+            "sql_setup_path_absent", "sql_setup_path_denied",
+            "sql_startup_parameters_absent", "sql_startup_parameters_denied",
+            "sql_errorlog_file_absent", "sql_errorlog_file_denied",
             "sql_errorlog_argument_unverified", "sql_errorlog_path_not_allowlisted",
             "sql_instance_path_unverified", "errorlog_reparse_point",
             "errorlog_size_or_type_unverified", "errorlog_changed_during_read",
