@@ -28,6 +28,23 @@ O stage nativo fixa `LOCALAPPDATA/ReqSys/NoteriWorkerPool/releases/<sha>`, copia
 
 ## Gating posterior (ainda não implementado)
 
+### Sonda física somente leitura
+
+`python3 -B -m scripts.noteri_worker_pool_activation_preflight` valida a
+integridade da release preparada, a referência privada da credencial sem ler
+seus bytes, perfil NORMAL, versão e dependências do Python, espaço, listener
+loopback e presença da tarefa fixa. O resultado é sanitizado e não autoriza
+ativação. Tarefa ausente ou inacessível não pode ser distinguida apenas pelo
+`schtasks /Query` pontual; o resultado permanece `BLOCKED_TASK_INVENTORY` até
+leitura independente da identidade e configuração da tarefa.
+
+Na sonda física de 25/10/2026, a release e a credencial passaram, e o
+interpretador disponível falhou em dependências: `boto3`, `cryptography` e
+`pytest` ausentes; `fastapi`, `pydantic` e `uvicorn` em versões divergentes.
+Instalar dependências no Python global do runner não é uma etapa autorizada
+desta sonda. A próxima capability deve preparar um ambiente isolado,
+persistente e verificável com essas versões exatas antes de avaliar start.
+
 - Qualificar uma release instalável com dependências fixadas, Python nativo, serviço de API protegido em `127.0.0.1:8097` e startup persistente. O stage-only não realiza essa ativação.
 - Reutilizar somente uma referência aprovada a arquivo protegido, fora do repositório e do artifact; se não existir, registrar uma **única decisão de provisionamento de credencial** e não criar/rotacionar automaticamente.
 - Qualquer alteração de tarefa administrativa, ACL, elevação, serviço de sistema ou reboot requer autorização específica e replay/readback. Não usar Docker, GUI/RDC ou shell arbitrário.
