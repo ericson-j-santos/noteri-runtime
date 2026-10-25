@@ -1,0 +1,105 @@
+name: Noteri Worker Pool Native Stage Plan
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/noteri-worker-pool-native-plan.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: noteri-worker-pool-native-stage-plan
+  cancel-in-progress: false
+
+env:
+  WORKER_POOL_SHA: 21fd68dec6f0da92b3e7da201463401ac5429d64
+  RULES_SHA: 4e6091a133f8d7d157abe6f83c31ca597812e0a4
+  CORRELATION_ID: noteri-pool-plan-${{ github.run_id }}-${{ github.run_attempt }}
+  EVIDENCE_FILE: artifacts/noteri-pool-stage-plan/evidence.json
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  native-plan:
+    if: >-
+      github.repository == 'ericson-j-santos/noteri-runtime' &&
+      github.ref == 'refs/heads/main' &&
+      (github.actor == 'ericson-j-santos' || github.actor == 'github-actions[bot]')
+    name: Plan immutable Worker Pool stage without host mutation
+    runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
+    timeout-minutes: 8
+    steps:
+      - name: Checkout current trusted Noteri main
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout pinned shared Worker Pool
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/engineering-worker-pool
+          ref: ${{ env.WORKER_POOL_SHA }}
+          path: _worker_pool
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout immutable operational rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bootstrap mandatory Session Launcher
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules/config/command-gateway.policy.json'
+          $launcher = Join-Path $env:GITHUB_WORKSPACE '_rules/scripts/session_launcher.py'
+          $args = @('--policy', $policy, '--repo', $env:GITHUB_WORKSPACE, '--session-prefix', 'noteri-pool-plan', '--correlation-id', $env:CORRELATION_ID, '--expected-head', $env:GITHUB_SHA, '--sync-ref', 'origin/main', '--require-runner-version-preflight')
+          $raw = & python3 -B $launcher @args
+          if ($LASTEXITCODE -ne 0) { throw 'SESSION_LAUNCH_EXIT_NONZERO' }
+          $receipt = @($raw)[-1] | ConvertFrom-Json
+          if ($receipt.result -ne 'SESSION_LAUNCH_OK' -or $receipt.state_validated -ne $true -or $receipt.head -ne $env:GITHUB_SHA) { throw 'SESSION_LAUNCH_BLOCKED' }
+          "worktree=$($receipt.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session=$($receipt.session_id)" | Add-Content $env:GITHUB_OUTPUT
+
+      - name: Run read-only plan through Command Gateway
+        id: plan
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.worktree }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:TARGET_PATH -or -not $env:SESSION_ID) { throw 'SESSION_READBACK_MISSING' }
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $gateway = Join-Path $rules 'scripts/command_gateway.py'
+          $policy = Join-Path $rules 'config/command-gateway.policy.json'
+          $script = Join-Path $env:TARGET_PATH 'scripts/noteri_worker_pool_native_stage.py'
+          $argv = @('--policy', $policy, '--correlation-id', $env:CORRELATION_ID, 'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID, '--risk', '1', '--timeout', '35', '--expected-head', $env:GITHUB_SHA, '--', 'python3', '-B', $script, '--source-sha', $env:WORKER_POOL_SHA, '--mode', 'plan')
+          $raw = & python3 -B $gateway @argv
+          $exitCode = $LASTEXITCODE
+          if (-not $raw) { throw 'STAGE_PLAN_GATEWAY_RECEIPT_MISSING' }
+          $envelope = @($raw)[-1] | ConvertFrom-Json
+          $evidence = $envelope.stdout | ConvertFrom-Json
+          if ($evidence.source_sha -ne $env:WORKER_POOL_SHA -or $evidence.activated -ne $false -or $evidence.secrets_read -ne $false -or $envelope.state_changed -ne $false -or $evidence.state_changed -ne $false) { throw 'STAGE_PLAN_EVIDENCE_INVALID' }
+          New-Item -ItemType Directory -Force (Split-Path $env:EVIDENCE_FILE) | Out-Null
+          $evidence | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $env:EVIDENCE_FILE -Encoding UTF8
+          if ($exitCode -ne 0 -or $evidence.result -ne 'STAGE_PLAN_READY') { throw 'STAGE_PLAN_BLOCKED' }
+
+      - name: Upload sanitized read-only evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: noteri-worker-pool-plan-${{ github.run_id }}
+          path: artifacts/noteri-pool-stage-plan/evidence.json
+          if-no-files-found: warn
+          retention-days: 7
