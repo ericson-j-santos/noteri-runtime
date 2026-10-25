@@ -90,9 +90,10 @@ def read_network(registry: Any) -> dict[str, Any]:
         "tcp_listen_port_configured_ipall": static_port,
         "tcp_dynamic_port_configured_ipall": dynamic_port,
         "force_encryption": forced,
-        "tcp_readiness_comprovable": tcp is True and (
+        "tcp_registry_port_candidate": tcp is True and (
             static_port is True or dynamic_port is True
         ),
+        "network_reachability_verified": False,
         "database_connection_tested": False,
         "sql_permissions_verified": False,
         "certificate_validated": False,
