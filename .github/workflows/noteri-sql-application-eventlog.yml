@@ -1,7 +1,17 @@
 name: Noteri SQL Application EventLog TLS Probe
+run-name: Noteri SQL EventLog / ${{ inputs.correlation_id }}
 
 on:
   workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Immutable noteri-runtime commit SHA
+        required: true
+        type: string
+      correlation_id:
+        description: Governed dispatch correlation ID
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -12,7 +22,7 @@ concurrency:
 
 env:
   RULES_SHA: 95ae14f7e90e01a5d6d1227fa2536246725ac68c
-  CORRELATION_ID: noteri-sql-eventlog-${{ github.run_id }}-${{ github.run_attempt }}
+  CORRELATION_ID: ${{ inputs.correlation_id }}
   PYTHONDONTWRITEBYTECODE: "1"
 
 jobs:
@@ -22,6 +32,7 @@ jobs:
       github.repository == 'ericson-j-santos/noteri-runtime' &&
       github.ref == 'refs/heads/main' &&
       github.event_name == 'workflow_dispatch' &&
+      github.sha == inputs.expected_sha &&
       github.actor == 'ericson-j-santos'
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 6
@@ -90,7 +101,7 @@ jobs:
             '--session-id', $env:SESSION_ID,
             '--risk', '1', '--timeout', '30',
             '--expected-head', $env:GITHUB_SHA,
-            '--', 'python3', '-I', '-B', $probe,
+            '--', 'python3', '-E', '-s', '-B', $probe,
             '--expected-sha', $env:GITHUB_SHA
           )
           $raw = & python3 -B $gateway @argv
@@ -103,7 +114,9 @@ jobs:
             $envelope.after.head -ne $env:GITHUB_SHA -or
             -not $envelope.stdout
           ) { throw 'GATEWAY_READBACK_INVALID' }
-          $records = @($envelope.stdout | ConvertFrom-Json)
+          $decoded = ConvertFrom-Json -InputObject $envelope.stdout
+          if ($decoded -isnot [Array]) { throw 'OUTPUT_ROOT_INVALID' }
+          $records = $decoded
           if ($records.Count -lt 1 -or $records.Count -gt 16) { throw 'OUTPUT_COUNT_INVALID' }
           $allowed = @(
             'self_generated_certificate_loaded', 'store_certificate_loaded',
@@ -118,7 +131,10 @@ jobs:
             if (($names -join ',') -ne 'classification,date,id') { throw 'OUTPUT_SCHEMA_INVALID' }
             if ($record.classification -notin $allowed) { throw 'OUTPUT_CLASSIFICATION_INVALID' }
             if ($null -ne $record.date -and $record.date -notmatch '^\d{4}-\d{2}-\d{2}T.*Z$') { throw 'OUTPUT_DATE_INVALID' }
-            if ($record.id -isnot [long] -or $record.id -lt 0 -or $record.id -gt 4294967295) { throw 'OUTPUT_ID_INVALID' }
+            if (
+              (($record.id -isnot [int]) -and ($record.id -isnot [long])) -or
+              $record.id -lt 0 -or $record.id -gt 4294967295
+            ) { throw 'OUTPUT_ID_INVALID' }
             [ordered]@{ classification = [string]$record.classification; date = $record.date; id = [long]$record.id }
           }
           ConvertTo-Json -InputObject @($sanitized) -Compress
