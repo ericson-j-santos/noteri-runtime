@@ -147,8 +147,31 @@ jobs:
             '--expected-head',$env:EXPECTED_SHA,'--','python3','-B',
             (Join-Path $env:TARGET_PATH 'scripts/noteri_wsl_hcs_readonly.py'))
           $raw=@(& python3 -B $gateway @argv)
-          if($LASTEXITCODE -ne 0 -or -not $raw){throw 'NOTERI_HCS_GATEWAY_BLOCKED'}
-          $envr=@($raw)[-1] | ConvertFrom-Json
+          $gatewayExit=$LASTEXITCODE
+          if(-not $raw){throw 'NOTERI_HCS_GATEWAY_NO_RECEIPT'}
+          try{$envr=@($raw)[-1] | ConvertFrom-Json -ErrorAction Stop}
+          catch{throw 'NOTERI_HCS_GATEWAY_RECEIPT_INVALID'}
+          if($gatewayExit -ne 0){
+            $phase=if(@('blocked','command_failed','timeout','blocked_false_positive_state_change') -contains
+              [string]$envr.result){[string]$envr.result}else{'other'}
+            $reason='GATEWAY_DENIED_OR_COMMAND_FAILED'
+            if([string]$envr.stdout){
+              try {
+                $probe=([string]$envr.stdout).Trim() | ConvertFrom-Json -ErrorAction Stop
+                $allowedReasons=@('NOT_WINDOWS','NOTERI_WINDOWS_REQUIRED','ARGUMENTS_DENIED',
+                  'HCS_OPERATION_UNAVAILABLE','HCS_ENUMERATION_REJECTED',
+                  'HCS_ENUMERATION_UNAVAILABLE','HCS_RESPONSE_EMPTY','HCS_RESPONSE_LIMIT',
+                  'HCS_API_UNAVAILABLE','HCS_COLLECTION_INVALID','HCS_ROW_INVALID',
+                  'HCS_FIELDS_INVALID','HCS_UNEXPECTED_FAILURE')
+                if($probe.result -eq 'NOTERI_HCS_READONLY_BLOCKED' -and
+                   $allowedReasons -contains [string]$probe.reason){
+                  $reason=[string]$probe.reason
+                }
+              }catch{}
+            }
+            Write-Output ('NOTERI_HCS_DENIAL phase='+$phase+' reason='+$reason)
+            throw 'NOTERI_HCS_GATEWAY_BLOCKED'
+          }
           if($envr.result -ne 'ok' -or $envr.command_exit_code -ne 0 -or
              $envr.state_changed -ne $false -or
              $envr.before.head -ne $env:EXPECTED_SHA -or
