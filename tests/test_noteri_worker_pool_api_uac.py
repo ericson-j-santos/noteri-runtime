@@ -58,6 +58,20 @@ class UacLauncherTests(unittest.TestCase):
                              "BLOCKED_ACTIVATION_ROLLED_BACK")
             self.assertNotIn("api-token", receipt.read_text())
 
+    def test_private_diagnostic_id_is_sanitized_in_receipt(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipt = root / ("activation-uac-" + "c" * 32 + ".json")
+            with patch.dict(entry.os.environ, {"LOCALAPPDATA": directory}), \
+                    patch.object(entry.venv, "_paths", return_value=(root, root, root)), \
+                    patch.object(entry.activation, "is_admin", return_value=True), \
+                    patch.object(entry.activation, "main", side_effect=lambda: print(json.dumps({
+                        "result": "BLOCKED_ACTIVATION_ROLLED_BACK", "phase": "register",
+                        "diagnostic_id": "secret/path", "activated": False}))):
+                result = entry.run(receipt, entry.activation.CONFIRM)
+            self.assertIsNone(result["diagnostic_id"])
+            self.assertNotIn("secret/path", receipt.read_text())
+
     def test_launcher_reports_child_failure_without_retry(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)

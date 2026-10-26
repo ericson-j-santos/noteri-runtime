@@ -6,6 +6,7 @@ import argparse
 import ctypes
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -55,12 +56,16 @@ def launch(*, confirm: str, timeout_seconds: int = 45) -> dict:
                         or child.get("schema_version") != "1"
                         or child.get("result") not in CHILD_RESULTS
                         or child.get("phase") not in PHASES
+                        or (child.get("diagnostic_id") is not None
+                            and not re.fullmatch(r"[0-9a-f]{32}",
+                                                 str(child.get("diagnostic_id"))))
                         or not isinstance(child.get("elevation_observed"), bool)):
                     return {"result": "BLOCKED_UAC_RECEIPT", "activated": False}
                 if child.get("result") != "API_ACTIVATED":
                     return {"result": "BLOCKED_UAC_CHILD", "activated": False,
                             "child_result": child.get("result", "BLOCKED_UNKNOWN"),
                             "phase": child.get("phase"),
+                            "diagnostic_id": child.get("diagnostic_id"),
                             "elevation_observed": child.get("elevation_observed")}
             existing = activation.existing_task(local, source)
             if existing is not None and activation.verify_api(*existing[1:]):

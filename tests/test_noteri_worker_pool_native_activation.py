@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import getpass
+import json
 import socket
 import subprocess
 import unittest
@@ -73,7 +74,7 @@ class ActivationTests(unittest.TestCase):
         observed = []
         def scheduled(*args):
             observed.append(args[0])
-            return subprocess.CompletedProcess(args, 1, stdout=b"")
+            return subprocess.CompletedProcess(args, 1, stdout=b"", stderr=b"Access is denied")
         with patch.object(activation, "qualify", return_value=(self.root, self.venv, self.token)), \
                 patch.object(activation, "schtasks", side_effect=scheduled), \
                 patch.object(activation, "task_absent", return_value=True):
@@ -83,6 +84,9 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(observed, ["/Create", "/Query"])
         self.assertFalse((self.root / "bin").exists())
         self.assertFalse((self.root / "data").exists())
+        diagnostic = self.root / f"registration-failure-{result['diagnostic_id']}.json"
+        self.assertEqual(json.loads(diagnostic.read_text())["stderr"], "Access is denied")
+        self.assertNotIn("Access is denied", str(result))
 
     def test_ambiguous_registration_preserves_action_files(self):
         def scheduled(*args):
