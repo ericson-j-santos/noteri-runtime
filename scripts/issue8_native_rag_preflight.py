@@ -438,8 +438,11 @@ def run(env: dict[str, str]) -> dict[str, object]:
     return result
 
 
-def main() -> int:
-    if sys.argv[1:] == ["--inspect-ollama-model-store"]:
+def main(argv: list[str] | None = None) -> int:
+    # Explicit argv keeps embedded/test callers independent from the host process
+    # arguments while preserving normal command-line behavior for the entrypoint.
+    args = sys.argv[1:] if argv is None else argv
+    if args == ["--inspect-ollama-model-store"]:
         try:
             result = inspect_ollama_model_store()
         except PreflightBlocked as exc:
@@ -453,7 +456,7 @@ def main() -> int:
             return 2
         print(json.dumps(result, sort_keys=True))
         return 0
-    if len(sys.argv) != 1:
+    if args:
         print(json.dumps({"result": "ISSUE8_MODEL_STORAGE_BLOCKED",
                           "reason_code": "issue8_cli_mode_invalid"}, sort_keys=True))
         return 2
