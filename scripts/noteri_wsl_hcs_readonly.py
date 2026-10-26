@@ -136,8 +136,17 @@ def main():
             raise Blocked("ARGUMENTS_DENIED")
         print(json.dumps(collect(), sort_keys=True, separators=(",", ":")))
         return 0
-    except (Blocked, OSError, ValueError):
+    except (Blocked, OSError, ValueError) as exc:
+        permitted = frozenset({
+            "NOT_WINDOWS", "NOTERI_WINDOWS_REQUIRED", "ARGUMENTS_DENIED",
+            "HCS_OPERATION_UNAVAILABLE", "HCS_ENUMERATION_REJECTED",
+            "HCS_ENUMERATION_UNAVAILABLE", "HCS_RESPONSE_EMPTY",
+            "HCS_RESPONSE_LIMIT", "HCS_API_UNAVAILABLE",
+            "HCS_COLLECTION_INVALID", "HCS_ROW_INVALID", "HCS_FIELDS_INVALID",
+        })
+        code = str(exc) if isinstance(exc, Blocked) and str(exc) in permitted else "HCS_UNEXPECTED_FAILURE"
         print(json.dumps({"result": "NOTERI_HCS_READONLY_BLOCKED",
+                          "reason": code,
                           "ubuntu_distro_running_verified": False,
                           "state_changed": False}, sort_keys=True))
         return 2
