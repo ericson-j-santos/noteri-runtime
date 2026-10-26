@@ -184,6 +184,126 @@ def inspect_ollama_model_store(*, model_root: Path | None = None,
     }
 
 
+
+
+def _post_ollama_fixed_model(endpoint: str, payload: dict[str, object]):
+    """Fixed, loopback-only Ollama API, with neither proxies nor redirects."""
+    from urllib import request
+
+    require(endpoint in {"/api/pull", "/api/show"},
+            "issue8_model_api_endpoint_invalid")
+
+    class RefuseRedirect(request.HTTPRedirectHandler):
+        def redirect_request(self, *_args, **_kwargs):
+            return None
+
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    opener = request.build_opener(request.ProxyHandler({}), RefuseRedirect())
+    return opener.open(
+        request.Request("http://127.0.0.1:11434" + endpoint,
+                        data=body, method="POST",
+                        headers={"Content-Type": "application/json"}),
+        timeout=45,
+    )
+
+
+def _pull_exact_ollama_model(*, provider=None, clock=None) -> None:
+    """Single opt-in 7B download, bounded by time and material byte progress."""
+    import time
+
+    now = time.monotonic if clock is None else clock
+    post = _post_ollama_fixed_model if provider is None else provider
+    started = last_progress = now()
+    bytes_by_layer: dict[str, int] = {}
+    success = False
+    with post("/api/pull", {"model": "qwen2.5-coder:7b",
+                            "stream": True, "insecure": False}) as response:
+        require(response.status == 200, "issue8_model_registry_unavailable")
+        while True:
+            current = now()
+            require(current - started <= 720, "issue8_model_download_timeout")
+            require(current - last_progress <= 300, "issue8_model_no_progress")
+            row = response.readline(4097)
+            if not row:
+                break
+            require(len(row) <= 4096, "issue8_model_progress_invalid")
+            try:
+                event = json.loads(row)
+            except (ValueError, TypeError):
+                raise PreflightBlocked("issue8_model_progress_invalid") from None
+            require(type(event) is dict and not event.get("error"),
+                    "issue8_model_registry_error")
+            if event.get("status") == "success":
+                success = True
+                break
+            size = event.get("completed")
+            if size is not None:
+                require(type(size) is int and 0 <= size <= 8_000_000_000,
+                        "issue8_model_progress_invalid")
+                layer = event.get("digest", "")
+                require(type(layer) is str and len(layer) <= 128,
+                        "issue8_model_progress_invalid")
+                if size > bytes_by_layer.get(layer, 0):
+                    bytes_by_layer[layer] = size
+                    last_progress = now()
+    require(success, "issue8_model_download_unconfirmed")
+
+
+def _verify_local_qwen7b() -> dict[str, object]:
+    models = _local_ollama_tags()
+    selected = [x for x in models if type(x) is dict
+                and x.get("name") == "qwen2.5-coder:7b"]
+    require(len(selected) == 1, "issue8_model_tag_absent_or_duplicate")
+    item = selected[0]
+    digest, size = item.get("digest"), item.get("size")
+    require(type(digest) is str and SHA64.fullmatch(digest) is not None
+            and digest.startswith(MODEL_PIN),
+            "issue8_model_digest_mismatch")
+    require(type(size) is int and 4_000_000_000 <= size <= 8_000_000_000
+            and type(item.get("details")) is dict
+            and item["details"].get("format") == "gguf"
+            and not item.get("remote_host") and not item.get("remote_model"),
+            "issue8_model_local_gguf_unverified")
+    with _post_ollama_fixed_model("/api/show",
+                                  {"model": "qwen2.5-coder:7b"}) as response:
+        require(response.status == 200, "issue8_model_metadata_unavailable")
+        raw = response.read(262145)
+    require(0 < len(raw) <= 262144, "issue8_model_metadata_invalid")
+    try:
+        metadata = json.loads(raw)
+    except (ValueError, TypeError):
+        raise PreflightBlocked("issue8_model_metadata_invalid") from None
+    require(type(metadata) is dict and type(metadata.get("details")) is dict
+            and metadata["details"].get("format") == "gguf"
+            and not metadata.get("remote_host") and not metadata.get("remote_model"),
+            "issue8_model_metadata_invalid")
+    return {"digest": digest, "size": size}
+
+
+def provision_ollama_qwen7b(mode: str) -> dict[str, object]:
+    """Explicit Gateway Risk2 install or Risk1 verification; RAG remains read-only."""
+    require(mode in {"install", "verify"}, "issue8_model_mode_invalid")
+    before = inspect_ollama_model_store()
+    changed = False
+    if mode == "install" and not before["qwen_tag_present"]:
+        _pull_exact_ollama_model()
+        changed = True
+    metadata = _verify_local_qwen7b()
+    after = inspect_ollama_model_store()
+    require(after["qwen_tag_present"] is True and
+            after["model_store_bound_to_daemon"] is True,
+            "issue8_model_final_readback_invalid")
+    return {
+        "result": "ISSUE8_OLLAMA_QWEN7B_VERIFIED",
+        "mode": mode,
+        "model_name": "qwen2.5-coder:7b",
+        "digest": metadata["digest"],
+        "size": metadata["size"],
+        "model_state_changed": changed,
+        "git_state_changed": False,
+    }
+
+
 def validate_environment(env: dict[str, str]) -> dict[str, str]:
     require(env.get("GITHUB_ACTIONS") == "true"
             and env.get("GITHUB_REPOSITORY") == HOST_REPOSITORY,
@@ -442,6 +562,21 @@ def main(argv: list[str] | None = None) -> int:
     # Explicit argv keeps embedded/test callers independent from the host process
     # arguments while preserving normal command-line behavior for the entrypoint.
     args = sys.argv[1:] if argv is None else argv
+    if args in (["--install-ollama-qwen7b"], ["--verify-ollama-qwen7b"]):
+        mode = "install" if args == ["--install-ollama-qwen7b"] else "verify"
+        try:
+            observed = provision_ollama_qwen7b(mode)
+        except PreflightBlocked as exc:
+            print(json.dumps({"result": "ISSUE8_MODEL_SETUP_BLOCKED",
+                              "reason_code": str(exc)}, sort_keys=True))
+            return 2
+        except Exception:
+            print(json.dumps({"result": "ISSUE8_MODEL_SETUP_BLOCKED",
+                              "reason_code": "issue8_model_dependency_unavailable"},
+                             sort_keys=True))
+            return 2
+        print(json.dumps(observed, sort_keys=True))
+        return 0
     if args == ["--inspect-ollama-model-store"]:
         try:
             result = inspect_ollama_model_store()

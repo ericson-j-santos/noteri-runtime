@@ -443,3 +443,84 @@ def test_ollama_store_opt_in_mode_does_not_change_rag_default(monkeypatch, capsy
     monkeypatch.setattr(m.sys, "argv", ["preflight", "--install-any-model"])
     assert m.main() == 2
     assert "issue8_cli_mode_invalid" in capsys.readouterr().out
+
+
+
+def test_ollama_pull_is_fixed_and_requires_success():
+    m = module()
+    class Stream:
+        status = 200
+        def __init__(self, records):
+            self.records = iter(records)
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            return False
+        def readline(self, limit):
+            assert limit == 4097
+            return next(self.records, b"")
+    def provider(rows):
+        def read(endpoint, payload):
+            assert endpoint == "/api/pull"
+            assert payload == {"model": "qwen2.5-coder:7b",
+                               "stream": True, "insecure": False}
+            return Stream(rows)
+        return read
+    m._pull_exact_ollama_model(provider=provider([
+        b'{"status":"pulling manifest"}\n',
+        b'{"status":"downloading","digest":"layer-a","completed":10}\n',
+        b'{"status":"success"}\n',
+    ]))
+    with pytest.raises(m.PreflightBlocked, match="issue8_model_download_unconfirmed"):
+        m._pull_exact_ollama_model(provider=provider([
+            b'{"status":"pulling manifest"}\n',
+        ]))
+    with pytest.raises(m.PreflightBlocked, match="issue8_model_registry_error"):
+        m._pull_exact_ollama_model(provider=provider([
+            b'{"error":"never log secret"}\n',
+        ]))
+
+
+def test_ollama_install_and_replay_are_idempotent(monkeypatch):
+    m = module()
+    calls = []
+    observed = iter([
+        {"qwen_tag_present": False, "model_store_bound_to_daemon": True},
+        {"qwen_tag_present": True, "model_store_bound_to_daemon": True},
+    ])
+    monkeypatch.setattr(m, "inspect_ollama_model_store", lambda: next(observed))
+    monkeypatch.setattr(m, "_pull_exact_ollama_model", lambda: calls.append("pull"))
+    monkeypatch.setattr(m, "_verify_local_qwen7b",
+                        lambda: {"digest": m.MODEL_PIN + "a" * 52, "size": 4683087561})
+    result = m.provision_ollama_qwen7b("install")
+    assert calls == ["pull"] and result["model_state_changed"] is True
+    monkeypatch.setattr(m, "inspect_ollama_model_store",
+                        lambda: {"qwen_tag_present": True, "model_store_bound_to_daemon": True})
+    result = m.provision_ollama_qwen7b("install")
+    assert calls == ["pull"] and result["model_state_changed"] is False
+    observed_result = m.provision_ollama_qwen7b("verify")
+    assert observed_result["mode"] == "verify" and not observed_result["model_state_changed"]
+
+
+def test_ollama_install_is_blocked_without_storage_proof(monkeypatch):
+    m = module()
+    calls = []
+    monkeypatch.setattr(m, "inspect_ollama_model_store",
+                        lambda: (_ for _ in ()).throw(m.PreflightBlocked(
+                            "issue8_model_storage_not_attested")))
+    monkeypatch.setattr(m, "_pull_exact_ollama_model", lambda: calls.append(1))
+    with pytest.raises(m.PreflightBlocked, match="issue8_model_storage_not_attested"):
+        m.provision_ollama_qwen7b("install")
+    assert not calls
+
+
+def test_ollama_install_main_never_leaks_exception(monkeypatch, capsys):
+    m = module()
+    monkeypatch.setattr(m, "provision_ollama_qwen7b",
+                        lambda *_: (_ for _ in ()).throw(RuntimeError("SECRET API TOKEN")))
+    assert m.main(["--install-ollama-qwen7b"]) == 2
+    content = json.loads(capsys.readouterr().out)
+    assert content["reason_code"] == "issue8_model_dependency_unavailable"
+    assert "SECRET" not in json.dumps(content)
+    assert m.main(["--pull-another-model"]) == 2
+    assert "issue8_cli_mode_invalid" in capsys.readouterr().out
