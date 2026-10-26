@@ -122,6 +122,43 @@ def test_whitelisted_windows_hcs_api_without_launching_guest():
         assert forbidden not in source
 
 
+def test_hcs_wait_allows_cold_enumeration_and_closes_operation(monkeypatch):
+    calls = []
+
+    class Function:
+        def __init__(self, implementation):
+            self.implementation = implementation
+
+        def __call__(self, *args):
+            return self.implementation(*args)
+
+    class Core:
+        HcsCreateOperation = Function(lambda *_: 123)
+        HcsEnumerateComputeSystems = Function(lambda *_: 0)
+        HcsWaitForOperationResult = Function(
+            lambda operation, timeout, _document: calls.append(
+                ("wait", operation, timeout)
+            ) or 1
+        )
+        HcsCloseOperation = Function(lambda operation: calls.append(("close", operation)))
+
+    class Kernel:
+        LocalFree = Function(lambda *_: pytest.fail("no document was allocated"))
+
+    monkeypatch.setattr(probe.sys, "platform", "win32")
+    monkeypatch.setattr(
+        probe.ctypes, "WinDLL",
+        lambda name: Core() if name == "ComputeCore.dll" else Kernel(),
+        raising=False,
+    )
+
+    with pytest.raises(probe.Blocked, match="^HCS_ENUMERATION_UNAVAILABLE$"):
+        probe.enumerate_existing()
+
+    assert probe.HCS_TIMEOUT_MS == 15_000
+    assert calls == [("wait", 123, 15_000), ("close", 123)]
+
+
 def test_arbitrary_cli_argument_denied_before_io(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["noteri_wsl_hcs_readonly.py", "--query", "all"])
     monkeypatch.setattr(probe, "collect", lambda: pytest.fail("unexpected read"))

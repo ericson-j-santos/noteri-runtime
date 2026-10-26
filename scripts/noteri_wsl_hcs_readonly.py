@@ -14,6 +14,7 @@ import sys
 HOST = "noteri"
 MAX_BYTES = 65536
 MAX_SYSTEMS = 64
+HCS_TIMEOUT_MS = 15_000
 RUNNING_STATES = frozenset(("running",))
 
 
@@ -48,7 +49,10 @@ def enumerate_existing():
         try:
             if enumerate_(None, operation) != 0:
                 raise Blocked("HCS_ENUMERATION_REJECTED")
-            if wait(operation, 3000, ctypes.byref(document)) != 0:
+            # Microsoft's reference sample waits indefinitely. Keep this probe
+            # bounded, but allow a cold HCS service enough time to enumerate
+            # existing systems while staying below the Gateway's 30 s limit.
+            if wait(operation, HCS_TIMEOUT_MS, ctypes.byref(document)) != 0:
                 raise Blocked("HCS_ENUMERATION_UNAVAILABLE")
             if not document.value:
                 raise Blocked("HCS_RESPONSE_EMPTY")
