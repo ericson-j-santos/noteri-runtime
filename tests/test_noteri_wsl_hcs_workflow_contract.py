@@ -37,7 +37,7 @@ def test_physical_trigger_needs_exact_one_time_owner_marker_and_sha():
         "types: [edited]",
         "github.actor == 'ericson-j-santos'",
         "github.event.pull_request.draft == true",
-        "OWNER_NOTERI_HCS_READONLY_20261026_ONCE",
+        "OWNER_NOTERI_HCS_TIMEOUT_RECOVERY_20261026_ONCE",
         "github.event.changes.body.from",
         "NOTERI_HCS_REQUIRED_CI_MISSING",
         "NOTERI_HCS_ALREADY_DISPATCHED",
