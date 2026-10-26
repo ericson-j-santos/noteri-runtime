@@ -48,9 +48,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'fix/issue8-native-rag-yaml-gate-20261025' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_REASON_CODE_ONCE') &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261026_MODEL_INVENTORY_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_REASON_CODE_ONCE')
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261026_MODEL_INVENTORY_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 4
     permissions:
@@ -84,7 +84,7 @@ jobs:
                 d.head.ref!=='fix/issue8-native-rag-yaml-gate-20261025' ||
                 d.head.sha!==sha || d.base.ref!=='main' ||
                 d.base.sha!==main.data.commit.sha ||
-                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_REASON_CODE_ONCE')) {
+                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261026_MODEL_INVENTORY_ONCE')) {
               core.setFailed('ISSUE8_NOTERI_PR_OR_BASE_DRIFT'); return;
             }
             const files=(await github.rest.pulls.listFiles({
@@ -102,7 +102,7 @@ jobs:
               core.setFailed('ISSUE8_NOTERI_PR_SCOPE_CHANGED');return;
             }
             if (wm.data.commit.sha!=='74035488dac6938bfc14957621e86168003cd0c6' ||
-                rule.data.commit.sha!=='7a8dc26bdb26cf925472d800ea29066f7602dd0c' ||
+                rule.data.commit.sha!=='92e8b5c87684212964b24ff3597f9f9f8aea49a6' ||
                 issue.data.state!=='open' || !!issue.data.pull_request ||
                 ownerComment.data.user?.login!==owner ||
                 ownerComment.data.author_association!=='OWNER' ||
@@ -137,7 +137,7 @@ jobs:
     env:
       EXPECTED_NOTERI_SHA: ${{ github.event.pull_request.head.sha }}
       WORKER_POOL_SHA: 74035488dac6938bfc14957621e86168003cd0c6
-      RULES_SHA: 7a8dc26bdb26cf925472d800ea29066f7602dd0c
+      RULES_SHA: 92e8b5c87684212964b24ff3597f9f9f8aea49a6
       AGENT_CORE_SHA: 1fc032d4c412bdb4ed202cf1193caf0cb49490ce
       CORRELATION_ID: issue8-noteri-${{ github.run_id }}-${{ github.run_attempt }}
       NATIVE_OLLAMA_DEV: '1'
@@ -386,7 +386,7 @@ jobs:
                 r.schema_version!=='issue8.native.rag.readonly-v1' ||
                 r.issue_number!==8 || r.worker_sha!==workerSHA ||
                 r.runtime_sha!==thisSHA ||
-                r.rules_sha!=='7a8dc26bdb26cf925472d800ea29066f7602dd0c' ||
+                r.rules_sha!=='92e8b5c87684212964b24ff3597f9f9f8aea49a6' ||
                 r.model_digest_prefix!=='dae161e27b0e' ||
                 r.baseline_total!==42 || !Number.isInteger(r.baseline_passed) ||
                 r.baseline_passed<0 || r.baseline_passed>=42 ||

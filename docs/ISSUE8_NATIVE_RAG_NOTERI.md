@@ -12,7 +12,7 @@ Este incremento qualifica o primeiro elo que ainda não foi comprovado: issue #8
 - Blob Git do app/portfolio_bridge.py: d9a25c574163c49f695e774609949160d94f4490
 - Comentário OWNER issue #8: 6404265064, comando literal atrelado à main
 - Agent Core: 1fc032d4c412bdb4ed202cf1193caf0cb49490ce
-- Regras operacionais: 7a8dc26bdb26cf925472d800ea29066f7602dd0c (1.6.19)
+- Regras operacionais: 92e8b5c87684212964b24ff3597f9f9f8aea49a6 (1.6.19)
 - Noteri Runtime base: 42e4f0eb3f6988e326c76b7160f9bbc9f2092a46
 
 Os SHAs são fixados. Avanço de branch, autorização ou arquivo exige novo commit, CI e readback. Não atualizar automaticamente os valores durante a execução física.
@@ -92,3 +92,12 @@ O runner publica somente `ISSUE8_SANITIZED_PHASE` e `ISSUE8_SANITIZED_FAILURE`,
 sem logs livres ou segredos. A exceção de uma biblioteca sem código conhecido
 não se transforma em texto arbitrário. Um novo disparo só é elegível após
 CI e transição exclusiva do marcador `OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_PHASE_DIAGNOSTIC_ONCE`.
+
+
+## Diagnóstico de inventário local do Qwen (26/10/2026)
+
+O job físico [#40247590037](https://github.com/ericson-j-santos/noteri-runtime/actions/runs/40247590037) comprovou pickup, Session Launcher e venv, mas falhou na fase `research` com `native_model_ambiguous_or_missing`. O Worker Pool exige exatamente a etiqueta `qwen2.5-coder:7b` e o digest fixado `dae161e27b0e`; a mensagem anterior não diferencia etiqueta ausente de duplicidade. A biblioteca oficial Ollama publica o mesmo digest também sob `qwen2.5-coder:latest`, mas isso **não** comprova qual etiqueta está instalada no Noteri.
+
+Antes do RAG, o mesmo executor Risk1 agora consulta somente `GET /api/tags` no Ollama de loopback e devolve um código sanitizado e determinístico: `issue8_model_tag_missing`, `issue8_model_pinned_under_other_tag` ou `issue8_model_tag_duplicate`. Se a etiqueta estiver presente, mantém todas as validações do Worker Pool (digest, GGUF e ausência de modelo remoto); nenhum resultado pode liberar a execução por si só. Testes positivos e negativos entram no CI.
+
+A nova admissão física one-shot usa o marcador `OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261026_MODEL_INVENTORY_ONCE` em transição exclusiva pelo OWNER, somente após CI concluído no novo HEAD. A recuperação de alias ou download não ocorre neste workflow read-only: requer diagnóstico real, autorização separada de mudança de estado e execução governada via Session Launcher/Gateway, com verificação independente. Nenhum re-run sem nova precondição, sem Docker, sem gastos, sem publicação, merge ou deploy.

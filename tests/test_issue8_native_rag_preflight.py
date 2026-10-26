@@ -52,6 +52,43 @@ def valid_env(m, workspace):
     }
 
 
+@pytest.mark.parametrize("inventory,expected", [
+    ([], "issue8_model_inventory_invalid"),
+    ([{"name": "unrelated", "digest": "a" * 64}],
+     "issue8_model_tag_missing"),
+    ([{"name": "qwen2.5-coder:latest",
+       "digest": "dae161e27b0e" + "a" * 52}],
+     "issue8_model_pinned_under_other_tag"),
+    ([{"name": "qwen2.5-coder:7b"}] * 2,
+     "issue8_model_tag_duplicate"),
+    ([{"name": "qwen2.5-coder:7b", "digest": "b" * 64}],
+     "tag_present"),
+])
+def test_native_model_inventory_reason_is_bounded_and_readonly(inventory, expected):
+    m = module()
+    if expected == "tag_present":
+        assert m.inspect_native_model_inventory(
+            inventory, "qwen2.5-coder:7b", m.MODEL_PIN
+        ) == "tag_present"
+    else:
+        with pytest.raises(m.PreflightBlocked, match="^" + expected + "$"):
+            m.inspect_native_model_inventory(
+                inventory, "qwen2.5-coder:7b", m.MODEL_PIN
+            )
+    assert "secret" not in expected
+
+
+def test_native_model_preflight_is_before_research_and_does_not_bypass_attestation():
+    script = SCRIPT.read_text(encoding="utf-8")
+    assert script.index("probe_native_model()\n    _set_phase('research')") > script.index(
+        "_set_phase('model')"
+    )
+    assert 'NativeStructuredOllama.select_model(models)' in script
+    assert 'LocalOllama.request(client, "GET", "/api/tags")' in script
+    assert "trust_env=False, follow_redirects=False" in script
+    assert "ollama pull" not in script.lower()
+    assert "ollama cp" not in script.lower()
+
 def test_positive_host_identity_does_not_authorize_execution(tmp_path):
     m=module()
     a=m.validate_environment(valid_env(m,tmp_path))
@@ -188,13 +225,13 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
     assert "types: [edited]" in t
     assert "github.actor == 'ericson-j-santos'" in t
     assert "github.event.changes.body.from != null" in t
-    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_REASON_CODE_ONCE" in t
+    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261026_MODEL_INVENTORY_ONCE" in t
     assert "ISSUE8_SANITIZED_FAILURE=" in t
     assert "^(?:issue8_|rag_|main_|owner_|native_|github_|context_)[a-z0-9_]{2,95}$" in t
     assert "ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED" in t
     assert "gatewayStatus -ne 0" in t
     assert "2>&1" in t
-    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_REASON_CODE_ONCE')" in t
+    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261026_MODEL_INVENTORY_ONCE')" in t
     assert "throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'" in t
     assert "runner_name" in t
     assert "Noteri-runtime" in t
@@ -215,7 +252,7 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
 
 def m_sha_in_text(t):
     return ("74035488dac6938bfc14957621e86168003cd0c6" in t
-            and "7a8dc26bdb26cf925472d800ea29066f7602dd0c" in t)
+            and "92e8b5c87684212964b24ff3597f9f9f8aea49a6" in t)
 
 
 def test_issue8_workflow_yaml_parses_with_hosted_runner_runtime(tmp_path):
@@ -246,7 +283,7 @@ def test_issue8_recovery_gate_is_scope_bound_and_fail_closed():
     assert "feat/issue8-native-rag-preflight-20261025" not in content
     assert "fix/issue8-native-rag-yaml-gate-20261025" in content
     assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_ONCE" not in content
-    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_REASON_CODE_ONCE" in content
+    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261026_MODEL_INVENTORY_ONCE" in content
     assert "ISSUE8_SANITIZED_FAILURE=" in content
     assert "ISSUE8_GATEWAY_ENVELOPE_UNAVAILABLE" in content
     assert "gatewayStatus -ne 0" in content

@@ -22,7 +22,7 @@ from pathlib import Path
 HOST_REPOSITORY = "ericson-j-santos/noteri-runtime"
 WORKER_REPOSITORY = "ericson-j-santos/engineering-worker-pool"
 WORKER_SHA = "74035488dac6938bfc14957621e86168003cd0c6"
-RULES_SHA = "7a8dc26bdb26cf925472d800ea29066f7602dd0c"
+RULES_SHA = "92e8b5c87684212964b24ff3597f9f9f8aea49a6"
 SOURCE_PATH = "app/portfolio_bridge.py"
 SOURCE_BLOB_SHA = "d9a25c574163c49f695e774609949160d94f4490"
 ISSUE_NUMBER = 8
@@ -54,6 +54,46 @@ def require(ok: bool, code: str) -> None:
     if not ok:
         raise PreflightBlocked(code)
 
+
+def inspect_native_model_inventory(models: object, model_name: str, digest_pin: str) -> str:
+    """Classify the real Ollama tag inventory before the pinned worker attestations.
+
+    No model is installed, retagged, downloaded or selected by a task payload.
+    The trusted Worker Pool still performs digest/GGUF/local-process checks.
+    """
+    require(type(models) is list and 1 <= len(models) <= 64
+            and all(type(item) is dict for item in models),
+            "issue8_model_inventory_invalid")
+    named = [item for item in models if item.get("name") == model_name]
+    if not named:
+        pinned_elsewhere = any(
+            type(item.get("digest")) is str
+            and SHA64.fullmatch(item["digest"]) is not None
+            and item["digest"].startswith(digest_pin)
+            for item in models
+        )
+        raise PreflightBlocked(
+            "issue8_model_pinned_under_other_tag" if pinned_elsewhere
+            else "issue8_model_tag_missing"
+        )
+    require(len(named) == 1, "issue8_model_tag_duplicate")
+    return "tag_present"
+
+
+def probe_native_model() -> None:
+    """Read only /api/tags on the reviewed loopback client; fail closed."""
+    import httpx
+    from app.local_code_worker import LocalOllama, OLLAMA_URL
+    from app.structured_ollama import MODEL
+    from app.native_structured_ollama import NativeStructuredOllama
+
+    NativeStructuredOllama.no_cloud()
+    with httpx.Client(base_url=OLLAMA_URL, timeout=15,
+                      trust_env=False, follow_redirects=False) as client:
+        models = LocalOllama.request(client, "GET", "/api/tags").get("models")
+    inspect_native_model_inventory(models, MODEL, MODEL_PIN)
+    # Retain the Worker Pool's exact-tag/digest/GGUF/remote-host gate.
+    NativeStructuredOllama.select_model(models)
 
 def validate_environment(env: dict[str, str]) -> dict[str, str]:
     require(env.get("GITHUB_ACTIONS") == "true"
@@ -252,6 +292,7 @@ def run(env: dict[str, str]) -> dict[str, object]:
     # gates. NativeStructuredOllama checks GGUF digest and no cloud endpoints.
     _set_phase('model')
     NativeStructuredOllama.no_cloud()
+    probe_native_model()
     _set_phase('research')
     receipt = research_issue(approved, github_token=env.get("GITHUB_TOKEN") or None)
     require(type(receipt) is dict and
