@@ -87,6 +87,16 @@ def test_only_launcher_gateway_execution_and_no_guest_start():
         assert forbidden.casefold() not in SOURCE.casefold()
 
 
+def test_failed_gateway_is_sanitized_and_still_fails_closed():
+    assert "NOTERI_HCS_DENIAL phase=" in SOURCE
+    assert "$gatewayExit -ne 0" in SOURCE
+    assert "HCS_ENUMERATION_REJECTED" in SOURCE
+    assert "HCS_API_UNAVAILABLE" in SOURCE
+    assert "throw 'NOTERI_HCS_GATEWAY_BLOCKED'" in SOURCE
+    assert "Write-Output $envr.stdout" not in SOURCE
+    assert "Write-Output $raw" not in SOURCE
+
+
 def test_host_readback_requires_actual_unskipped_steps():
     for exact in (
         "j.status==='completed'&&j.conclusion==='success'",
