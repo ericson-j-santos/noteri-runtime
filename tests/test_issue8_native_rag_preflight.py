@@ -213,7 +213,7 @@ def test_nonzero_on_unknown_exception_avoids_secret_leak(monkeypatch,capsys):
     m=module()
     monkeypatch.setattr(m,"run",lambda *_: (_ for _ in ()).throw(
         RuntimeError("secret bearer token")))
-    assert m.main()==2
+    assert m.main([])==2
     msg=json.loads(capsys.readouterr().out)
     assert msg["result"]=="ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED"
     assert msg["reason_code"]=="issue8_native_dependency_unavailable"
@@ -361,7 +361,7 @@ def test_rejected_preflight_identifies_phase_without_secret(monkeypatch, tmp_pat
         raise m.PreflightBlocked("issue8_checkout_bytes_drift")
     monkeypatch.setattr(m, "verify_pinned_checkout", reject)
     monkeypatch.setattr(m.os, "environ", env)
-    assert m.main() == 2
+    assert m.main([]) == 2
     value = json.loads(capsys.readouterr().out)
     assert value["reason_code"] == "issue8_checkout_bytes_drift"
     assert value["phase"] == "checkouts"
@@ -375,7 +375,7 @@ def test_unknown_exception_is_fixed_code_even_with_secret(monkeypatch, tmp_path,
         raise RuntimeError("secret=never-print")
     monkeypatch.setattr(m, "verify_pinned_checkout", reject)
     monkeypatch.setattr(m.os, "environ", env)
-    assert m.main() == 2
+    assert m.main([]) == 2
     value = json.loads(capsys.readouterr().out)
     assert value["reason_code"] == "issue8_native_dependency_unavailable"
     assert value["phase"] == "checkouts"
