@@ -80,6 +80,15 @@ def test_malformed_untrusted_hcs_results_are_blocked(rows):
         collect(rows)
 
 
+def test_missing_optional_hcs_fields_are_reported_but_not_falsely_ready():
+    row = {"SystemType": "VirtualMachine", "State": "Running"}
+    output = collect([row])
+    assert output["system_count"] == 1
+    assert output["metadata_incomplete_count"] == 1
+    assert output["wsl_vm_candidate_observed"] is False
+    assert output["ubuntu_distro_running_verified"] is False
+
+
 def test_replay_is_stable_and_no_external_side_effects():
     calls = []
     def enumerator():
