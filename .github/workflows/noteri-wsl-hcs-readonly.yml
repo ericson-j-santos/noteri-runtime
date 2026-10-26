@@ -1,0 +1,289 @@
+name: Noteri passive HCS WSL observation
+on:
+  pull_request:
+    types: [edited]
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: noteri-hcs-observe-${{ github.event.pull_request.head.ref }}
+  cancel-in-progress: false
+
+jobs:
+  admission:
+    name: Admit one SHA-bound passive Noteri HCS observation
+    if: >-
+      github.actor == 'ericson-j-santos' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feat/noteri-posix-passive-diag-20261026' &&
+      github.event.pull_request.draft == true &&
+      contains(github.event.pull_request.body,'OWNER_NOTERI_HCS_ACCESS_DIAGNOSTIC_20261026_ONCE') &&
+      github.event.changes.body.from != null &&
+      !contains(github.event.changes.body.from,'OWNER_NOTERI_HCS_ACCESS_DIAGNOSTIC_20261026_ONCE')
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - name: Verify SHA, marker, current main and actual CI
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const owner='ericson-j-santos',repo='noteri-runtime';
+            const p=context.payload.pull_request, sha=p.head.sha;
+            const marker='OWNER_NOTERI_HCS_ACCESS_DIAGNOSTIC_20261026_ONCE';
+            const [pr,main,runs,history]=await Promise.all([
+              github.rest.pulls.get({owner,repo,pull_number:p.number}),
+              github.rest.repos.getBranch({owner,repo,branch:'main'}),
+              github.rest.actions.listWorkflowRuns({owner,repo,workflow_id:'ci.yml',
+                head_sha:sha,event:'pull_request',status:'completed',per_page:100}),
+              github.rest.actions.listWorkflowRunsForRepo({owner,repo,
+                event:'pull_request',head_sha:sha,per_page:100})
+            ]);
+            if(context.actor!==owner||p.head.ref!=='feat/noteri-posix-passive-diag-20261026'||
+               pr.data.number!==p.number||pr.data.head.sha!==sha||
+               pr.data.state!=='open'||!pr.data.draft||
+               pr.data.head.repo?.full_name!==owner+'/'+repo||
+               pr.data.base.ref!=='main'||pr.data.base.sha!==main.data.commit.sha||
+               !pr.data.body?.includes(marker)||
+               context.payload.changes?.body?.from?.includes(marker)){
+              throw Error('NOTERI_HCS_OWNER_SHA_OR_MARKER_INVALID');
+            }
+            let ci=false;
+            for(const run of runs.data.workflow_runs.filter(x=>x.head_sha===sha&&x.conclusion==='success')){
+              const data=(await github.rest.actions.listJobsForWorkflowRun({
+                owner,repo,run_id:run.id,per_page:100})).data;
+              if(data.total_count===data.jobs.length && data.jobs.some(j=>
+                 j.name==='tests'&&j.status==='completed'&&j.conclusion==='success'&&
+                 j.steps?.some(s=>s.name==='Run tests'&&s.conclusion==='success'))){
+                 ci=true;break;
+              }
+            }
+            if(!ci)throw Error('NOTERI_HCS_REQUIRED_CI_MISSING');
+            if(history.data.total_count>100)throw Error('NOTERI_HCS_HISTORY_INCOMPLETE');
+            for(const run of history.data.workflow_runs.filter(x=>x.id!==context.runId&&
+              x.head_sha===sha&&String(x.path||'').endsWith('noteri-wsl-hcs-readonly.yml'))){
+              const j=(await github.rest.actions.listJobsForWorkflowRun({
+                owner,repo,run_id:run.id,per_page:100})).data;
+              if(j.total_count!==j.jobs.length)
+                throw Error('NOTERI_HCS_HISTORY_INCOMPLETE');
+              // Admission/CI-only runs never touch the host: only physical
+              // job ownership counts as a conflicting attempt.
+              if(j.jobs.some(y=>y.name==='Governed Noteri HCS observation'&&
+                 ['queued','waiting','in_progress'].includes(y.status)))
+                throw Error('NOTERI_HCS_CONCURRENT_RUN_DENIED');
+              if(j.jobs.some(y=>y.name==='Governed Noteri HCS observation'&&
+                 y.conclusion==='success'))
+                throw Error('NOTERI_HCS_ALREADY_DISPATCHED');
+            }
+            core.info('NOTERI_HCS_OWNER_CI_ADMITTED');
+
+  physical:
+    needs: admission
+    if: needs.admission.result == 'success'
+    name: Governed Noteri HCS observation
+    runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
+    timeout-minutes: 7
+    permissions:
+      contents: read
+    env:
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+      RULES_SHA: 92e8b5c87684212964b24ff3597f9f9f8aea49a6
+      CORRELATION_ID: noteri-wsl-hcs-${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      receipt: ${{ steps.probe.outputs.receipt }}
+    steps:
+      - name: Immutable Noteri source checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pinned operational rules checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: 92e8b5c87684212964b24ff3597f9f9f8aea49a6
+          path: _rules
+          persist-credentials: false
+      - name: Session Launcher and physical runner preflight
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          if($env:COMPUTERNAME -ine 'Noteri' -or
+             -not $env:RUNNER_NAME.ToLowerInvariant().StartsWith('noteri')){
+             throw 'NOTERI_HCS_HOST_INVALID'
+          }
+          $rules=Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $launcher=Join-Path $rules 'scripts/session_launcher.py'
+          $policy=Join-Path $rules 'config/command-gateway.policy.json'
+          $argv=@('--policy',$policy,'--repo',$env:GITHUB_WORKSPACE,
+            '--session-prefix','noteri-hcs','--correlation-id',$env:CORRELATION_ID,
+            '--expected-head',$env:EXPECTED_SHA,
+            '--sync-ref','origin/feat/noteri-posix-passive-diag-20261026',
+            '--require-runner-version-preflight')
+          $result=@(& python3 -B $launcher @argv)
+          if($LASTEXITCODE -ne 0 -or -not $result){throw 'NOTERI_HCS_SESSION_BLOCKED'}
+          $s=@($result)[-1] | ConvertFrom-Json
+          if($s.result -ne 'SESSION_LAUNCH_OK' -or
+             $s.state_validated -ne $true -or $s.head -ne $env:EXPECTED_SHA -or
+             $s.runner_version_preflight.ok -ne $true){throw 'NOTERI_HCS_SESSION_INVALID'}
+          "target=$($s.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session=$($s.session_id)" | Add-Content $env:GITHUB_OUTPUT
+          Write-Output 'NOTERI_HCS_SESSION_LAUNCH_OK'
+      - name: HCS enumeration through risk1 Command Gateway
+        id: probe
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: |
+          $ErrorActionPreference='Stop'
+          $rules=Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $gateway=Join-Path $rules 'scripts/command_gateway.py'
+          $argv=@('--policy',(Join-Path $rules 'config/command-gateway.policy.json'),
+            '--correlation-id',$env:CORRELATION_ID,'run','--cwd',$env:TARGET_PATH,
+            '--session-id',$env:SESSION_ID,'--risk','1','--timeout','30',
+            '--expected-head',$env:EXPECTED_SHA,'--','python3','-B',
+            (Join-Path $env:TARGET_PATH 'scripts/noteri_wsl_hcs_readonly.py'))
+          $raw=@(& python3 -B $gateway @argv)
+          $gatewayExit=$LASTEXITCODE
+          if(-not $raw){throw 'NOTERI_HCS_GATEWAY_NO_RECEIPT'}
+          try{$envr=@($raw)[-1] | ConvertFrom-Json -ErrorAction Stop}
+          catch{throw 'NOTERI_HCS_GATEWAY_RECEIPT_INVALID'}
+          if($gatewayExit -ne 0){
+            $phase=if(@('blocked','command_failed','timeout','blocked_false_positive_state_change') -contains
+              [string]$envr.result){[string]$envr.result}else{'other'}
+            $reason='GATEWAY_DENIED_OR_COMMAND_FAILED'
+            if([string]$envr.stdout){
+              try {
+                $probe=([string]$envr.stdout).Trim() | ConvertFrom-Json -ErrorAction Stop
+                $allowedReasons=@('NOT_WINDOWS','NOTERI_WINDOWS_REQUIRED','ARGUMENTS_DENIED',
+                  'HCS_OPERATION_UNAVAILABLE','HCS_ENUMERATION_REJECTED',
+                  'HCS_ENUMERATION_UNAVAILABLE','HCS_ACCESS_DENIED','HCS_OPERATION_TIMEOUT',
+                  'HCS_RESPONSE_EMPTY','HCS_RESPONSE_LIMIT',
+                  'HCS_API_UNAVAILABLE','HCS_COLLECTION_INVALID','HCS_ROW_INVALID',
+                  'HCS_FIELDS_INVALID','HCS_UNEXPECTED_FAILURE')
+                if($probe.result -eq 'NOTERI_HCS_READONLY_BLOCKED' -and
+                   $allowedReasons -contains [string]$probe.reason){
+                  $reason=[string]$probe.reason
+                }
+              }catch{}
+            }
+            Write-Output ('NOTERI_HCS_DENIAL phase='+$phase+' reason='+$reason)
+            throw 'NOTERI_HCS_GATEWAY_BLOCKED'
+          }
+          if($envr.result -ne 'ok' -or $envr.command_exit_code -ne 0 -or
+             $envr.state_changed -ne $false -or
+             $envr.before.head -ne $env:EXPECTED_SHA -or
+             $envr.after.head -ne $env:EXPECTED_SHA -or
+             $envr.before.status_digest -ne $envr.after.status_digest -or
+             $envr.before.status_count -ne 0 -or $envr.after.status_count -ne 0){
+            throw 'NOTERI_HCS_INTEGRITY_FAILED'
+          }
+          $report=([string]$envr.stdout).Trim() | ConvertFrom-Json
+          if($report.result -ne 'NOTERI_HCS_READONLY_OBSERVED' -or
+             $report.ubuntu_distro_running_verified -ne $false -or
+             $report.posix_transport_verified -ne $false -or
+             $report.guest_started -ne $false -or
+             $report.state_changed -ne $false -or
+             $report.wsl_invoked -ne $false){
+            throw 'NOTERI_HCS_FALSE_READINESS_DETECTED'
+          }
+          $receipt=[ordered]@{
+            schema_version='1'
+            host='Noteri'
+            head_sha=$env:EXPECTED_SHA
+            rules_sha=$env:RULES_SHA
+            correlation_id=$env:CORRELATION_ID
+            gateway_result=$envr.result
+            state_changed=$envr.state_changed
+            status_digest=$envr.after.status_digest
+            system_count=$report.system_count
+            wsl_vm_running_candidate_count=$report.wsl_vm_running_candidate_count
+            ubuntu_distro_running_verified=$report.ubuntu_distro_running_verified
+            posix_transport_verified=$report.posix_transport_verified
+            guest_started=$report.guest_started
+          }
+          $json=$receipt | ConvertTo-Json -Compress -Depth 4
+          if($json.Length -gt 1200){throw 'NOTERI_HCS_RECEIPT_TOO_LARGE'}
+          "receipt=$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)))" | Add-Content $env:GITHUB_OUTPUT
+          "digest=$($envr.after.status_digest)" | Add-Content $env:GITHUB_OUTPUT
+          Write-Output 'NOTERI_HCS_GATEWAY_READONLY_OK'
+      - name: Independent Git state readback through Gateway
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+          EXPECTED_DIGEST: ${{ steps.probe.outputs.digest }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $rules=Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $argv=@('--policy',(Join-Path $rules 'config/command-gateway.policy.json'),
+            '--correlation-id',$env:CORRELATION_ID,'inspect','--cwd',$env:TARGET_PATH,
+            '--session-id',$env:SESSION_ID)
+          $raw=@(& python3 -B (Join-Path $rules 'scripts/command_gateway.py') @argv)
+          if($LASTEXITCODE -ne 0 -or -not $raw){throw 'NOTERI_HCS_READBACK_BLOCKED'}
+          $r=@($raw)[-1] | ConvertFrom-Json
+          if($r.result -ne 'ok' -or $r.before.head -ne $env:EXPECTED_SHA -or
+             $r.before.status_count -ne 0 -or
+             $r.before.status_digest -ne $env:EXPECTED_DIGEST){
+             throw 'NOTERI_HCS_READBACK_CHANGED'
+          }
+          Write-Output 'NOTERI_HCS_STATE_READBACK_OK'
+
+  readback:
+    needs: physical
+    if: needs.physical.result == 'success'
+    name: Independent Noteri HCS physical receipt readback
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - name: Verify physical job, SHA and strict read-only receipt
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        env:
+          HCS_RECEIPT: ${{ needs.physical.outputs.receipt }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          script: |
+            const body=process.env.HCS_RECEIPT||'';
+            if(body.length<16||body.length>2500||!/^[A-Za-z0-9+/]*={0,2}$/.test(body))
+               throw Error('NOTERI_HCS_RECEIPT_MISSING');
+            const v=JSON.parse(Buffer.from(body,'base64').toString('utf8'));
+            if(v.schema_version!=='1'||v.host!=='Noteri'||
+              v.head_sha!==process.env.EXPECTED_SHA||
+              v.rules_sha!=='92e8b5c87684212964b24ff3597f9f9f8aea49a6'||
+              v.correlation_id!=='noteri-wsl-hcs-'+context.runId+'-'+context.runAttempt||
+              v.gateway_result!=='ok'||v.state_changed!==false||
+              v.ubuntu_distro_running_verified!==false||
+              v.posix_transport_verified!==false||v.guest_started!==false||
+              typeof v.status_digest!=='string'||v.status_digest.length!==64)
+               throw Error('NOTERI_HCS_RECEIPT_INVALID');
+            const [pr,jobs]=await Promise.all([
+              github.rest.pulls.get({owner:context.repo.owner,repo:context.repo.repo,
+                pull_number:context.payload.pull_request.number}),
+              github.rest.actions.listJobsForWorkflowRun({owner:context.repo.owner,
+                repo:context.repo.repo,run_id:context.runId,per_page:100})
+            ]);
+            if(pr.data.head.sha!==v.head_sha||pr.data.state!=='open'||
+               !pr.data.draft||jobs.data.total_count!==jobs.data.jobs.length)
+              throw Error('NOTERI_HCS_READBACK_GIT_STATE_DRIFT');
+            const physical=jobs.data.jobs.find(j=>j.name==='Governed Noteri HCS observation'&&
+              j.status==='completed'&&j.conclusion==='success'&&
+              j.runner_id>0&&String(j.runner_name||'').toLowerCase().startsWith('noteri')&&
+              j.steps?.some(s=>s.name==='HCS enumeration through risk1 Command Gateway'&&
+                s.conclusion==='success')&&
+              j.steps?.some(s=>s.name==='Independent Git state readback through Gateway'&&
+                s.conclusion==='success'));
+            if(!physical)throw Error('NOTERI_HCS_NOT_REAL_HOST_JOB');
+            core.info('NOTERI_HCS_REAL_READBACK_OK candidate_count='+v.wsl_vm_running_candidate_count+
+              ' ubuntu_distro_running_verified=false');
