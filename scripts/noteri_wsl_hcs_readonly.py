@@ -22,6 +22,16 @@ class Blocked(ValueError):
     """Fixed error categories; never pass OS error text or HCS JSON to logs."""
 
 
+def _hcs_failure(result: int) -> str:
+    """Map only documented HRESULT categories; never expose the raw value."""
+    code = int(result) & 0xFFFFFFFF
+    if code in (0x80070005, 0x8037011B):
+        return "HCS_ACCESS_DENIED"
+    if code in (0x800705B4, 0x80370118):
+        return "HCS_OPERATION_TIMEOUT"
+    return "HCS_ENUMERATION_UNAVAILABLE"
+
+
 def _bind(dll, symbol: str, args, result):
     fn = getattr(dll, symbol)
     fn.argtypes = args
@@ -52,8 +62,9 @@ def enumerate_existing():
             # Microsoft's reference sample waits indefinitely. Keep this probe
             # bounded, but allow a cold HCS service enough time to enumerate
             # existing systems while staying below the Gateway's 30 s limit.
-            if wait(operation, HCS_TIMEOUT_MS, ctypes.byref(document)) != 0:
-                raise Blocked("HCS_ENUMERATION_UNAVAILABLE")
+            wait_result = wait(operation, HCS_TIMEOUT_MS, ctypes.byref(document))
+            if wait_result != 0:
+                raise Blocked(_hcs_failure(wait_result))
             if not document.value:
                 raise Blocked("HCS_RESPONSE_EMPTY")
             # Avoid copying unbounded HCS data into Python or recording IDs/names.
@@ -145,6 +156,7 @@ def main():
             "NOT_WINDOWS", "NOTERI_WINDOWS_REQUIRED", "ARGUMENTS_DENIED",
             "HCS_OPERATION_UNAVAILABLE", "HCS_ENUMERATION_REJECTED",
             "HCS_ENUMERATION_UNAVAILABLE", "HCS_RESPONSE_EMPTY",
+            "HCS_ACCESS_DENIED", "HCS_OPERATION_TIMEOUT",
             "HCS_RESPONSE_LIMIT", "HCS_API_UNAVAILABLE",
             "HCS_COLLECTION_INVALID", "HCS_ROW_INVALID", "HCS_FIELDS_INVALID",
         })

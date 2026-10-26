@@ -159,6 +159,18 @@ def test_hcs_wait_allows_cold_enumeration_and_closes_operation(monkeypatch):
     assert calls == [("wait", 123, 15_000), ("close", 123)]
 
 
+@pytest.mark.parametrize(("hresult", "reason"), [
+    (0x80070005, "HCS_ACCESS_DENIED"),
+    (0x8037011B, "HCS_ACCESS_DENIED"),
+    (0x800705B4, "HCS_OPERATION_TIMEOUT"),
+    (0x80370118, "HCS_OPERATION_TIMEOUT"),
+    (0x8037011B - (1 << 32), "HCS_ACCESS_DENIED"),
+    (1, "HCS_ENUMERATION_UNAVAILABLE"),
+])
+def test_hcs_failure_maps_only_documented_hresult_categories(hresult, reason):
+    assert probe._hcs_failure(hresult) == reason
+
+
 def test_arbitrary_cli_argument_denied_before_io(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["noteri_wsl_hcs_readonly.py", "--query", "all"])
     monkeypatch.setattr(probe, "collect", lambda: pytest.fail("unexpected read"))

@@ -37,7 +37,7 @@ def test_physical_trigger_needs_exact_one_time_owner_marker_and_sha():
         "types: [edited]",
         "github.actor == 'ericson-j-santos'",
         "github.event.pull_request.draft == true",
-        "OWNER_NOTERI_HCS_TIMEOUT_RECOVERY_20261026_ONCE",
+        "OWNER_NOTERI_HCS_ACCESS_DIAGNOSTIC_20261026_ONCE",
         "github.event.changes.body.from",
         "NOTERI_HCS_REQUIRED_CI_MISSING",
         "NOTERI_HCS_ALREADY_DISPATCHED",
@@ -98,6 +98,8 @@ def test_failed_gateway_is_sanitized_and_still_fails_closed():
     assert "NOTERI_HCS_DENIAL phase=" in SOURCE
     assert "$gatewayExit -ne 0" in SOURCE
     assert "HCS_ENUMERATION_REJECTED" in SOURCE
+    assert "HCS_ACCESS_DENIED" in SOURCE
+    assert "HCS_OPERATION_TIMEOUT" in SOURCE
     assert "HCS_API_UNAVAILABLE" in SOURCE
     assert "throw 'NOTERI_HCS_GATEWAY_BLOCKED'" in SOURCE
     assert "Write-Output $envr.stdout" not in SOURCE

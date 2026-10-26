@@ -17,9 +17,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'feat/noteri-posix-passive-diag-20261026' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body,'OWNER_NOTERI_HCS_TIMEOUT_RECOVERY_20261026_ONCE') &&
+      contains(github.event.pull_request.body,'OWNER_NOTERI_HCS_ACCESS_DIAGNOSTIC_20261026_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from,'OWNER_NOTERI_HCS_TIMEOUT_RECOVERY_20261026_ONCE')
+      !contains(github.event.changes.body.from,'OWNER_NOTERI_HCS_ACCESS_DIAGNOSTIC_20261026_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 4
     permissions:
@@ -33,7 +33,7 @@ jobs:
           script: |
             const owner='ericson-j-santos',repo='noteri-runtime';
             const p=context.payload.pull_request, sha=p.head.sha;
-            const marker='OWNER_NOTERI_HCS_TIMEOUT_RECOVERY_20261026_ONCE';
+            const marker='OWNER_NOTERI_HCS_ACCESS_DIAGNOSTIC_20261026_ONCE';
             const [pr,main,runs,history]=await Promise.all([
               github.rest.pulls.get({owner,repo,pull_number:p.number}),
               github.rest.repos.getBranch({owner,repo,branch:'main'}),
@@ -165,7 +165,8 @@ jobs:
                 $probe=([string]$envr.stdout).Trim() | ConvertFrom-Json -ErrorAction Stop
                 $allowedReasons=@('NOT_WINDOWS','NOTERI_WINDOWS_REQUIRED','ARGUMENTS_DENIED',
                   'HCS_OPERATION_UNAVAILABLE','HCS_ENUMERATION_REJECTED',
-                  'HCS_ENUMERATION_UNAVAILABLE','HCS_RESPONSE_EMPTY','HCS_RESPONSE_LIMIT',
+                  'HCS_ENUMERATION_UNAVAILABLE','HCS_ACCESS_DENIED','HCS_OPERATION_TIMEOUT',
+                  'HCS_RESPONSE_EMPTY','HCS_RESPONSE_LIMIT',
                   'HCS_API_UNAVAILABLE','HCS_COLLECTION_INVALID','HCS_ROW_INVALID',
                   'HCS_FIELDS_INVALID','HCS_UNEXPECTED_FAILURE')
                 if($probe.result -eq 'NOTERI_HCS_READONLY_BLOCKED' -and
