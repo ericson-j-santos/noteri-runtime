@@ -76,17 +76,27 @@ def summarize(rows, *, platform_name=None, hostname=None):
         raise Blocked("HCS_COLLECTION_INVALID")
     wsl_candidates = 0
     linux_vm_running = 0
+    incomplete = 0
     for row in rows:
         if type(row) is not dict:
             raise Blocked("HCS_ROW_INVALID")
-        # Unknown schema/key, owner, or state must fail closed: HCS is shared by
-        # WSL, containers and other virtual machines on the same Windows host.
+        # Only SystemType is mandatory in the HCS schema. Missing optional
+        # metadata never proves readiness, and its absence is reported.
         typ = row.get("SystemType")
-        os_type = row.get("RuntimeOsType")
-        state = row.get("State")
-        owner = row.get("Owner")
-        if any(type(value) is not str or len(value) > 128 for value in (typ, os_type, state, owner)):
+        if type(typ) is not str or not 0 < len(typ) <= 128:
             raise Blocked("HCS_FIELDS_INVALID")
+        fields = []
+        missing = False
+        for key in ("RuntimeOsType", "State", "Owner"):
+            value = row.get(key)
+            if value is None:
+                value, missing = "", True
+            if type(value) is not str or len(value) > 128:
+                raise Blocked("HCS_FIELDS_INVALID")
+            fields.append(value)
+        os_type, state, owner = fields
+        if missing:
+            incomplete += 1
         if typ.casefold() == "virtualmachine" and os_type.casefold() == "linux" and state.casefold() in RUNNING_STATES:
             linux_vm_running += 1
             if "wsl" in owner.casefold():
@@ -95,6 +105,7 @@ def summarize(rows, *, platform_name=None, hostname=None):
         "result": "NOTERI_HCS_READONLY_OBSERVED",
         "scope": "current_windows_identity_existing_compute_systems_only",
         "system_count": len(rows),
+        "metadata_incomplete_count": incomplete,
         "linux_vm_running_count": linux_vm_running,
         "wsl_vm_running_candidate_count": wsl_candidates,
         "wsl_vm_candidate_observed": wsl_candidates > 0,
