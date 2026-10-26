@@ -92,6 +92,10 @@ O processo elevado deixa um recibo privado `activation-uac-<id>.json` no diretó
 local do Worker Pool. Ele contém somente resultado, fase e confirmação de
 elevação; o launcher o consulta para distinguir falha do filho de consentimento
 pendente, sem registrar a credencial ou mensagens brutas do Windows.
+Se o registro pelo Task Scheduler falhar, a capability conserva a resposta
+nativa, limitada a 4 KiB por canal, em um arquivo privado
+`registration-failure-<id>.json` na mesma árvore local. O recibo e a saída
+normal carregam só o identificador aleatório; o diagnóstico não entra no Git.
 
 A ativação só confirma sucesso quando a definição S4U relida corresponde à
 ação registrada, o listener pertence ao processo filho do Python lançado

@@ -43,7 +43,11 @@ def run(receipt: Path, confirm: str) -> dict:
                  "elevation_observed": activation.is_admin(),
                  "result": payload.get("result", "BLOCKED_CHILD_EXCEPTION"),
                  "activated": payload.get("activated") is True,
-                 "phase": payload.get("phase")}
+                 "phase": payload.get("phase"),
+                 "diagnostic_id": (payload.get("diagnostic_id")
+                                   if re.fullmatch(r"[0-9a-f]{32}",
+                                                   str(payload.get("diagnostic_id")))
+                                   else None)}
     temporary = receipt.with_suffix(".tmp")
     with temporary.open("x", encoding="utf-8") as stream:
         json.dump(sanitized, stream, sort_keys=True)

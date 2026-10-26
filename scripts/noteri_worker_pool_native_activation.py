@@ -15,6 +15,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -185,6 +186,21 @@ def schtasks(*args: str) -> subprocess.CompletedProcess:
                           timeout=30, check=False)
 
 
+def registration_diagnostic(root: Path, completed: subprocess.CompletedProcess) -> str | None:
+    """Keep the bounded native error privately; return only a random locator."""
+    identifier = uuid.uuid4().hex
+    path = root / f"registration-failure-{identifier}.json"
+    payload = {"returncode": completed.returncode,
+               "stdout": (completed.stdout or b"")[:4096].decode("utf-8", errors="replace"),
+               "stderr": (completed.stderr or b"")[:4096].decode("utf-8", errors="replace")}
+    try:
+        with path.open("x", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False)
+    except OSError:
+        return None
+    return identifier
+
+
 def http_status(path: str, bearer: str | None = None) -> tuple[int, dict | None]:
     headers = {} if bearer is None else {"Authorization": "Bearer " + bearer}
     try:
@@ -314,6 +330,7 @@ def activate(local: Path, source: Path) -> dict:
     registered = False
     created_bin = False
     created_data = False
+    diagnostic_id = None
     phase = "materialize"
     try:
         bin_dir.mkdir(exist_ok=False)
@@ -329,15 +346,18 @@ def activate(local: Path, source: Path) -> dict:
         phase = "register"
         created = schtasks("/Create", "/TN", TASK_NAME, "/XML", str(xml_path))
         if created.returncode != 0:
+            diagnostic_id = registration_diagnostic(root, created)
             queried = schtasks("/Query", "/TN", TASK_NAME, "/XML")
             if queried.returncode == 0:
                 if not task_matches(queried.stdout, python, runner, user):
                     return {"result": "BLOCKED_REGISTRATION_AMBIGUOUS", "phase": phase,
-                            "activated": False, "state_changed": True}
+                            "activated": False, "state_changed": True,
+                            "diagnostic_id": diagnostic_id}
                 registered = True
             elif not task_absent(Path(os.environ.get("WINDIR", "C:\\Windows"))):
                 return {"result": "BLOCKED_REGISTRATION_AMBIGUOUS", "phase": phase,
-                        "activated": False, "state_changed": True}
+                        "activated": False, "state_changed": True,
+                        "diagnostic_id": diagnostic_id}
             raise Blocked("register")
         registered = True
         xml_path.unlink()
@@ -381,7 +401,8 @@ def activate(local: Path, source: Path) -> dict:
         except OSError:
             return {"result": "BLOCKED_ROLLBACK", "phase": phase, "activated": False}
         return {"result": "BLOCKED_ACTIVATION_ROLLED_BACK", "phase": phase,
-                "activated": False, "state_changed": False}
+                "activated": False, "state_changed": False,
+                "diagnostic_id": diagnostic_id}
 
 
 def main() -> int:
