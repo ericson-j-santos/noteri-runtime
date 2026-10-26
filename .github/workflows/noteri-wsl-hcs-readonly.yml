@@ -39,9 +39,8 @@ jobs:
               github.rest.repos.getBranch({owner,repo,branch:'main'}),
               github.rest.actions.listWorkflowRuns({owner,repo,workflow_id:'ci.yml',
                 head_sha:sha,event:'pull_request',status:'completed',per_page:100}),
-              github.rest.actions.listWorkflowRuns({owner,repo,
-                workflow_id:'noteri-wsl-hcs-readonly.yml',event:'pull_request',
-                head_sha:sha,per_page:100})
+              github.rest.actions.listWorkflowRunsForRepo({owner,repo,
+                event:'pull_request',head_sha:sha,per_page:100})
             ]);
             if(context.actor!==owner||p.head.ref!=='feat/noteri-posix-passive-diag-20261026'||
                pr.data.number!==p.number||pr.data.head.sha!==sha||
@@ -63,7 +62,9 @@ jobs:
               }
             }
             if(!ci)throw Error('NOTERI_HCS_REQUIRED_CI_MISSING');
-            for(const run of history.data.workflow_runs.filter(x=>x.id!==context.runId&&x.head_sha===sha)){
+            if(history.data.total_count>100)throw Error('NOTERI_HCS_HISTORY_INCOMPLETE');
+            for(const run of history.data.workflow_runs.filter(x=>x.id!==context.runId&&
+              x.head_sha===sha&&String(x.path||'').endsWith('noteri-wsl-hcs-readonly.yml'))){
               if(['in_progress','queued','waiting'].includes(run.status))
                 throw Error('NOTERI_HCS_CONCURRENT_RUN_DENIED');
               const j=(await github.rest.actions.listJobsForWorkflowRun({
