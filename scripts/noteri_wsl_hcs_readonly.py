@@ -53,7 +53,7 @@ def enumerate_existing():
             if not document.value:
                 raise Blocked("HCS_RESPONSE_EMPTY")
             # Avoid copying unbounded HCS data into Python or recording IDs/names.
-            text = ctypes.wstring_at(document.value, MAX_BYTES + 1)
+            text = ctypes.wstring_at(document.value)
             if len(text.encode("utf-8")) > MAX_BYTES:
                 raise Blocked("HCS_RESPONSE_LIMIT")
             return json.loads(text)
