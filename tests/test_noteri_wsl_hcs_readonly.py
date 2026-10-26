@@ -138,5 +138,26 @@ def test_hcs_api_error_does_not_print_sensitive_data(monkeypatch, capsys):
     assert "ubuntu_distro_running_verified" in capsys.readouterr().out
 
 
+def test_safe_fixed_hcs_reason_is_reported_without_raw_exception(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["noteri_wsl_hcs_readonly.py"])
+    monkeypatch.setattr(probe, "collect", lambda: (_ for _ in ()).throw(
+        probe.Blocked("HCS_ENUMERATION_REJECTED")))
+    assert probe.main() == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["reason"] == "HCS_ENUMERATION_REJECTED"
+    assert report["ubuntu_distro_running_verified"] is False
+
+
+def test_arbitrary_hcs_error_is_never_echoed(monkeypatch, capsys):
+    marker = "secret-GUID-private"
+    monkeypatch.setattr(sys, "argv", ["noteri_wsl_hcs_readonly.py"])
+    monkeypatch.setattr(probe, "collect", lambda: (_ for _ in ()).throw(
+        probe.Blocked(marker)))
+    assert probe.main() == 2
+    result = capsys.readouterr().out
+    assert marker not in result
+    assert json.loads(result)["reason"] == "HCS_UNEXPECTED_FAILURE"
+
+
 def test_vm_owner_must_explicitly_indicate_wsl():
     assert collect([dict(WSL_VM, Owner="windows")])["wsl_vm_candidate_observed"] is False
