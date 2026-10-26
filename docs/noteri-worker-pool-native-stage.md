@@ -88,6 +88,10 @@ para essa única ativação. O prompt é visível ao operador; a tarefa resultan
 continua com `LeastPrivilege`. O launcher aceita sucesso somente após reler a
 tarefa e validar a API, e retorna um resultado sanitizado se UAC for cancelado
 ou a ativação não ficar pronta no prazo.
+O processo elevado deixa um recibo privado `activation-uac-<id>.json` no diretório
+local do Worker Pool. Ele contém somente resultado, fase e confirmação de
+elevação; o launcher o consulta para distinguir falha do filho de consentimento
+pendente, sem registrar a credencial ou mensagens brutas do Windows.
 
 A ativação só confirma sucesso quando a definição S4U relida corresponde à
 ação registrada, o listener pertence ao processo filho do Python lançado
