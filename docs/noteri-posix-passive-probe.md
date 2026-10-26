@@ -81,3 +81,22 @@ CI simulado verifica sintaxe, caminho feliz, rejeições, timeout, saída
 sanitizada, comandos exatos e replay. CI não comprova execução física,
 systemd, PostgreSQL ou POSIX Gateway instalado. Nenhum merge, deploy,
 alteração em produção, Docker, Neon ou gasto incremental está contemplado.
+
+## Observação passiva do HCS antes de qualquer WSL
+
+scripts/noteri_wsl_hcs_readonly.py consulta exclusivamente HcsEnumerateComputeSystems
+no Windows, usando a API oficial HCS, timeout de 3 s e sem comandos WSL,
+attach ou execução no Linux. Um sistema VirtualMachine/Linux no estado
+Running e proprietário WSL é candidato de VM WSL ativa, não atestado de
+Ubuntu especificamente iniciado. HCS é compartilhado por outros tipos de VMs.
+
+O diagnóstico não publica GUID, nome, caminho, processos, endereços ou
+detalhes privados: somente contagens limitadas e flags não comprovadas.
+Leitura HCS recusada ou ambígua falha fechada. A sonda pode ser invocada
+somente pelo Session Launcher e Gateway Windows risk 1, em worktree SHA-bound,
+sem ampliar allowlists.
+
+Mesmo resultado positivo não autoriza iniciar distribuição nem executar
+wsl.exe. A qualificação POSIX exige transporte autenticado ao guest já ativo.
+
+API oficial: https://learn.microsoft.com/en-us/virtualization/api/hcs/reference/hcsenumeratecomputesystems
