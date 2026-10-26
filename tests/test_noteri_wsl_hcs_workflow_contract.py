@@ -67,6 +67,13 @@ def test_physical_checkout_and_session_are_sha_bound():
         assert token in SOURCE
 
 
+def test_skipped_owner_marker_cleanup_run_is_not_false_concurrency():
+    assert "y.name==='Governed Noteri HCS observation'" in SOURCE
+    assert "['queued','waiting','in_progress'].includes(y.status)" in SOURCE
+    assert "j.total_count!==j.jobs.length" in SOURCE
+    assert "['in_progress','queued','waiting'].includes(run.status)" not in SOURCE
+
+
 def test_runner_is_not_generic_paid_host_or_prod():
     assert "runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]" in SOURCE
     assert "GITHUB_TOKEN: ''" in SOURCE and "GH_TOKEN: ''" in SOURCE
