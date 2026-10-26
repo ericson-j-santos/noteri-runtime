@@ -71,11 +71,11 @@ jobs:
               github.rest.repos.getBranch({owner,repo:context.repo.repo,branch:'main'}),
               github.rest.repos.getBranch({owner,repo:worker,branch:'main'}),
               github.rest.repos.getBranch({owner,repo:'chatgpt-operational-rules',branch:'main'}),
-              github.rest.issues.getComment({owner,repo:worker,comment_id:6423646539}),
+              github.rest.issues.getComment({owner,repo:worker,comment_id:6427072933}),
               github.rest.issues.get({owner,repo:worker,issue_number:8}),
-              github.rest.repos.getContent({owner,repo:worker,path:'app/portfolio_bridge.py',ref:'047c77b6b867ff5d489bd74f6fd80989719ab85e'}),
+              github.rest.repos.getContent({owner,repo:worker,path:'app/portfolio_bridge.py',ref:'be69b27455f99606a03ce5cba6ca809e1082f2b4'}),
               github.rest.checks.listForRef({owner,repo:context.repo.repo,ref:sha,per_page:100}),
-              github.rest.checks.listForRef({owner,repo:worker,ref:'047c77b6b867ff5d489bd74f6fd80989719ab85e',per_page:100})
+              github.rest.checks.listForRef({owner,repo:worker,ref:'be69b27455f99606a03ce5cba6ca809e1082f2b4',per_page:100})
             ]);
             const d=pr.data;
             if (d.state!=='open' || !d.draft ||
@@ -101,13 +101,13 @@ jobs:
                   ['added','modified'].includes(f.status))) {
               core.setFailed('ISSUE8_NOTERI_PR_SCOPE_CHANGED');return;
             }
-            if (wm.data.commit.sha!=='047c77b6b867ff5d489bd74f6fd80989719ab85e' ||
+            if (wm.data.commit.sha!=='be69b27455f99606a03ce5cba6ca809e1082f2b4' ||
                 rule.data.commit.sha!=='8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8' ||
                 issue.data.state!=='open' || !!issue.data.pull_request ||
                 ownerComment.data.user?.login!==owner ||
                 ownerComment.data.author_association!=='OWNER' ||
                 ownerComment.data.issue_url!=='https://api.github.com/repos/'+owner+'/'+worker+'/issues/8' ||
-                ownerComment.data.body!=='/local-agent authorize bridge.property.v1 sha:047c77b6b867ff5d489bd74f6fd80989719ab85e' ||
+                ownerComment.data.body!=='/local-agent authorize bridge.property.v1 sha:be69b27455f99606a03ce5cba6ca809e1082f2b4' ||
                 file.data.type!=='file' ||
                 file.data.sha!=='d9a25c574163c49f695e774609949160d94f4490') {
               core.setFailed('ISSUE8_NOTERI_OWNER_OR_SOURCE_DRIFT');return;
@@ -117,7 +117,7 @@ jobs:
               c.conclusion==='success'&&c.started_at&&c.completed_at);
             if (!passed(noteriChecks,'tests',sha) ||
                 !['test','candidate-canary'].every(n=>
-                  passed(workerChecks,n,'047c77b6b867ff5d489bd74f6fd80989719ab85e'))) {
+                  passed(workerChecks,n,'be69b27455f99606a03ce5cba6ca809e1082f2b4'))) {
               core.setFailed('ISSUE8_NOTERI_CURRENT_CI_NOT_EXECUTED');return;
             }
             core.info(JSON.stringify({
@@ -136,7 +136,7 @@ jobs:
       contents: read
     env:
       EXPECTED_NOTERI_SHA: ${{ github.event.pull_request.head.sha }}
-      WORKER_POOL_SHA: 047c77b6b867ff5d489bd74f6fd80989719ab85e
+      WORKER_POOL_SHA: be69b27455f99606a03ce5cba6ca809e1082f2b4
       RULES_SHA: 8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8
       AGENT_CORE_SHA: 1fc032d4c412bdb4ed202cf1193caf0cb49490ce
       CORRELATION_ID: issue8-noteri-${{ github.run_id }}-${{ github.run_attempt }}
@@ -380,7 +380,7 @@ jobs:
             if (raw.length>10000) {core.setFailed('ISSUE8_RECEIPT_UNBOUNDED');return;}
             const r=JSON.parse(raw);
             const owner='ericson-j-santos',worker='engineering-worker-pool';
-            const workerSHA='047c77b6b867ff5d489bd74f6fd80989719ab85e';
+            const workerSHA='be69b27455f99606a03ce5cba6ca809e1082f2b4';
             const thisSHA=context.payload.pull_request.head.sha;
             if (r.result!=='ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED' ||
                 r.schema_version!=='issue8.native.rag.readonly-v1' ||
@@ -408,7 +408,7 @@ jobs:
                 owner,repo:context.repo.repo,run_id:context.runId,per_page:100}),
               github.rest.repos.getBranch({owner,repo:context.repo.repo,branch:'main'}),
               github.rest.repos.getBranch({owner,repo:worker,branch:'main'}),
-              github.rest.issues.getComment({owner,repo:worker,comment_id:6423646539}),
+              github.rest.issues.getComment({owner,repo:worker,comment_id:6427072933}),
               github.rest.issues.get({owner,repo:worker,issue_number:8}),
               github.rest.repos.getContent({owner,repo:worker,path:r.citation_path,ref:workerSHA})
             ]);

@@ -95,8 +95,8 @@ def test_positive_host_identity_does_not_authorize_execution(tmp_path):
     assert a["runtime_sha"]=="b"*40
     assert a["run_id"]=="12345"
     assert m.MODEL_PIN=="dae161e27b0e"
-    assert m.WORKER_SHA=="047c77b6b867ff5d489bd74f6fd80989719ab85e"
-    assert m.OWNER_COMMENT_ID==6423646539
+    assert m.WORKER_SHA=="be69b27455f99606a03ce5cba6ca809e1082f2b4"
+    assert m.OWNER_COMMENT_ID==6427072933
 
 
 @pytest.mark.parametrize("field,value",[
@@ -235,7 +235,7 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
     assert "throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'" in t
     assert "runner_name" in t
     assert "Noteri-runtime" in t
-    assert "6423646539" in t
+    assert "6427072933" in t
     assert m_sha_in_text(t)
     assert "--require-runner-version-preflight" in t
     assert "SESSION_LAUNCH_OK" in t
@@ -251,7 +251,7 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
 
 
 def m_sha_in_text(t):
-    return ("047c77b6b867ff5d489bd74f6fd80989719ab85e" in t
+    return ("be69b27455f99606a03ce5cba6ca809e1082f2b4" in t
             and "8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8" in t)
 
 
@@ -524,3 +524,13 @@ def test_ollama_install_main_never_leaks_exception(monkeypatch, capsys):
     assert "SECRET" not in json.dumps(content)
     assert m.main(["--pull-another-model"]) == 2
     assert "issue8_cli_mode_invalid" in capsys.readouterr().out
+
+
+def test_memory_headroom_blocks_qwen_before_inference():
+    m = module()
+    with pytest.raises(m.PreflightBlocked, match="^issue8_model_memory_insufficient$"):
+        m.require_qwen_memory_headroom(1 * 1024 ** 3)
+    with pytest.raises(m.PreflightBlocked, match="^issue8_model_memory_insufficient$"):
+        m.require_qwen_memory_headroom(-1)
+    m.require_qwen_memory_headroom(6 * 1024 ** 3)
+    assert "require_qwen_memory_headroom()\n    NativeStructuredOllama.no_cloud()" in SCRIPT.read_text(encoding="utf-8")

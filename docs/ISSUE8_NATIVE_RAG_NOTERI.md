@@ -8,9 +8,9 @@ Este incremento qualifica o primeiro elo que ainda não foi comprovado: issue #8
 
 ## Identidades fixas na admissão
 
-- Worker Pool main: 047c77b6b867ff5d489bd74f6fd80989719ab85e
+- Worker Pool main: be69b27455f99606a03ce5cba6ca809e1082f2b4
 - Blob Git do app/portfolio_bridge.py: d9a25c574163c49f695e774609949160d94f4490
-- Comentário OWNER issue #8: 6423646539, comando literal atrelado à main
+- Comentário OWNER issue #8: 6427072933, comando literal atrelado à main
 - Agent Core: 1fc032d4c412bdb4ed202cf1193caf0cb49490ce
 - Regras operacionais: 8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8 (1.6.19)
 - Noteri Runtime base: 42e4f0eb3f6988e326c76b7160f9bbc9f2092a46
@@ -107,9 +107,16 @@ A nova admissão física one-shot usa o marcador `OWNER_ISSUE8_NATIVE_RAG_NOTERI
 
 - O modelo `qwen2.5-coder:7b` não foi encontrado na última sonda física.
 - Adicionado modo somente leitura `--inspect-ollama-model-store` no script existente da PR #60; somente Noteri/Windows com Session Launcher e Gateway. A inspeção exige 10 GiB livres no volume do armazenamento de modelos **e** uma comparação SHA-256 de pelo menos um manifesto local com o digest retornado pela API local Ollama. Assim, diretório existente isoladamente não equivale a daemon comprovado.
-- Este modo não instala modelos nem habilita inferência; código de falha sanitizado, sem caminhos de usuários nos logs. A admissão RAG deve usar agora Worker Pool 047c77b6b867ff5d489bd74f6fd80989719ab85e, autorização OWNER #6423646539 e regras 8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8 no SHA atual; controles e E2E independentes continuam obrigatórios.
+- Este modo não instala modelos nem habilita inferência; código de falha sanitizado, sem caminhos de usuários nos logs. A admissão RAG deve usar agora Worker Pool be69b27455f99606a03ce5cba6ca809e1082f2b4, autorização OWNER #6427072933 e regras 8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8 no SHA atual; controles e E2E independentes continuam obrigatórios.
 
 
 ## Provisionamento Qwen7B separado e opt-in, via Command Gateway
 
 Em 26/10/2026, a inspeção física `ISSUE8_MODEL_STORAGE_READONLY_VERIFIED` confirmou 332,07 GiB livres e dois manifestos locais cujo SHA-256 coincide com a API Ollama no Noteri. A etiqueta `qwen2.5-coder:7b` segue ausente. O provisionamento é um modo distinto do RAG: `--install-ollama-qwen7b` requer Session Launcher SHA-bound, Gateway Risk2 e comprovação do armazenamento antes da única chamada `POST /api/pull` à instância Ollama local; `--verify-ollama-qwen7b` opera somente leitura via Risk1 para leitura independente posterior. Os destinos e o nome de modelo são fixos. A verificação exige digest `dae161e27b0e`, GGUF, bytes, API `/api/show`, manifestos e ausência de modelos remotos. Timeout global de 720 s e 300 s sem progresso material; sem Docker, merge, deploy ou exclusão de modelos. O RAG mantém autorização e execução separadas.
+
+
+## Recibo físico do modelo e memória para E2E (26/10/2026)
+
+- Instalação no Noteri executada via Session Launcher e Gateway Risk2 sobre SHA `09e1348f251234004d2170ae89630e83a8ad417c`. Resultado `ISSUE8_OLLAMA_QWEN7B_VERIFIED`, modelo `qwen2.5-coder:7b`, digest exato `dae161e27b0e90dd1856c8bb3209201fd6736d8eb66298e75ed87571486f4364`, tamanho 4683087561 bytes, `model_state_changed=true` na instalação, `git_state_changed=false`. Replay independente pelo Gateway Risk1 confirmou o mesmo digest e tamanho com `model_state_changed=false`.
+- Capacidade observada depois da instalação: Windows Noteri, 15,69 GiB de RAM física, 1,18 GiB disponível, CPU 38,1% e aproximadamente 327,74 GiB livres em disco. Isso **não** prova a execução Qwen7B; adicionar gate conservador de 6 GiB disponíveis antes de qualquer inferência RAG, com teste negativo. Preservar processos/tarefas do usuário, sem encerrar aplicações automaticamente.
+- Atualizada a origem do Worker Pool para `be69b27455f99606a03ce5cba6ca809e1082f2b4`, com autorização OWNER exata [#6427072933](https://github.com/ericson-j-santos/engineering-worker-pool/issues/8#issuecomment-6427072933). A PR não faz merge nem deploy. Só liberar canário RAG físico quando memória e demais controles estiverem comprovados no HEAD resultante, com CI e readback independente.

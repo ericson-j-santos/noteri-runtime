@@ -21,12 +21,12 @@ from pathlib import Path
 
 HOST_REPOSITORY = "ericson-j-santos/noteri-runtime"
 WORKER_REPOSITORY = "ericson-j-santos/engineering-worker-pool"
-WORKER_SHA = "047c77b6b867ff5d489bd74f6fd80989719ab85e"
+WORKER_SHA = "be69b27455f99606a03ce5cba6ca809e1082f2b4"
 RULES_SHA = "8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8"
 SOURCE_PATH = "app/portfolio_bridge.py"
 SOURCE_BLOB_SHA = "d9a25c574163c49f695e774609949160d94f4490"
 ISSUE_NUMBER = 8
-OWNER_COMMENT_ID = 6423646539
+OWNER_COMMENT_ID = 6427072933
 MODEL_PIN = "dae161e27b0e"
 SHA40 = re.compile(r"[a-f0-9]{40}\Z")
 SHA64 = re.compile(r"[a-f0-9]{64}\Z")
@@ -304,6 +304,40 @@ def provision_ollama_qwen7b(mode: str) -> dict[str, object]:
     }
 
 
+
+
+def require_qwen_memory_headroom(available_bytes: int | None = None) -> None:
+    """Block heavy Qwen 7B inference when Windows physical RAM is exhausted."""
+    if available_bytes is None:
+        import ctypes
+
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+        info = MemoryStatus()
+        info.dwLength = ctypes.sizeof(info)
+        try:
+            api = ctypes.WinDLL("kernel32", use_last_error=True)
+            api.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(MemoryStatus)]
+            api.GlobalMemoryStatusEx.restype = ctypes.c_int
+            require(bool(api.GlobalMemoryStatusEx(ctypes.byref(info))),
+                    "issue8_model_memory_probe_unavailable")
+            available_bytes = int(info.ullAvailPhys)
+        except (OSError, AttributeError, ValueError):
+            raise PreflightBlocked("issue8_model_memory_probe_unavailable") from None
+    require(type(available_bytes) is int and available_bytes >= 6 * 1024 ** 3,
+            "issue8_model_memory_insufficient")
+
+
 def validate_environment(env: dict[str, str]) -> dict[str, str]:
     require(env.get("GITHUB_ACTIONS") == "true"
             and env.get("GITHUB_REPOSITORY") == HOST_REPOSITORY,
@@ -500,6 +534,7 @@ def run(env: dict[str, str]) -> dict[str, object]:
     # Real Ollama calls must occur ONLY after the above owner/HEAD/baseline
     # gates. NativeStructuredOllama checks GGUF digest and no cloud endpoints.
     _set_phase('model')
+    require_qwen_memory_headroom()
     NativeStructuredOllama.no_cloud()
     probe_native_model()
     _set_phase('research')
