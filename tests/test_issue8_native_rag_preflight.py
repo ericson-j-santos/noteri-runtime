@@ -188,12 +188,13 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
     assert "types: [edited]" in t
     assert "github.actor == 'ericson-j-santos'" in t
     assert "github.event.changes.body.from != null" in t
-    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_PHASE_DIAGNOSTIC_ONCE" in t
+    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_REASON_CODE_ONCE" in t
     assert "ISSUE8_SANITIZED_FAILURE=" in t
+    assert "^(?:issue8_|rag_|main_|owner_|native_|github_|context_)[a-z0-9_]{2,95}$" in t
     assert "ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED" in t
     assert "gatewayStatus -ne 0" in t
     assert "2>&1" in t
-    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_PHASE_DIAGNOSTIC_ONCE')" in t
+    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_REASON_CODE_ONCE')" in t
     assert "throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'" in t
     assert "runner_name" in t
     assert "Noteri-runtime" in t
@@ -245,7 +246,7 @@ def test_issue8_recovery_gate_is_scope_bound_and_fail_closed():
     assert "feat/issue8-native-rag-preflight-20261025" not in content
     assert "fix/issue8-native-rag-yaml-gate-20261025" in content
     assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_ONCE" not in content
-    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_PHASE_DIAGNOSTIC_ONCE" in content
+    assert "OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_REASON_CODE_ONCE" in content
     assert "ISSUE8_SANITIZED_FAILURE=" in content
     assert "ISSUE8_GATEWAY_ENVELOPE_UNAVAILABLE" in content
     assert "gatewayStatus -ne 0" in content

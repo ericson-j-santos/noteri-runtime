@@ -48,9 +48,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'fix/issue8-native-rag-yaml-gate-20261025' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_PHASE_DIAGNOSTIC_ONCE') &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_REASON_CODE_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_PHASE_DIAGNOSTIC_ONCE')
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_REASON_CODE_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 4
     permissions:
@@ -84,7 +84,7 @@ jobs:
                 d.head.ref!=='fix/issue8-native-rag-yaml-gate-20261025' ||
                 d.head.sha!==sha || d.base.ref!=='main' ||
                 d.base.sha!==main.data.commit.sha ||
-                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_PHASE_DIAGNOSTIC_ONCE')) {
+                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261025_REASON_CODE_ONCE')) {
               core.setFailed('ISSUE8_NOTERI_PR_OR_BASE_DRIFT'); return;
             }
             const files=(await github.rest.pulls.listFiles({
@@ -277,7 +277,7 @@ jobs:
               try {
                 $diag=$envelope.stdout | ConvertFrom-Json -ErrorAction Stop
                 if ($diag.result -eq 'ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED' -and
-                    $diag.reason_code -cmatch '^issue8_[a-z0-9_]{4,100}$') {
+                    $diag.reason_code -cmatch '^(?:issue8_|rag_|main_|owner_|native_|github_|context_)[a-z0-9_]{2,95}$') {
                   $reason=$diag.reason_code
                 }
               } catch {

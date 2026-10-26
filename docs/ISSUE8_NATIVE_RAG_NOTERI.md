@@ -53,6 +53,10 @@ Qualquer falha de bootstrap, Gateway, Ollama, GitHub API ou evidência bloqueia 
 - Esta recuperação reconstrói o YAML a partir da versão íntegra, mantendo os controles de admissão. Adiciona teste de parsing real com Ruby/Psych na suíte obrigatória de CI e leitura de motivo de falha sanitizado (`ISSUE8_SANITIZED_FAILURE`), sem mostrar mensagens potencialmente sensíveis ou permitir sucesso quando houver bloqueio.
 - Novo canário permitido somente na branch `fix/issue8-native-rag-yaml-gate-20261025`, com nova transição de marcador apenas após CI no SHA novo. Nenhum marcador de disparo deve constar inicialmente no corpo da PR. Não considerar testes estáticos como substituição da prova física.
 
+## Diagnóstico de motivo RAG com allowlist compatível
+
+No run #40247054777, a fase foi `research` mas o Gateway mostrou `issue8_gateway_execution_unavailable`: o filtro PowerShell do workflow só aceitava prefixo `issue8_`, enquanto o executor Python valida códigos confiáveis adicionais `rag_`, `github_`, `native_`, `context_`, `main_` e `owner_`. O workflow passou a aceitar exatamente o mesmo padrão estático seguro da saída Python, sem mostrar texto livre da exceção ou alterar o fail-closed. Novo canário é one-shot somente após CI no SHA atualizado.
+
 ## Limites
 
 Suíte simulada não equivale à inferência física. Mesmo um resultado positivo deste preflight NÃO prova a cadeia Issue→reparo→CAS Git bundle→Validator→draft PR. O próximo incremento é do Worker Pool e requer IssueRAGReceiptCAS e adapter_from_durable_issue_rag com lease/fencing, patch material, CAS real, 42/42 + 52/52, exatamente uma PR draft criada pelo agente e replay independente.
