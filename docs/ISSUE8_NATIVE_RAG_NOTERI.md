@@ -8,11 +8,11 @@ Este incremento qualifica o primeiro elo que ainda não foi comprovado: issue #8
 
 ## Identidades fixas na admissão
 
-- Worker Pool main: 74035488dac6938bfc14957621e86168003cd0c6
+- Worker Pool main: 047c77b6b867ff5d489bd74f6fd80989719ab85e
 - Blob Git do app/portfolio_bridge.py: d9a25c574163c49f695e774609949160d94f4490
-- Comentário OWNER issue #8: 6404265064, comando literal atrelado à main
+- Comentário OWNER issue #8: 6423646539, comando literal atrelado à main
 - Agent Core: 1fc032d4c412bdb4ed202cf1193caf0cb49490ce
-- Regras operacionais: 92e8b5c87684212964b24ff3597f9f9f8aea49a6 (1.6.19)
+- Regras operacionais: 8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8 (1.6.19)
 - Noteri Runtime base: 42e4f0eb3f6988e326c76b7160f9bbc9f2092a46
 
 Os SHAs são fixados. Avanço de branch, autorização ou arquivo exige novo commit, CI e readback. Não atualizar automaticamente os valores durante a execução física.
@@ -100,4 +100,11 @@ O job físico [#40247590037](https://github.com/ericson-j-santos/noteri-runtime/
 
 Antes do RAG, o mesmo executor Risk1 agora consulta somente `GET /api/tags` no Ollama de loopback e devolve um código sanitizado e determinístico: `issue8_model_tag_missing`, `issue8_model_pinned_under_other_tag` ou `issue8_model_tag_duplicate`. Se a etiqueta estiver presente, mantém todas as validações do Worker Pool (digest, GGUF e ausência de modelo remoto); nenhum resultado pode liberar a execução por si só. Testes positivos e negativos entram no CI.
 
-A nova admissão física one-shot usa o marcador `OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261026_MODEL_INVENTORY_ONCE` em transição exclusiva pelo OWNER, somente após CI concluído no novo HEAD. A recuperação de alias ou download não ocorre neste workflow read-only: requer diagnóstico real, autorização separada de mudança de estado e execução governada via Session Launcher/Gateway, com verificação independente. Nenhum re-run sem nova precondição, sem Docker, sem gastos, sem publicação, merge ou deploy.
+A nova admissão física one-shot usa o marcador `OWNER_ISSUE8_NATIVE_RAG_NOTERI_20261026_POST_MODEL_READY_ONCE` em transição exclusiva pelo OWNER, somente após CI concluído no novo HEAD. A recuperação de alias ou download não ocorre neste workflow read-only: requer diagnóstico real, autorização separada de mudança de estado e execução governada via Session Launcher/Gateway, com verificação independente. Nenhum re-run sem nova precondição, sem Docker, sem gastos, sem publicação, merge ou deploy.
+
+
+## Observação governada de armazenamento Ollama (26/10/2026)
+
+- O modelo `qwen2.5-coder:7b` não foi encontrado na última sonda física.
+- Adicionado modo somente leitura `--inspect-ollama-model-store` no script existente da PR #60; somente Noteri/Windows com Session Launcher e Gateway. A inspeção exige 10 GiB livres no volume do armazenamento de modelos **e** uma comparação SHA-256 de pelo menos um manifesto local com o digest retornado pela API local Ollama. Assim, diretório existente isoladamente não equivale a daemon comprovado.
+- Este modo não instala modelos nem habilita inferência; código de falha sanitizado, sem caminhos de usuários nos logs. A admissão RAG deve usar agora Worker Pool 047c77b6b867ff5d489bd74f6fd80989719ab85e, autorização OWNER #6423646539 e regras 8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8 no SHA atual; controles e E2E independentes continuam obrigatórios.

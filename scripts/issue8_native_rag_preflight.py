@@ -21,12 +21,12 @@ from pathlib import Path
 
 HOST_REPOSITORY = "ericson-j-santos/noteri-runtime"
 WORKER_REPOSITORY = "ericson-j-santos/engineering-worker-pool"
-WORKER_SHA = "74035488dac6938bfc14957621e86168003cd0c6"
-RULES_SHA = "92e8b5c87684212964b24ff3597f9f9f8aea49a6"
+WORKER_SHA = "047c77b6b867ff5d489bd74f6fd80989719ab85e"
+RULES_SHA = "8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8"
 SOURCE_PATH = "app/portfolio_bridge.py"
 SOURCE_BLOB_SHA = "d9a25c574163c49f695e774609949160d94f4490"
 ISSUE_NUMBER = 8
-OWNER_COMMENT_ID = 6404265064
+OWNER_COMMENT_ID = 6423646539
 MODEL_PIN = "dae161e27b0e"
 SHA40 = re.compile(r"[a-f0-9]{40}\Z")
 SHA64 = re.compile(r"[a-f0-9]{64}\Z")
@@ -94,6 +94,95 @@ def probe_native_model() -> None:
     inspect_native_model_inventory(models, MODEL, MODEL_PIN)
     # Retain the Worker Pool's exact-tag/digest/GGUF/remote-host gate.
     NativeStructuredOllama.select_model(models)
+
+
+def _local_ollama_tags() -> list[dict[str, object]]:
+    """Only GET localhost; never follow redirects or honor proxy settings."""
+    from urllib import request
+
+    class NoRedirect(request.HTTPRedirectHandler):
+        def redirect_request(self, *_args, **_kwargs):
+            return None
+
+    opener = request.build_opener(request.ProxyHandler({}), NoRedirect())
+    try:
+        with opener.open("http://127.0.0.1:11434/api/tags", timeout=15) as response:
+            require(response.status == 200, "issue8_ollama_local_api_unavailable")
+            raw = response.read(262145)
+    except (OSError, ValueError):
+        raise PreflightBlocked("issue8_ollama_local_api_unavailable") from None
+    require(0 < len(raw) <= 262144, "issue8_ollama_local_tags_invalid")
+    try:
+        doc = json.loads(raw)
+    except (TypeError, ValueError):
+        raise PreflightBlocked("issue8_ollama_local_tags_invalid") from None
+    require(type(doc) is dict and type(doc.get("models")) is list,
+            "issue8_ollama_local_tags_invalid")
+    return doc["models"]
+
+
+def inspect_ollama_model_store(*, model_root: Path | None = None,
+                               inventory: object = None,
+                               disk_usage=None) -> dict[str, object]:
+    """Attest model storage to live tags via Git manifest SHA-256, read-only.
+
+    Default models location alone is not accepted as proof of a running daemon's
+    storage. A manifest must hash to one of the exact local Ollama /api/tags
+    digests. No personal paths are emitted.
+    """
+    import platform
+    import shutil
+    import socket
+
+    require(platform.system() == "Windows" and socket.gethostname() == "Noteri",
+            "issue8_model_host_unverified")
+    supplied = os.environ.get("OLLAMA_MODELS", "").strip()
+    root = model_root if model_root is not None else (
+        Path(supplied) if supplied else Path.home() / ".ollama" / "models"
+    )
+    require(root.is_absolute() and root.is_dir() and not root.is_symlink()
+            and not getattr(root, "is_junction", lambda: False)(),
+            "issue8_model_storage_root_unverified")
+    measure = disk_usage if disk_usage is not None else shutil.disk_usage
+    free = measure(root).free
+    require(type(free) is int and free >= 10 * 1024 ** 3,
+            "issue8_model_storage_insufficient")
+    models = _local_ollama_tags() if inventory is None else inventory
+    require(type(models) is list and len(models) <= 64
+            and all(type(item) is dict for item in models),
+            "issue8_model_inventory_invalid")
+    manifests = root / "manifests" / "registry.ollama.ai" / "library"
+    verified = 0
+    model_present = False
+    for item in models:
+        name, digest = item.get("name"), item.get("digest")
+        if (type(name) is not str or type(digest) is not str
+                or SHA64.fullmatch(digest) is None):
+            continue
+        if name == "qwen2.5-coder:7b":
+            require(digest.startswith(MODEL_PIN), "issue8_model_digest_mismatch")
+            model_present = True
+        match = re.fullmatch(r"([a-z0-9][a-z0-9._-]{0,60}):([a-z0-9][a-z0-9._-]{0,60})", name)
+        if match is None:
+            continue
+        path = manifests / match.group(1) / match.group(2)
+        if not path.is_file() or path.is_symlink():
+            continue
+        require(path.stat().st_size <= 65536,
+                "issue8_model_manifest_invalid")
+        payload = path.read_bytes()
+        if hashlib.sha256(payload).hexdigest() == digest:
+            verified += 1
+    require(verified >= 1, "issue8_model_storage_not_attested")
+    return {
+        "result": "ISSUE8_MODEL_STORAGE_READONLY_VERIFIED",
+        "model_store_bound_to_daemon": True,
+        "free_gib": round(free / 1024 ** 3, 2),
+        "manifest_matches": verified,
+        "qwen_tag_present": model_present,
+        "state_changed": False,
+    }
+
 
 def validate_environment(env: dict[str, str]) -> dict[str, str]:
     require(env.get("GITHUB_ACTIONS") == "true"
@@ -350,6 +439,24 @@ def run(env: dict[str, str]) -> dict[str, object]:
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--inspect-ollama-model-store"]:
+        try:
+            result = inspect_ollama_model_store()
+        except PreflightBlocked as exc:
+            print(json.dumps({"result": "ISSUE8_MODEL_STORAGE_BLOCKED",
+                              "reason_code": str(exc)}, sort_keys=True))
+            return 2
+        except Exception:
+            print(json.dumps({"result": "ISSUE8_MODEL_STORAGE_BLOCKED",
+                              "reason_code": "issue8_model_storage_dependency_unavailable"},
+                             sort_keys=True))
+            return 2
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    if len(sys.argv) != 1:
+        print(json.dumps({"result": "ISSUE8_MODEL_STORAGE_BLOCKED",
+                          "reason_code": "issue8_cli_mode_invalid"}, sort_keys=True))
+        return 2
     try:
         observed = run(dict(os.environ))
     except Exception as exc:
