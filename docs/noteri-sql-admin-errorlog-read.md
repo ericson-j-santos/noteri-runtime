@@ -1,21 +1,97 @@
-# Noteri DEV — SQL Server 2025 ERRORLOG administrative read
+# Noteri DEV — leitura administrativa restrita do ERRORLOG SQL
 
-Status: **staged; not installed, not dispatched, and not a production-ready capability**. Tracks noteri-runtime issue #36 and report-builder-platform issue #7.
+Status em 26/10/2026: **STAGED / NÃO IMPLANTADO / E2E FÍSICO PENDENTE**.
+Vínculos: noteri-runtime #36 e PR #64; report-builder-platform #7.
 
-## Scope
+## Objetivo e limites
 
-The program scripts/noteri_sql_admin_errorlog_read.py classifies certificate startup messages from the already implemented scripts/noteri_sql_certificate_errorlog.py. It refuses other hosts, non-Windows systems, environments other than DEV, non-administrative identity, incorrect source SHA, incorrect confirmation, mismatched metadata, an unverified SQL startup -e parameter, and any extra/unsafe output fields. It has no custom path, SQL, command, registry key, or output destination input.
+A autorização específica permite **somente leitura** do argumento de inicialização `-e`
+e do `ERRORLOG` ativo de `MSSQL17.MSSQLSERVER`, em **Noteri DEV**.
+Ela não permite alterar serviços, certificados, TLS, DSN, logins, ACLs,
+privilégios, bancos ou ambientes HML/PROD.
 
-The existing reader restricts its registry reads to MSSQL17.MSSQLSERVER, verifies an actually running SQL Server 2025 service and NORMAL profile, bounds ERRORLOG reads to 8 MiB, rejects reparse points, and classifies messages without returning raw lines, credentials, identities, certificate thumbprints, or paths. This wrapper will NOT treat the setup-derived fallback as proof of the configured startup parameter.
+O leitor já existente `noteri_sql_certificate_errorlog.py` consulta apenas
+os campos permitidos do Registro, exige instância local SQL 2025 em execução,
+perfil NORMAL, SHA de origem, limite de 8 MiB e rejeição de reparse points.
+A nova entrada `noteri_sql_admin_errorlog_read.py` exige Windows/Noteri/DEV,
+identidade administrativa, confirmação de contexto, SHA/correlação e
+`startup_log_argument_verified=true`, recusando o candidato derivado
+somente de `SQLPath`. A saída contém **apenas** classificações e flags
+conservadoras, sem caminhos, linhas, logins nem impressões digitais do certificado.
 
-## Critical security gate before use
+## Bloqueio principal: atuador legado em LOCALAPPDATA
 
-The present elevated admin actuator installer writes code and a dispatcher under LOCALAPPDATA. Do not add this capability to that existing scheduled task, or execute newly downloaded code elevated, unless a reviewed update proves the binary/code bytes, SHA, administrative-only ACL of the installed path, and the allowed request contract. The entrypoint itself never elevates, changes permissions, creates scheduled tasks, or installs anything. Its fixed confirmation literal is not authorization by itself.
+O instalador histórico `install_noteri_admin_actuator.py` posiciona código e
+dispatcher em `LOCALAPPDATA` antes de criar uma tarefa elevada.
+**Não adicionar a capability àquela tarefa, nem usar o arquivo lá
+instalado como fonte executável confiável**: não há evidência de ACL administrativa
+exclusiva, proteção do código, verificação dos bytes do dispatcher ou identidade
+efetiva do usuário da tarefa no Noteri. Não usar `schtasks`, GUI/UAC ou terminal
+irrestrito como atalho para obter a leitura.
 
-A governed one-shot actuator must bind Noteri DEV, the reviewed full SHA, a unique correlation ID and idempotency key, a protected installation path, confirmation of caller authorization, and a readback from a separate process. Require SESSION_LAUNCH_OK and Command Gateway readiness, fail closed if the administrative control-plane path is absent, and never substitute GUI, unrestricted shell, or weakening TLS.
+## Pré-admissão independente (sem elevação)
 
-## Evidence and limitations
+`scripts/noteri_sql_admin_bundle_gate.py` é uma **sonda somente leitura**,
+não é instalador, dispatcher ou concessão de privilégio. Ela verifica apenas
+o candidato fixo `C:\ProgramData\ReqSys\NoteriSqlAdminBroker`:
 
-CI tests use an injected collector; they test positive, negative, blocked, deterministic replay, strict output and no writes but are not a physical SQL test. Even a positive ERRORLOG message does NOT verify an active SQL certificate, correct TLS trust chain, live ODBC session, current service process generation, actual Report Builder read-only permissions, or Fabric delivery. These remain separate physical E2E gates.
+- host Noteri, Windows, SHA hexadecimal completo e ProgramData esperado;
+- diretórios existentes, sem reparse points, sob uma raiz privada;
+- dono `SYSTEM` ou `Administrators` e DACL explícita que permita somente
+  esses dois SIDs; raízes devem ter proteção contra herança insegura;
+- os quatro arquivos fixos no subdiretório `bin`, mais `manifest.json`,
+  todos regulares, sem symlink/junction, com tamanho limitado;
+- manifesto v1 para host `Noteri`, ambiente `dev`, capability
+  `sql-errorlog-readonly`, `source_sha` imutável e SHA-256 **dos quatro
+  arquivos**:
+  `noteri_sql_admin_errorlog_read.py`,
+  `noteri_sql_certificate_errorlog.py`,
+  `noteri_native_qualification.py` e
+  `noteri_sql_admin_bundle_gate.py`.
 
-After a verified administrative read, validate ODBC Driver 18 with Encrypt=Yes and TrustServerCertificate=No and approved DEV identity/DSN, then SQL preflight and independent gateway/Fabric render/export/readback. No changes to SQL Server, certificate, permissions, DSN, production or CU installation are authorized by this PR.
+O manifesto **não** é credencial nem autorização de elevação; o SHA informado
+precisa ser conferido por um controlador independente no GitHub. A própria sonda
+não deve ser executada elevada a partir de checkout, do diretório do usuário
+ou de binários não conferidos. Primeiro o plano de controle **preexistente,
+confiável e protegido** precisa validar o destino. Uma verificação feita
+pelo próprio binário sob exame não atesta a integridade desse binário antes
+de executá-lo.
+
+A sonda retorna `ready` exclusivamente para **pré-admissão** da instalação
+e declara `elevated_execution_performed=false` e `sql_read_performed=false`.
+Em instalação ausente, ACL insegura, arquivo faltando, digest alterado, SHA
+divergente ou direito incomprovado, bloqueia. Em Windows com ACL legítima
+diferente, não afrouxar a regra automaticamente; revisar por identidade/SID.
+
+## Critérios obrigatórios antes do uso administrativo real
+
+1. Revalidar `noteri-runtime/main`, PR #64, revisão/CI, regras canônicas e
+   identidade do executor; nunca rodar código de PR não revisado em runner físico
+   com privilégio. O CI do Linux e do Windows hospedado não prova o host Noteri.
+2. **Confirmar** no Noteri um canal de instalação/execução que já seja
+   protegido, com arquivos somente administrativamente graváveis e identidade
+   restrita. Instalar por promoção auditada de SHA e com rollback/idempotência.
+   Não executar a instalação enquanto essa rota não existir comprovadamente.
+3. Executar preflight independente e reler permissões e SHA-256 **no destino**.
+   Nenhum `ready` emitido de checkout, mock ou outro host libera a instalação.
+4. Executar exatamente uma coleta administrativamente autorizada, limitada
+   ao Noteri DEV e vinculada a `correlation_id`, `idempotency_key` e SHA;
+   fazer readback sanitizado independente no mesmo ambiente. Se não houver
+   vínculo válido entre recibo e execução, marcar bloqueio.
+5. Somente após diagnóstico, comprovar TLS obrigatório ODBC 18
+   (`Encrypt=Yes`, `TrustServerCertificate=No`), DSN DEV aprovado,
+   ACL efetiva de leitura, `report-builder sql-preflight` real e o
+   E2E Fabric/ReqSys (geração, renderização, exportação e entrega).
+
+Não modificar a main, configurar DNS/DSN, fazer merge, instalar CU10, reiniciar
+serviço, elevar privilégio genericamente nem desabilitar validação TLS como
+efeito colateral destes testes.
+
+## Critério de evidência
+
+Separar rigorosamente `IMPLEMENTADO`, `VALIDADO_EM_CI`, `E2E_FÍSICO`
+e `OPERACIONALMENTE_COMPROVADO`. `not_observed` no Windows Application
+EventLog não demonstra que não houve erro de TLS. O `ERRORLOG` é apenas
+diagnóstico da inicialização: também não comprova certificado ativo,
+cadeia TLS, login ODBC ou permissões SQL. Nenhuma inferência de segurança
+se baseia somente em exit code zero ou pipeline verde.
