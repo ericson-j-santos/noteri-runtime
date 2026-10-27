@@ -52,6 +52,10 @@ class ActivationTests(unittest.TestCase):
         sid_export = raw.replace(self.user.encode(), b"S-1-5-21-12345")
         with patch.object(activation, "account_sid", return_value="S-1-5-21-12345"):
             self.assertTrue(activation.task_matches(sid_export, python, runner, self.user))
+        short_name_export = raw.replace(self.user.encode(), b"short-name")
+        with patch.object(activation, "account_sid", return_value="S-1-5-21-12345"):
+            self.assertTrue(activation.task_matches(short_name_export, python, runner,
+                                                    self.user))
         self.assertIn(b"LeastPrivilege", raw)
         self.assertIn(b"BootTrigger", raw)
 
@@ -66,12 +70,14 @@ class ActivationTests(unittest.TestCase):
         package = types.ModuleType("win32com")
         package.client = client
         with patch.dict(sys.modules, {"win32com": package, "win32com.client": client}), \
-                patch.object(activation.site, "addsitedir"):
+                patch.object(activation.site, "addsitedir"), \
+                patch.object(activation, "account_sid", return_value="S-1-5-21-12345"):
             result = activation.register_task_com(python, runner, self.user,
                                                    self.root / "control")
         self.assertEqual(result.returncode, 0)
         folder.RegisterTaskDefinition.assert_called_once_with(
-            "NoteriWorkerPoolApi", definition, 2, self.user, "", 2)
+            "NoteriWorkerPoolApi", definition, 2, "S-1-5-21-12345", None, 2)
+        self.assertEqual(definition.Principal.UserId, "S-1-5-21-12345")
         self.assertEqual(definition.Principal.LogonType, 2)
         self.assertEqual(definition.Principal.RunLevel, 0)
         self.assertEqual(definition.Triggers.Create.call_args.args, (8,))

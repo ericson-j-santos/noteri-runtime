@@ -175,9 +175,14 @@ def task_matches(raw: bytes, python: Path, runner: Path, user: str) -> bool:
                                              b'encoding="UTF-8"', 1))
         get = lambda name: root.findtext(name, namespaces={"t": NS})
         observed_user = get("t:Principals/t:Principal/t:UserId")
-        same_user = observed_user is not None and (
-            observed_user.casefold() == user.casefold()
-            or observed_user == account_sid(user))
+        same_user = observed_user is not None and observed_user.casefold() == user.casefold()
+        if observed_user is not None and not same_user:
+            try:
+                expected_sid = account_sid(user)
+                same_user = (observed_user == expected_sid
+                             or account_sid(observed_user) == expected_sid)
+            except (Blocked, OSError, AttributeError, ValueError):
+                return False
         return (same_user
                 and get("t:Principals/t:Principal/t:LogonType") == "S4U"
                 and get("t:Principals/t:Principal/t:RunLevel") == "LeastPrivilege"
@@ -228,8 +233,10 @@ def register_task_com(python: Path, runner: Path, user: str, package: Path) -> s
         service = win32com.client.Dispatch("Schedule.Service")
         service.Connect()
         folder = service.GetFolder(r"\Automation")
-        definition = build_task_definition(service, python, runner, user)
-        folder.RegisterTaskDefinition("NoteriWorkerPoolApi", definition, 2, user, "", 2)
+        principal_sid = account_sid(user)
+        definition = build_task_definition(service, python, runner, principal_sid)
+        folder.RegisterTaskDefinition("NoteriWorkerPoolApi", definition, 2,
+                                      principal_sid, None, 2)
         return subprocess.CompletedProcess(["RegisterTaskDefinition"], 0, stdout=b"", stderr=b"")
     except Exception as exc:
         return subprocess.CompletedProcess(["RegisterTaskDefinition"], 1, stdout=b"",
