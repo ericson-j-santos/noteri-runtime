@@ -350,6 +350,27 @@ def http_status(path: str, bearer: str | None = None) -> tuple[int, dict | None]
         return exc.code, None
 
 
+def running_task_engine_matches(parent_pid: int, python: Path, runner: Path) -> bool:
+    """Attribute a listener when a normal token cannot inspect S4U command lines."""
+    try:
+        local = Path(os.environ["LOCALAPPDATA"])
+        root, _, _ = venv._paths(local)
+        package = root / "control" / control.TARGET_NAME
+        user = f"{socket.gethostname()}\\{getpass.getuser()}"
+        if task_com_mismatches(python, runner, user, package):
+            return False
+        site.addsitedir(str(package))
+        import win32com.client  # type: ignore
+        service = win32com.client.Dispatch("Schedule.Service")
+        service.Connect()
+        task = service.GetFolder(r"\Automation").GetTask("NoteriWorkerPoolApi")
+        instances = task.GetInstances(0)
+        return (int(instances.Count) == 1
+                and int(instances.Item(1).EnginePID) == parent_pid)
+    except Exception:
+        return False
+
+
 def listener_owned_by_task(python: Path, runner: Path) -> bool:
     try:
         import psutil
@@ -361,7 +382,12 @@ def listener_owned_by_task(python: Path, runner: Path) -> bool:
         parent = psutil.Process(listeners[0].pid).parent()
         if parent is None:
             return False
-        command = parent.cmdline()
+        if Path(parent.exe()).resolve() != python.resolve():
+            return False
+        try:
+            command = parent.cmdline()
+        except psutil.AccessDenied:
+            return running_task_engine_matches(parent.pid, python, runner)
         return (len(command) == 3 and command[1] == "-B"
                 and Path(command[0]).resolve() == python.resolve()
                 and Path(command[2]).resolve() == runner.resolve())
