@@ -83,6 +83,34 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(definition.Triggers.Create.call_args.args, (8,))
         self.assertEqual(definition.Actions.Create.call_args.args, (0,))
 
+    def test_com_readback_resolves_local_alias_and_rejects_changed_action(self):
+        python = self.venv / "Scripts" / "python.exe"
+        runner = self.root / "bin" / activation.RUNNER_FILES[0]
+        service = MagicMock()
+        definition = activation.build_task_definition(service, python, runner, self.user)
+        trigger = definition.Triggers.Create.return_value
+        trigger.Type = 8
+        definition.Triggers.Count = 1
+        definition.Triggers.Item.return_value = trigger
+        action = definition.Actions.Create.return_value
+        action.Type = 0
+        definition.Actions.Count = 1
+        definition.Actions.Item.return_value = action
+        definition.Principal.UserId = getpass.getuser()
+
+        def local_sid(name):
+            if name != self.user:
+                raise activation.Blocked("unknown account")
+            return "S-1-5-21-12345"
+
+        with patch.object(activation, "account_sid", side_effect=local_sid):
+            self.assertEqual(activation.task_definition_mismatches(
+                definition, python, runner, self.user), [])
+            definition.Principal.RunLevel = 1
+            action.Path = str(self.path / "other.exe")
+            self.assertEqual(activation.task_definition_mismatches(
+                definition, python, runner, self.user), ["run_level", "action_path"])
+
     def test_register_readback_and_health_success(self):
         python = self.venv / "Scripts" / "python.exe"
         runner = self.root / "bin" / activation.RUNNER_FILES[0]
@@ -93,11 +121,12 @@ class ActivationTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, stdout=raw)
         with patch.object(activation, "qualify", return_value=(self.root, self.venv, self.token)), \
                 patch.object(activation, "register_task_com", return_value=subprocess.CompletedProcess([], 0)), \
+                patch.object(activation, "task_com_mismatches", return_value=[]), \
                 patch.object(activation, "schtasks", side_effect=scheduled), \
                 patch.object(activation, "wait_api", return_value=True):
             result = activation.activate(self.path, self.source)
         self.assertEqual(result["result"], "API_ACTIVATED")
-        self.assertEqual(observed, ["/Query", "/Run"])
+        self.assertEqual(observed, ["/Run"])
         self.assertFalse((self.root / "bin" / "registration.xml").exists())
         self.assertTrue((self.root / "data").is_dir())
         self.assertEqual((self.root / "bin" / activation.RUNNER_FILES[0]).read_bytes(),
@@ -142,13 +171,16 @@ class ActivationTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, stdout=raw)
         with patch.object(activation, "qualify", return_value=(self.root, self.venv, self.token)), \
                 patch.object(activation, "register_task_com", return_value=subprocess.CompletedProcess([], 0)), \
+                patch.object(activation, "task_com_mismatches", return_value=["principal"]), \
                 patch.object(activation, "schtasks", side_effect=scheduled), \
                 patch.object(activation, "task_absent", return_value=True), \
                 patch.object(activation, "listener_absent", return_value=True):
             result = activation.activate(self.path, self.source)
         self.assertEqual(result["result"], "BLOCKED_ACTIVATION_ROLLED_BACK")
         self.assertEqual(result["phase"], "task_readback")
-        self.assertEqual(observed, ["/Query", "/End", "/Delete"])
+        self.assertEqual(observed, ["/End", "/Delete"])
+        diagnostic = self.root / f"task-readback-failure-{result['diagnostic_id']}.json"
+        self.assertEqual(json.loads(diagnostic.read_text())["fields"], ["principal"])
         self.assertFalse((self.root / "bin").exists())
         self.assertFalse((self.root / "data").exists())
 
@@ -170,6 +202,7 @@ class ActivationTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, stdout=raw)
         with patch.object(activation, "qualify", return_value=(self.root, self.venv, self.token)), \
                 patch.object(activation, "register_task_com", return_value=subprocess.CompletedProcess([], 0)), \
+                patch.object(activation, "task_com_mismatches", return_value=[]), \
                 patch.object(activation, "schtasks", side_effect=scheduled), \
                 patch.object(activation, "wait_api", return_value=False), \
                 patch.object(activation, "task_absent", return_value=True), \
@@ -177,7 +210,7 @@ class ActivationTests(unittest.TestCase):
             result = activation.activate(self.path, self.source)
         self.assertEqual(result["result"], "BLOCKED_ACTIVATION_ROLLED_BACK")
         self.assertEqual(result["phase"], "api_readback")
-        self.assertEqual(observed, ["/Query", "/Run", "/End", "/Delete"])
+        self.assertEqual(observed, ["/Run", "/End", "/Delete"])
         self.assertFalse((self.root / "bin").exists())
         self.assertFalse((self.root / "data").exists())
 

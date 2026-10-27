@@ -87,8 +87,10 @@ registra uma tarefa de boot S4U com privilégio limitado e executa uma única
 inicialização. O runner valida os hashes da release e do venv e a referência
 da credencial antes de iniciar Uvicorn em `127.0.0.1:8097`. O banco SQLite fica
 em `data/pool.db` na árvore privada do Worker Pool.
-O registro usa a API COM do Task Scheduler, como a tarefa S4U já existente do
-host Noteri. `schtasks` permanece apenas para leitura, início e rollback.
+O registro e a leitura da tarefa persistida usam a API COM do Task Scheduler.
+A leitura confere identidade, S4U, privilégio limitado, gatilho e ação. Uma
+divergência gera apenas nomes de campos em diagnóstico privado e aciona rollback.
+`schtasks` permanece para leitura de contingência, início e rollback.
 
 O registro exige token administrativo elevado. Uma chamada direta sem elevação
 retorna `BLOCKED_ELEVATION_REQUIRED` antes de copiar arquivos. Em uma sessão
