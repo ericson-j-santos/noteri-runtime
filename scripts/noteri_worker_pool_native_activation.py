@@ -8,6 +8,7 @@ import getpass
 import hashlib
 import json
 import os
+import site
 import shutil
 import socket
 import struct
@@ -27,6 +28,7 @@ except ImportError:  # Unit tests may run off Windows; activation still checks o
 from scripts import noteri_worker_pool_credential_reference as reference
 from scripts import noteri_worker_pool_native_stage as stage
 from scripts import noteri_worker_pool_native_venv as venv
+from scripts import noteri_worker_pool_control_package as control
 
 TASK_NAME = r"\Automation\NoteriWorkerPoolApi"
 CONFIRM = "ACTIVATE-NOTERI-WORKER-POOL-API"
@@ -162,7 +164,15 @@ def account_sid(user: str) -> str:
 
 def task_matches(raw: bytes, python: Path, runner: Path, user: str) -> bool:
     try:
-        root = ET.fromstring(raw)
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError:
+            # schtasks /Query /XML emits UTF-8 bytes with a UTF-16 declaration.
+            prefix = raw[:128]
+            if not prefix.startswith(b'<?xml ') or b'encoding="UTF-16"' not in prefix:
+                return False
+            root = ET.fromstring(raw.replace(b'encoding="UTF-16"',
+                                             b'encoding="UTF-8"', 1))
         get = lambda name: root.findtext(name, namespaces={"t": NS})
         observed_user = get("t:Principals/t:Principal/t:UserId")
         same_user = observed_user is not None and (
@@ -184,6 +194,46 @@ def schtasks(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["schtasks.exe", *args], stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                           timeout=30, check=False)
+
+
+def build_task_definition(service, python: Path, runner: Path, user: str):
+    definition = service.NewTask(0)
+    definition.RegistrationInfo.Description = "Noteri Worker Pool API native loopback"
+    settings = definition.Settings
+    settings.Enabled = True
+    settings.StartWhenAvailable = True
+    settings.DisallowStartIfOnBatteries = False
+    settings.StopIfGoingOnBatteries = False
+    settings.MultipleInstances = 2
+    settings.ExecutionTimeLimit = "PT0S"
+    trigger = definition.Triggers.Create(8)
+    trigger.Enabled = True
+    trigger.Delay = "PT20S"
+    action = definition.Actions.Create(0)
+    action.Path = str(python)
+    action.Arguments = f'-B "{runner}"'
+    action.WorkingDirectory = str(runner.parent)
+    principal = definition.Principal
+    principal.UserId = user
+    principal.LogonType = 2
+    principal.RunLevel = 0
+    return definition
+
+
+def register_task_com(python: Path, runner: Path, user: str, package: Path) -> subprocess.CompletedProcess:
+    """Register S4U with the same Task Scheduler COM route used by Noteri's host agent."""
+    try:
+        site.addsitedir(str(package))
+        import win32com.client  # type: ignore
+        service = win32com.client.Dispatch("Schedule.Service")
+        service.Connect()
+        folder = service.GetFolder(r"\Automation")
+        definition = build_task_definition(service, python, runner, user)
+        folder.RegisterTaskDefinition("NoteriWorkerPoolApi", definition, 2, user, "", 2)
+        return subprocess.CompletedProcess(["RegisterTaskDefinition"], 0, stdout=b"", stderr=b"")
+    except Exception as exc:
+        return subprocess.CompletedProcess(["RegisterTaskDefinition"], 1, stdout=b"",
+                                           stderr=str(exc).encode("utf-8", errors="replace"))
 
 
 def registration_diagnostic(root: Path, completed: subprocess.CompletedProcess) -> str | None:
@@ -267,6 +317,8 @@ def qualify_common(local: Path, source: Path) -> tuple[Path, Path, Path]:
     if reference.qualify(localappdata=local, hostname="Noteri", profile="NORMAL",
                          platform="nt")["result"] != "REFERENCE_PRIVATE_UNREAD":
         raise Blocked("credential")
+    if not control.verify(root / "control" / control.TARGET_NAME):
+        raise Blocked("control_package")
     for name in RUNNER_FILES:
         if not (source / name).is_file():
             raise Blocked("runner_source")
@@ -344,7 +396,8 @@ def activate(local: Path, source: Path) -> dict:
         xml_path = bin_dir / "registration.xml"
         xml_path.write_bytes(task_xml(python, runner, user))
         phase = "register"
-        created = schtasks("/Create", "/TN", TASK_NAME, "/XML", str(xml_path))
+        created = register_task_com(python, runner, user,
+                                    root / "control" / control.TARGET_NAME)
         if created.returncode != 0:
             diagnostic_id = registration_diagnostic(root, created)
             queried = schtasks("/Query", "/TN", TASK_NAME, "/XML")

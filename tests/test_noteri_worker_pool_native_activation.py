@@ -4,10 +4,12 @@ import getpass
 import json
 import socket
 import subprocess
+import sys
+import types
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from scripts import noteri_worker_pool_native_activation as activation
 
@@ -43,6 +45,8 @@ class ActivationTests(unittest.TestCase):
         runner = self.root / "bin" / activation.RUNNER_FILES[0]
         raw = activation.task_xml(python, runner, self.user)
         self.assertTrue(activation.task_matches(raw, python, runner, self.user))
+        mislabeled = raw.replace(b"encoding='utf-8'", b'encoding="UTF-16"')
+        self.assertTrue(activation.task_matches(mislabeled, python, runner, self.user))
         altered = raw.replace(b"S4U", b"InteractiveToken")
         self.assertFalse(activation.task_matches(altered, python, runner, self.user))
         sid_export = raw.replace(self.user.encode(), b"S-1-5-21-12345")
@@ -50,6 +54,28 @@ class ActivationTests(unittest.TestCase):
             self.assertTrue(activation.task_matches(sid_export, python, runner, self.user))
         self.assertIn(b"LeastPrivilege", raw)
         self.assertIn(b"BootTrigger", raw)
+
+    def test_com_registration_uses_limited_s4u_without_password(self):
+        python = self.venv / "Scripts" / "python.exe"
+        runner = self.root / "bin" / activation.RUNNER_FILES[0]
+        service = MagicMock()
+        folder = service.GetFolder.return_value
+        definition = service.NewTask.return_value
+        client = types.ModuleType("win32com.client")
+        client.Dispatch = MagicMock(return_value=service)
+        package = types.ModuleType("win32com")
+        package.client = client
+        with patch.dict(sys.modules, {"win32com": package, "win32com.client": client}), \
+                patch.object(activation.site, "addsitedir"):
+            result = activation.register_task_com(python, runner, self.user,
+                                                   self.root / "control")
+        self.assertEqual(result.returncode, 0)
+        folder.RegisterTaskDefinition.assert_called_once_with(
+            "NoteriWorkerPoolApi", definition, 2, self.user, "", 2)
+        self.assertEqual(definition.Principal.LogonType, 2)
+        self.assertEqual(definition.Principal.RunLevel, 0)
+        self.assertEqual(definition.Triggers.Create.call_args.args, (8,))
+        self.assertEqual(definition.Actions.Create.call_args.args, (0,))
 
     def test_register_readback_and_health_success(self):
         python = self.venv / "Scripts" / "python.exe"
@@ -60,11 +86,12 @@ class ActivationTests(unittest.TestCase):
             raw = activation.task_xml(python, runner, self.user) if args[0] == "/Query" else b""
             return subprocess.CompletedProcess(args, 0, stdout=raw)
         with patch.object(activation, "qualify", return_value=(self.root, self.venv, self.token)), \
+                patch.object(activation, "register_task_com", return_value=subprocess.CompletedProcess([], 0)), \
                 patch.object(activation, "schtasks", side_effect=scheduled), \
                 patch.object(activation, "wait_api", return_value=True):
             result = activation.activate(self.path, self.source)
         self.assertEqual(result["result"], "API_ACTIVATED")
-        self.assertEqual(observed, ["/Create", "/Query", "/Run"])
+        self.assertEqual(observed, ["/Query", "/Run"])
         self.assertFalse((self.root / "bin" / "registration.xml").exists())
         self.assertTrue((self.root / "data").is_dir())
         self.assertEqual((self.root / "bin" / activation.RUNNER_FILES[0]).read_bytes(),
@@ -74,14 +101,16 @@ class ActivationTests(unittest.TestCase):
         observed = []
         def scheduled(*args):
             observed.append(args[0])
-            return subprocess.CompletedProcess(args, 1, stdout=b"", stderr=b"Access is denied")
+            return subprocess.CompletedProcess(args, 1, stdout=b"")
         with patch.object(activation, "qualify", return_value=(self.root, self.venv, self.token)), \
+                patch.object(activation, "register_task_com", return_value=subprocess.CompletedProcess(
+                    [], 1, stdout=b"", stderr=b"Access is denied")), \
                 patch.object(activation, "schtasks", side_effect=scheduled), \
                 patch.object(activation, "task_absent", return_value=True):
             result = activation.activate(self.path, self.source)
         self.assertEqual(result["result"], "BLOCKED_ACTIVATION_ROLLED_BACK")
         self.assertEqual(result["phase"], "register")
-        self.assertEqual(observed, ["/Create", "/Query"])
+        self.assertEqual(observed, ["/Query"])
         self.assertFalse((self.root / "bin").exists())
         self.assertFalse((self.root / "data").exists())
         diagnostic = self.root / f"registration-failure-{result['diagnostic_id']}.json"
@@ -92,6 +121,7 @@ class ActivationTests(unittest.TestCase):
         def scheduled(*args):
             return subprocess.CompletedProcess(args, 1, stdout=b"")
         with patch.object(activation, "qualify", return_value=(self.root, self.venv, self.token)), \
+                patch.object(activation, "register_task_com", return_value=subprocess.CompletedProcess([], 1)), \
                 patch.object(activation, "schtasks", side_effect=scheduled), \
                 patch.object(activation, "task_absent", return_value=False):
             result = activation.activate(self.path, self.source)
@@ -105,13 +135,14 @@ class ActivationTests(unittest.TestCase):
             raw = b"<Task/>" if args[0] == "/Query" else b""
             return subprocess.CompletedProcess(args, 0, stdout=raw)
         with patch.object(activation, "qualify", return_value=(self.root, self.venv, self.token)), \
+                patch.object(activation, "register_task_com", return_value=subprocess.CompletedProcess([], 0)), \
                 patch.object(activation, "schtasks", side_effect=scheduled), \
                 patch.object(activation, "task_absent", return_value=True), \
                 patch.object(activation, "listener_absent", return_value=True):
             result = activation.activate(self.path, self.source)
         self.assertEqual(result["result"], "BLOCKED_ACTIVATION_ROLLED_BACK")
         self.assertEqual(result["phase"], "task_readback")
-        self.assertEqual(observed, ["/Create", "/Query", "/End", "/Delete"])
+        self.assertEqual(observed, ["/Query", "/End", "/Delete"])
         self.assertFalse((self.root / "bin").exists())
         self.assertFalse((self.root / "data").exists())
 
@@ -132,6 +163,7 @@ class ActivationTests(unittest.TestCase):
             raw = activation.task_xml(python, runner, self.user) if args[0] == "/Query" else b""
             return subprocess.CompletedProcess(args, 0, stdout=raw)
         with patch.object(activation, "qualify", return_value=(self.root, self.venv, self.token)), \
+                patch.object(activation, "register_task_com", return_value=subprocess.CompletedProcess([], 0)), \
                 patch.object(activation, "schtasks", side_effect=scheduled), \
                 patch.object(activation, "wait_api", return_value=False), \
                 patch.object(activation, "task_absent", return_value=True), \
@@ -139,7 +171,7 @@ class ActivationTests(unittest.TestCase):
             result = activation.activate(self.path, self.source)
         self.assertEqual(result["result"], "BLOCKED_ACTIVATION_ROLLED_BACK")
         self.assertEqual(result["phase"], "api_readback")
-        self.assertEqual(observed, ["/Create", "/Query", "/Run", "/End", "/Delete"])
+        self.assertEqual(observed, ["/Query", "/Run", "/End", "/Delete"])
         self.assertFalse((self.root / "bin").exists())
         self.assertFalse((self.root / "data").exists())
 
