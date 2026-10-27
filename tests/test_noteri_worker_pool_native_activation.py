@@ -52,6 +52,10 @@ class ActivationTests(unittest.TestCase):
         sid_export = raw.replace(self.user.encode(), b"S-1-5-21-12345")
         with patch.object(activation, "account_sid", return_value="S-1-5-21-12345"):
             self.assertTrue(activation.task_matches(sid_export, python, runner, self.user))
+        short_name_export = raw.replace(self.user.encode(), b"short-name")
+        with patch.object(activation, "account_sid", return_value="S-1-5-21-12345"):
+            self.assertTrue(activation.task_matches(short_name_export, python, runner,
+                                                    self.user))
         self.assertIn(b"LeastPrivilege", raw)
         self.assertIn(b"BootTrigger", raw)
 

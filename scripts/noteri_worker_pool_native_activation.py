@@ -175,9 +175,14 @@ def task_matches(raw: bytes, python: Path, runner: Path, user: str) -> bool:
                                              b'encoding="UTF-8"', 1))
         get = lambda name: root.findtext(name, namespaces={"t": NS})
         observed_user = get("t:Principals/t:Principal/t:UserId")
-        same_user = observed_user is not None and (
-            observed_user.casefold() == user.casefold()
-            or observed_user == account_sid(user))
+        same_user = observed_user is not None and observed_user.casefold() == user.casefold()
+        if observed_user is not None and not same_user:
+            try:
+                expected_sid = account_sid(user)
+                same_user = (observed_user == expected_sid
+                             or account_sid(observed_user) == expected_sid)
+            except (Blocked, OSError, AttributeError, ValueError):
+                return False
         return (same_user
                 and get("t:Principals/t:Principal/t:LogonType") == "S4U"
                 and get("t:Principals/t:Principal/t:RunLevel") == "LeastPrivilege"
