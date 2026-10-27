@@ -228,8 +228,10 @@ def register_task_com(python: Path, runner: Path, user: str, package: Path) -> s
         service = win32com.client.Dispatch("Schedule.Service")
         service.Connect()
         folder = service.GetFolder(r"\Automation")
-        definition = build_task_definition(service, python, runner, user)
-        folder.RegisterTaskDefinition("NoteriWorkerPoolApi", definition, 2, user, "", 2)
+        principal_sid = account_sid(user)
+        definition = build_task_definition(service, python, runner, principal_sid)
+        folder.RegisterTaskDefinition("NoteriWorkerPoolApi", definition, 2,
+                                      principal_sid, None, 2)
         return subprocess.CompletedProcess(["RegisterTaskDefinition"], 0, stdout=b"", stderr=b"")
     except Exception as exc:
         return subprocess.CompletedProcess(["RegisterTaskDefinition"], 1, stdout=b"",
