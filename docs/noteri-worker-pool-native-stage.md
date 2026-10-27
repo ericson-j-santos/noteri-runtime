@@ -91,6 +91,9 @@ O registro e a leitura da tarefa persistida usam a API COM do Task Scheduler.
 A leitura confere identidade, S4U, privilégio limitado, gatilho e ação. Uma
 divergência gera apenas nomes de campos em diagnóstico privado e aciona rollback.
 `schtasks` permanece para leitura de contingência, início e rollback.
+Se o token sem elevação não puder ler a linha de comando do processo S4U, a
+atribuição do listener exige que o processo pai use o Python do venv e que seu
+PID corresponda ao `EnginePID` da única instância em execução da tarefa COM.
 
 O registro exige token administrativo elevado. Uma chamada direta sem elevação
 retorna `BLOCKED_ELEVATION_REQUIRED` antes de copiar arquivos. Em uma sessão

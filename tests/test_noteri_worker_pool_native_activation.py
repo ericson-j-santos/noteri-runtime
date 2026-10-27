@@ -192,6 +192,32 @@ class ActivationTests(unittest.TestCase):
             self.assertFalse(activation.verify_api(self.token, python, runner))
             http.assert_not_called()
 
+    def test_access_denied_uses_verified_task_engine_for_listener(self):
+        python = self.venv / "Scripts" / "python.exe"
+        runner = self.root / "bin" / activation.RUNNER_FILES[0]
+        denied = type("AccessDenied", (Exception,), {})
+        psutil = types.ModuleType("psutil")
+        psutil.CONN_LISTEN = "LISTEN"
+        psutil.AccessDenied = denied
+        listener = types.SimpleNamespace(
+            status="LISTEN", laddr=types.SimpleNamespace(ip="127.0.0.1", port=8097),
+            pid=123)
+        psutil.net_connections = MagicMock(return_value=[listener])
+        parent = MagicMock()
+        parent.pid = 456
+        parent.exe.return_value = str(python)
+        parent.cmdline.side_effect = denied()
+        process = MagicMock()
+        process.parent.return_value = parent
+        psutil.Process = MagicMock(return_value=process)
+        with patch.dict(sys.modules, {"psutil": psutil}), \
+                patch.object(activation, "running_task_engine_matches", return_value=True) as engine:
+            self.assertTrue(activation.listener_owned_by_task(python, runner))
+            engine.assert_called_once_with(456, python, runner)
+        with patch.dict(sys.modules, {"psutil": psutil}), \
+                patch.object(activation, "running_task_engine_matches", return_value=False):
+            self.assertFalse(activation.listener_owned_by_task(python, runner))
+
     def test_service_not_ready_removes_task_and_new_files(self):
         python = self.venv / "Scripts" / "python.exe"
         runner = self.root / "bin" / activation.RUNNER_FILES[0]
