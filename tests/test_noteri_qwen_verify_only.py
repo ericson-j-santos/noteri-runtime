@@ -60,6 +60,9 @@ def assert_contract(content):
     assert "['tests/test_noteri_qwen_verify_only.py','added']" in content
     assert "['.github/workflows/ci.yml','modified']" in content
     assert "c.conclusion==='success'" in content
+    assert "const requiredChecks=['tests','SQL admin guard / Win32 contract (not Noteri)'];" in content
+    assert "const ci=requiredChecks.every(name=>" in content
+    assert "c.name===name && c.head_sha===event.head.sha" in content
     assert "source.data.sha!=='" + SCRIPT_SHA + "'" in content
     assert data["jobs"]["physical"]["env"]["RULES_SHA"] == RULES_SHA
     for job_name in ("admission", "independent_readback"):
@@ -132,6 +135,9 @@ def test_verify_only_workflow_complete_and_strict():
     ("--verify-ollama-qwen7b", "--unsafe-disabled"),
     ("NOTERI_MODEL_READONLY_ADMISSION_BLOCKED", "UNSAFE_DISABLED"),
     ("c.conclusion==='success'", "c.conclusion!=='success'"),
+    ("requiredChecks.every(name=>", "requiredChecks.some(name=>"),
+    ("const requiredChecks=['tests','SQL admin guard / Win32 contract (not Noteri)'];",
+     "const requiredChecks=['tests'];"),
     ("persist-credentials: false", "persist-credentials: true"),
     ("NOTERI_MODEL_SANITIZED_FAILURE=", "UNSAFE_DISABLED="),
     ("steps.every(name=>", "steps.some(name=>"),
@@ -177,6 +183,53 @@ def test_ci_dependency_removed_is_detected(dependency):
     parse_workflow(mutated)
     with pytest.raises(AssertionError):
         assert_ci_dependencies(mutated)
+
+
+
+def assert_ci_windows_platform_tests(content):
+    data = parse_workflow(content)
+    job = data["jobs"]["sql_admin_windows_contract"]
+    assert job["runs-on"] == "windows-latest"
+    assert "if" not in job
+    assert job.get("continue-on-error", False) is False
+    steps = [
+        step
+        for step in job["steps"]
+        if step.get("name") == "Validate eventlog parser in Windows PowerShell 5.1"
+    ]
+    assert len(steps) == 1
+    assert "if" not in steps[0]
+    assert steps[0].get("continue-on-error", False) is False
+    assert steps[0].get("run", "").split() == [
+        "python", "-m", "pytest", "-q",
+        "tests/test_noteri_sql_application_eventlog_workflow_powershell.py",
+        "-k", "windows_powershell_51",
+    ]
+
+
+def test_main_ci_executes_windows_specific_parser_cases():
+    assert_ci_windows_platform_tests(CI.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(("original", "replacement"), [
+    ("runs-on: windows-latest", "runs-on: ubuntu-latest"),
+    ("name: Validate eventlog parser in Windows PowerShell 5.1",
+     "name: Disabled platform validation"),
+    ("tests/test_noteri_sql_application_eventlog_workflow_powershell.py",
+     "tests/unrelated.py"),
+    ("-k windows_powershell_51", "-k no_matching_cases"),
+    ("name: Validate eventlog parser in Windows PowerShell 5.1",
+     "name: Validate eventlog parser in Windows PowerShell 5.1\n        if: false"),
+    ("name: Validate eventlog parser in Windows PowerShell 5.1",
+     "name: Validate eventlog parser in Windows PowerShell 5.1\n        continue-on-error: true"),
+])
+def test_windows_platform_selection_removed_is_detected(original, replacement):
+    content = CI.read_text(encoding="utf-8")
+    assert original in content
+    mutated = content.replace(original, replacement, 1)
+    parse_workflow(mutated)
+    with pytest.raises(AssertionError):
+        assert_ci_windows_platform_tests(mutated)
 
 
 def test_parser_refuses_duplicate_key_and_malformed_yaml():

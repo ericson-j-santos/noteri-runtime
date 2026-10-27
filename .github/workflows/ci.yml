@@ -63,3 +63,5 @@ jobs:
       - name: Validate Windows ACL API and SQL admin guards (no elevation or SQL)
         run: |
           python -m pytest -q tests/test_noteri_sql_admin_bundle_gate.py tests/test_noteri_sql_admin_errorlog_read.py tests/test_noteri_sql_certificate_errorlog.py
+      - name: Validate eventlog parser in Windows PowerShell 5.1
+        run: python -m pytest -q tests/test_noteri_sql_application_eventlog_workflow_powershell.py -k windows_powershell_51

@@ -78,10 +78,11 @@ jobs:
               ['tests/test_noteri_qwen_verify_only.py','added'],
               ['.github/workflows/ci.yml','modified']
             ]);
-            const ci=checks.data.check_runs.some(c=>
-              c.name==='tests' && c.head_sha===event.head.sha &&
+            const requiredChecks=['tests','SQL admin guard / Win32 contract (not Noteri)'];
+            const ci=requiredChecks.every(name=>checks.data.check_runs.some(c=>
+              c.name===name && c.head_sha===event.head.sha &&
               c.status==='completed' && c.conclusion==='success' &&
-              c.started_at && c.completed_at);
+              c.started_at && c.completed_at));
             if (p.state!=='open' || !p.draft || p.user?.login!=='ericson-j-santos' ||
                 p.head.repo?.full_name!==owner+'/'+repo ||
                 p.head.ref!=='feat/noteri-qwen7b-verify-only-20261026' ||
