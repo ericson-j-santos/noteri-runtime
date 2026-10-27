@@ -68,6 +68,14 @@ específica quando aplicável, readback de saúde/contrato/autenticação e roll
 
 ### Ativação nativa controlada
 
+Antes da ativação, `scripts/noteri_worker_pool_control_package.py --mode plan`
+qualifica o pacote COM isolado. `--mode prepare --confirm
+PREPARE-NOTERI-WORKER-POOL-COM` instala apenas `pywin32==312`, com hash do
+wheel fixado, em `control/pywin32-312-cp314` na árvore privada do Worker Pool.
+`--mode verify` confere os arquivos e conecta à pasta `\Automation` do Task
+Scheduler sem registrar tarefa. A instalação não altera o Python global nem
+o venv usado pela API.
+
 `scripts/noteri_worker_pool_native_activation.py --mode plan` confirma release,
 venv, credencial privada, perfil NORMAL, ausência da tarefa fixa e ausência de
 listener TCP na porta 8097. O plano não altera o host.
@@ -79,6 +87,13 @@ registra uma tarefa de boot S4U com privilégio limitado e executa uma única
 inicialização. O runner valida os hashes da release e do venv e a referência
 da credencial antes de iniciar Uvicorn em `127.0.0.1:8097`. O banco SQLite fica
 em `data/pool.db` na árvore privada do Worker Pool.
+O registro e a leitura da tarefa persistida usam a API COM do Task Scheduler.
+A leitura confere identidade, S4U, privilégio limitado, gatilho e ação. Uma
+divergência gera apenas nomes de campos em diagnóstico privado e aciona rollback.
+`schtasks` permanece para leitura de contingência, início e rollback.
+Se o token sem elevação não puder ler a linha de comando do processo S4U, a
+atribuição do listener exige que o processo pai use o Python do venv e que seu
+PID corresponda ao `EnginePID` da única instância em execução da tarefa COM.
 
 O registro exige token administrativo elevado. Uma chamada direta sem elevação
 retorna `BLOCKED_ELEVATION_REQUIRED` antes de copiar arquivos. Em uma sessão

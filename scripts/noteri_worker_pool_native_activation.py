@@ -8,6 +8,7 @@ import getpass
 import hashlib
 import json
 import os
+import site
 import shutil
 import socket
 import struct
@@ -27,6 +28,7 @@ except ImportError:  # Unit tests may run off Windows; activation still checks o
 from scripts import noteri_worker_pool_credential_reference as reference
 from scripts import noteri_worker_pool_native_stage as stage
 from scripts import noteri_worker_pool_native_venv as venv
+from scripts import noteri_worker_pool_control_package as control
 
 TASK_NAME = r"\Automation\NoteriWorkerPoolApi"
 CONFIRM = "ACTIVATE-NOTERI-WORKER-POOL-API"
@@ -162,12 +164,25 @@ def account_sid(user: str) -> str:
 
 def task_matches(raw: bytes, python: Path, runner: Path, user: str) -> bool:
     try:
-        root = ET.fromstring(raw)
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError:
+            # schtasks /Query /XML emits UTF-8 bytes with a UTF-16 declaration.
+            prefix = raw[:128]
+            if not prefix.startswith(b'<?xml ') or b'encoding="UTF-16"' not in prefix:
+                return False
+            root = ET.fromstring(raw.replace(b'encoding="UTF-16"',
+                                             b'encoding="UTF-8"', 1))
         get = lambda name: root.findtext(name, namespaces={"t": NS})
         observed_user = get("t:Principals/t:Principal/t:UserId")
-        same_user = observed_user is not None and (
-            observed_user.casefold() == user.casefold()
-            or observed_user == account_sid(user))
+        same_user = observed_user is not None and observed_user.casefold() == user.casefold()
+        if observed_user is not None and not same_user:
+            try:
+                expected_sid = account_sid(user)
+                same_user = (observed_user == expected_sid
+                             or account_sid(observed_user) == expected_sid)
+            except (Blocked, OSError, AttributeError, ValueError):
+                return False
         return (same_user
                 and get("t:Principals/t:Principal/t:LogonType") == "S4U"
                 and get("t:Principals/t:Principal/t:RunLevel") == "LeastPrivilege"
@@ -184,6 +199,130 @@ def schtasks(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["schtasks.exe", *args], stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                           timeout=30, check=False)
+
+
+def build_task_definition(service, python: Path, runner: Path, user: str):
+    definition = service.NewTask(0)
+    definition.RegistrationInfo.Description = "Noteri Worker Pool API native loopback"
+    settings = definition.Settings
+    settings.Enabled = True
+    settings.StartWhenAvailable = True
+    settings.DisallowStartIfOnBatteries = False
+    settings.StopIfGoingOnBatteries = False
+    settings.MultipleInstances = 2
+    settings.ExecutionTimeLimit = "PT0S"
+    trigger = definition.Triggers.Create(8)
+    trigger.Enabled = True
+    trigger.Delay = "PT20S"
+    action = definition.Actions.Create(0)
+    action.Path = str(python)
+    action.Arguments = f'-B "{runner}"'
+    action.WorkingDirectory = str(runner.parent)
+    principal = definition.Principal
+    principal.UserId = user
+    principal.LogonType = 2
+    principal.RunLevel = 0
+    return definition
+
+
+def register_task_com(python: Path, runner: Path, user: str, package: Path) -> subprocess.CompletedProcess:
+    """Register S4U with the same Task Scheduler COM route used by Noteri's host agent."""
+    try:
+        site.addsitedir(str(package))
+        import win32com.client  # type: ignore
+        service = win32com.client.Dispatch("Schedule.Service")
+        service.Connect()
+        folder = service.GetFolder(r"\Automation")
+        principal_sid = account_sid(user)
+        definition = build_task_definition(service, python, runner, principal_sid)
+        folder.RegisterTaskDefinition("NoteriWorkerPoolApi", definition, 2,
+                                      principal_sid, None, 2)
+        return subprocess.CompletedProcess(["RegisterTaskDefinition"], 0, stdout=b"", stderr=b"")
+    except Exception as exc:
+        return subprocess.CompletedProcess(["RegisterTaskDefinition"], 1, stdout=b"",
+                                           stderr=str(exc).encode("utf-8", errors="replace"))
+
+
+def task_definition_mismatches(definition, python: Path, runner: Path, user: str) -> list[str]:
+    """Compare persisted COM properties without relying on schtasks XML formatting."""
+    mismatches = []
+    expected_sid = account_sid(user)
+    observed_user = str(definition.Principal.UserId or "")
+    resolved_user = observed_user
+    if observed_user and "\\" not in observed_user and not observed_user.startswith("S-1-"):
+        resolved_user = f"{socket.gethostname()}\\{observed_user}"
+    try:
+        same_user = (observed_user.casefold() == user.casefold()
+                     or observed_user == expected_sid
+                     or account_sid(resolved_user) == expected_sid)
+    except (Blocked, OSError, AttributeError, ValueError):
+        same_user = False
+    if not same_user:
+        mismatches.append("principal")
+    if int(definition.Principal.LogonType) != 2:
+        mismatches.append("logon_type")
+    if int(definition.Principal.RunLevel) != 0:
+        mismatches.append("run_level")
+    settings = definition.Settings
+    for field, expected in (("Enabled", True), ("StartWhenAvailable", True),
+                            ("DisallowStartIfOnBatteries", False),
+                            ("StopIfGoingOnBatteries", False)):
+        if bool(getattr(settings, field)) != expected:
+            mismatches.append("settings_" + field)
+    if int(settings.MultipleInstances) != 2:
+        mismatches.append("multiple_instances")
+    if str(settings.ExecutionTimeLimit) != "PT0S":
+        mismatches.append("execution_time_limit")
+    triggers = definition.Triggers
+    if int(triggers.Count) != 1:
+        mismatches.append("trigger_count")
+    else:
+        trigger = triggers.Item(1)
+        if int(trigger.Type) != 8 or not bool(trigger.Enabled):
+            mismatches.append("boot_trigger")
+        if str(trigger.Delay) != "PT20S":
+            mismatches.append("boot_delay")
+    actions = definition.Actions
+    if int(actions.Count) != 1:
+        mismatches.append("action_count")
+    else:
+        action = actions.Item(1)
+        same_path = lambda left, right: os.path.normcase(os.path.normpath(str(left))) == os.path.normcase(os.path.normpath(str(right)))
+        if int(action.Type) != 0 or not same_path(action.Path, python):
+            mismatches.append("action_path")
+        if str(action.Arguments) != f'-B "{runner}"':
+            mismatches.append("action_arguments")
+        if not same_path(action.WorkingDirectory, runner.parent):
+            mismatches.append("action_working_directory")
+    return mismatches
+
+
+def task_com_mismatches(python: Path, runner: Path, user: str, package: Path) -> list[str]:
+    try:
+        site.addsitedir(str(package))
+        import win32com.client  # type: ignore
+        service = win32com.client.Dispatch("Schedule.Service")
+        service.Connect()
+        registered = service.GetFolder(r"\Automation").GetTask("NoteriWorkerPoolApi")
+        mismatches = task_definition_mismatches(registered.Definition, python, runner, user)
+        if str(registered.Path).casefold() != TASK_NAME.casefold():
+            mismatches.append("task_path")
+        if not bool(registered.Enabled):
+            mismatches.append("task_enabled")
+        return mismatches
+    except Exception:
+        return ["com_readback"]
+
+
+def readback_diagnostic(root: Path, fields: list[str]) -> str | None:
+    identifier = uuid.uuid4().hex
+    path = root / f"task-readback-failure-{identifier}.json"
+    try:
+        with path.open("x", encoding="utf-8") as stream:
+            json.dump({"reason": "COM_TASK_MISMATCH", "fields": sorted(set(fields))}, stream)
+    except OSError:
+        return None
+    return identifier
 
 
 def registration_diagnostic(root: Path, completed: subprocess.CompletedProcess) -> str | None:
@@ -211,6 +350,27 @@ def http_status(path: str, bearer: str | None = None) -> tuple[int, dict | None]
         return exc.code, None
 
 
+def running_task_engine_matches(parent_pid: int, python: Path, runner: Path) -> bool:
+    """Attribute a listener when a normal token cannot inspect S4U command lines."""
+    try:
+        local = Path(os.environ["LOCALAPPDATA"])
+        root, _, _ = venv._paths(local)
+        package = root / "control" / control.TARGET_NAME
+        user = f"{socket.gethostname()}\\{getpass.getuser()}"
+        if task_com_mismatches(python, runner, user, package):
+            return False
+        site.addsitedir(str(package))
+        import win32com.client  # type: ignore
+        service = win32com.client.Dispatch("Schedule.Service")
+        service.Connect()
+        task = service.GetFolder(r"\Automation").GetTask("NoteriWorkerPoolApi")
+        instances = task.GetInstances(0)
+        return (int(instances.Count) == 1
+                and int(instances.Item(1).EnginePID) == parent_pid)
+    except Exception:
+        return False
+
+
 def listener_owned_by_task(python: Path, runner: Path) -> bool:
     try:
         import psutil
@@ -222,7 +382,12 @@ def listener_owned_by_task(python: Path, runner: Path) -> bool:
         parent = psutil.Process(listeners[0].pid).parent()
         if parent is None:
             return False
-        command = parent.cmdline()
+        if Path(parent.exe()).resolve() != python.resolve():
+            return False
+        try:
+            command = parent.cmdline()
+        except psutil.AccessDenied:
+            return running_task_engine_matches(parent.pid, python, runner)
         return (len(command) == 3 and command[1] == "-B"
                 and Path(command[0]).resolve() == python.resolve()
                 and Path(command[2]).resolve() == runner.resolve())
@@ -267,6 +432,8 @@ def qualify_common(local: Path, source: Path) -> tuple[Path, Path, Path]:
     if reference.qualify(localappdata=local, hostname="Noteri", profile="NORMAL",
                          platform="nt")["result"] != "REFERENCE_PRIVATE_UNREAD":
         raise Blocked("credential")
+    if not control.verify(root / "control" / control.TARGET_NAME):
+        raise Blocked("control_package")
     for name in RUNNER_FILES:
         if not (source / name).is_file():
             raise Blocked("runner_source")
@@ -301,8 +468,8 @@ def existing_task(local: Path, source: Path) -> tuple[Path, Path, Path, Path] | 
     python = venv._python(venv_root)
     runner = bin_dir / RUNNER_FILES[0]
     user = f"{socket.gethostname()}\\{getpass.getuser()}"
-    queried = schtasks("/Query", "/TN", TASK_NAME, "/XML")
-    if queried.returncode != 0 or not task_matches(queried.stdout, python, runner, user):
+    if task_com_mismatches(python, runner, user,
+                           root / "control" / control.TARGET_NAME):
         return None
     return root, token, python, runner
 
@@ -344,7 +511,8 @@ def activate(local: Path, source: Path) -> dict:
         xml_path = bin_dir / "registration.xml"
         xml_path.write_bytes(task_xml(python, runner, user))
         phase = "register"
-        created = schtasks("/Create", "/TN", TASK_NAME, "/XML", str(xml_path))
+        created = register_task_com(python, runner, user,
+                                    root / "control" / control.TARGET_NAME)
         if created.returncode != 0:
             diagnostic_id = registration_diagnostic(root, created)
             queried = schtasks("/Query", "/TN", TASK_NAME, "/XML")
@@ -362,8 +530,10 @@ def activate(local: Path, source: Path) -> dict:
         registered = True
         xml_path.unlink()
         phase = "task_readback"
-        queried = schtasks("/Query", "/TN", TASK_NAME, "/XML")
-        if queried.returncode != 0 or not task_matches(queried.stdout, python, runner, user):
+        mismatches = task_com_mismatches(python, runner, user,
+                                         root / "control" / control.TARGET_NAME)
+        if mismatches:
+            diagnostic_id = readback_diagnostic(root, mismatches)
             raise Blocked("task_readback")
         phase = "start"
         if schtasks("/Run", "/TN", TASK_NAME).returncode != 0:

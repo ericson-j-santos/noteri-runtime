@@ -73,9 +73,10 @@ jobs:
             ]);
             const p=pr.data;
             const marker='OWNER_NOTERI_QWEN7B_20261026_READONLY_ONCE';
-            const wanted=new Set([
-              '.github/workflows/noteri-qwen7b-verify-only.yml',
-              'tests/test_noteri_qwen_verify_only.py'
+            const wanted=new Map([
+              ['.github/workflows/noteri-qwen7b-verify-only.yml','added'],
+              ['tests/test_noteri_qwen_verify_only.py','added'],
+              ['.github/workflows/ci.yml','modified']
             ]);
             const ci=checks.data.check_runs.some(c=>
               c.name==='tests' && c.head_sha===event.head.sha &&
@@ -86,11 +87,11 @@ jobs:
                 p.head.ref!=='feat/noteri-qwen7b-verify-only-20261026' ||
                 p.head.sha!==event.head.sha ||
                 p.base.sha!==main.data.commit.sha || p.base.ref!=='main' ||
-                rules.data.commit.sha!=='3ffb7d2ab3269fb75ed37b9abbc2de562d156098' ||
+                rules.data.commit.sha!=='d6af41001bf641727a35a990e7c93b4c757538cb' ||
                 source.data.type!=='file' ||
                 source.data.sha!=='7135c0fdef65ddf0a7ef637090d18e697453260b' ||
-                files.data.length!==2 ||
-                !files.data.every(f=>wanted.has(f.filename) && f.status==='added') ||
+                files.data.length!==3 ||
+                !files.data.every(f=>wanted.get(f.filename)===f.status) ||
                 !p.body?.includes(marker) || !ci) {
               core.setFailed('NOTERI_MODEL_READONLY_ADMISSION_BLOCKED');return;
             }
@@ -114,7 +115,7 @@ jobs:
       model_bytes: ${{ steps.verify.outputs.model_bytes }}
     env:
       EXPECTED_NOTERI_SHA: ${{ github.event.pull_request.head.sha }}
-      RULES_SHA: 3ffb7d2ab3269fb75ed37b9abbc2de562d156098
+      RULES_SHA: d6af41001bf641727a35a990e7c93b4c757538cb
       CORRELATION_ID: qwen7b-readonly-${{ github.run_id }}-${{ github.run_attempt }}
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
@@ -306,7 +307,7 @@ jobs:
                  s.name===name && s.status==='completed' && s.conclusion==='success')) ||
                pr.data.head.sha!==event.head.sha || !pr.data.draft ||
                pr.data.base.sha!==main.data.commit.sha ||
-               rules.data.commit.sha!=='3ffb7d2ab3269fb75ed37b9abbc2de562d156098' ||
+               rules.data.commit.sha!=='d6af41001bf641727a35a990e7c93b4c757538cb' ||
                source.data.sha!=='7135c0fdef65ddf0a7ef637090d18e697453260b' ||
                process.env.MODEL_RESULT!=='verified' ||
                process.env.MODEL_DIGEST_PREFIX!=='dae161e27b0e' ||

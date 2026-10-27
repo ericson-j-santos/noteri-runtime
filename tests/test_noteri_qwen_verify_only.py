@@ -13,8 +13,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/noteri-qwen7b-verify-only.yml"
+CI = ROOT / ".github/workflows/ci.yml"
 SCRIPT = ROOT / "scripts/issue8_native_rag_preflight.py"
-RULES_SHA = "3ffb7d2ab3269fb75ed37b9abbc2de562d156098"
+RULES_SHA = "d6af41001bf641727a35a990e7c93b4c757538cb"
 SCRIPT_SHA = "7135c0fdef65ddf0a7ef637090d18e697453260b"
 MARKER = "OWNER_NOTERI_QWEN7B_20261026_READONLY_ONCE"
 MODEL_DIGEST = "dae161e27b0e" + "f" * 52
@@ -53,13 +54,36 @@ def assert_contract(content):
     assert "github.event.pull_request.draft == true" in content
     assert "'feat/noteri-qwen7b-verify-only-20261026'" in content
     assert "NOTERI_MODEL_READONLY_ADMISSION_BLOCKED" in content
-    assert "f.status==='added'" in content and "files.data.length!==2" in content
+    assert "files.data.length!==3" in content
+    assert "wanted.get(f.filename)===f.status" in content
+    assert "['.github/workflows/noteri-qwen7b-verify-only.yml','added']" in content
+    assert "['tests/test_noteri_qwen_verify_only.py','added']" in content
+    assert "['.github/workflows/ci.yml','modified']" in content
     assert "c.conclusion==='success'" in content
     assert "source.data.sha!=='" + SCRIPT_SHA + "'" in content
-    assert RULES_SHA in content
+    assert data["jobs"]["physical"]["env"]["RULES_SHA"] == RULES_SHA
+    for job_name in ("admission", "independent_readback"):
+        scripts = [
+            step.get("with", {}).get("script", "")
+            for step in data["jobs"][job_name]["steps"]
+        ]
+        assert any(
+            f"rules.data.commit.sha!=='{RULES_SHA}'" in script
+            for script in scripts
+        )
     assert "ref: ${{ env.EXPECTED_NOTERI_SHA }}" in content
     assert "ref: ${{ env.RULES_SHA }}" in content
-    assert "persist-credentials: false" in content
+    checkouts = [
+        step
+        for job in data["jobs"].values()
+        for step in job.get("steps", [])
+        if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    assert checkouts
+    assert all(
+        step.get("with", {}).get("persist-credentials") is False
+        for step in checkouts
+    )
     assert "self-hosted, Windows, X64, noteri, reqsys-dev" in content
     assert "Noteri-runtime" in content
     assert "runner_id!==21" in content or "j.runner_id===21" in content
@@ -102,22 +126,57 @@ def test_verify_only_workflow_complete_and_strict():
     assert_contract(WORKFLOW.read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("removed", [
-    "types: [opened, synchronize, edited]",
-    "--require-runner-version-preflight",
-    "--verify-ollama-qwen7b",
-    "NOTERI_MODEL_READONLY_ADMISSION_BLOCKED",
-    "c.conclusion==='success'",
-    "persist-credentials: false",
-    "NOTERI_MODEL_SANITIZED_FAILURE=",
-    "steps.every(name=>",
-    "limit=300000",
+@pytest.mark.parametrize(("original", "replacement"), [
+    ("types: [opened, synchronize, edited]", "types: [opened, synchronize]"),
+    ("--require-runner-version-preflight", "--unsafe-disabled"),
+    ("--verify-ollama-qwen7b", "--unsafe-disabled"),
+    ("NOTERI_MODEL_READONLY_ADMISSION_BLOCKED", "UNSAFE_DISABLED"),
+    ("c.conclusion==='success'", "c.conclusion!=='success'"),
+    ("persist-credentials: false", "persist-credentials: true"),
+    ("NOTERI_MODEL_SANITIZED_FAILURE=", "UNSAFE_DISABLED="),
+    ("steps.every(name=>", "steps.some(name=>"),
+    ("limit=300000", "limit=3600000"),
+    ("files.data.length!==3", "files.data.length!==2"),
+    ("wanted.get(f.filename)===f.status", "wanted.has(f.filename)"),
+    ("['.github/workflows/ci.yml','modified']",
+     "['.github/workflows/ci.yml','added']"),
+    (RULES_SHA, "0" * 40),
 ])
-def test_required_gate_removed_is_detected(removed):
+def test_required_gate_removed_is_detected(original, replacement):
     y = WORKFLOW.read_text(encoding="utf-8")
-    assert removed in y
+    assert original in y
+    mutated = y.replace(original, replacement, 1)
+    # A parser error must not masquerade as rejection of an unsafe setting.
+    parse_workflow(mutated)
     with pytest.raises(AssertionError):
-        assert_contract(y.replace(removed, "UNSAFE_DISABLED", 1))
+        assert_contract(mutated)
+
+
+def assert_ci_dependencies(content):
+    data = parse_workflow(content)
+    installs = [
+        step.get("run", "")
+        for step in data["jobs"]["tests"]["steps"]
+        if step.get("name") == "Install test dependencies"
+    ]
+    assert len(installs) == 1
+    arguments = installs[0].split()
+    assert "pytest==8.4.2" in arguments
+    assert "PyYAML==6.0.2" in arguments
+
+
+def test_main_ci_installs_contract_dependencies():
+    assert_ci_dependencies(CI.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("dependency", ["pytest==8.4.2", "PyYAML==6.0.2"])
+def test_ci_dependency_removed_is_detected(dependency):
+    content = CI.read_text(encoding="utf-8")
+    assert dependency in content
+    mutated = content.replace(dependency, "", 1)
+    parse_workflow(mutated)
+    with pytest.raises(AssertionError):
+        assert_ci_dependencies(mutated)
 
 
 def test_parser_refuses_duplicate_key_and_malformed_yaml():
