@@ -30,6 +30,23 @@ class ControlPackageTests(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertEqual(list((root / "control").iterdir()), [])
 
+    def test_import_verification_runs_after_target_move(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "control" / control.TARGET_NAME
+            def installed(command, **_kwargs):
+                Path(command[command.index("--target") + 1]).mkdir()
+                return subprocess.CompletedProcess(command, 0)
+            def verified(path):
+                self.assertEqual(path, target)
+                self.assertTrue(target.is_dir())
+                return True
+            with patch.object(control, "qualify", return_value=(root, target)), \
+                    patch.object(control.subprocess, "run", side_effect=installed), \
+                    patch.object(control, "verify_files", return_value=True), \
+                    patch.object(control, "verify", side_effect=verified):
+                self.assertEqual(control.prepare(root, root), "CONTROL_PACKAGE_PREPARED")
+
 
 if __name__ == "__main__":
     unittest.main()

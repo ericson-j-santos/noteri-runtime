@@ -49,7 +49,7 @@ def qualify(local: Path, source: Path) -> tuple[Path, Path]:
     return root, target
 
 
-def verify(target: Path) -> bool:
+def verify_files(target: Path) -> bool:
     try:
         stage.ensure_no_link_components(target)
         required = ("win32com/client/__init__.py", "pywin32.pth",
@@ -61,6 +61,15 @@ def verify(target: Path) -> bool:
         metadata = (target / required[2]).read_text(encoding="utf-8")
         if "Name: pywin32\n" not in metadata.replace("\r\n", "\n") or "Version: 312\n" not in metadata.replace("\r\n", "\n"):
             return False
+        return True
+    except Exception:
+        return False
+
+
+def verify(target: Path) -> bool:
+    if not verify_files(target):
+        return False
+    try:
         site.addsitedir(str(target))
         import win32com.client  # type: ignore
         service = win32com.client.Dispatch("Schedule.Service")
@@ -95,18 +104,16 @@ def prepare(local: Path, source: Path) -> str:
             str(source / "noteri_worker_pool_control_requirements.txt")],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, timeout=180, check=False)
-        if completed.returncode != 0 or not verify(staging):
+        if completed.returncode != 0 or not verify_files(staging):
             raise Blocked("package_install")
         staging.rename(target)
         created_target = True
         if not verify(target):
-            raise Blocked("package_readback")
+            return "BLOCKED_PACKAGE_READBACK"
         return "CONTROL_PACKAGE_PREPARED"
     except Exception:
         _remove_owned(staging, root)
-        if created_target:
-            _remove_owned(target, root)
-        return "BLOCKED_PREPARE"
+        return "BLOCKED_PACKAGE_READBACK" if created_target else "BLOCKED_PREPARE"
 
 
 def main() -> int:
