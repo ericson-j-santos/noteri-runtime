@@ -8,7 +8,7 @@ on:
         required: true
         default: preflight
         type: choice
-        options: [preflight, update]
+        options: [preflight, update, diagnose]
       expected_workflow_sha:
         description: Exact Noteri workflow source commit
         required: true
@@ -35,12 +35,13 @@ concurrency:
 
 jobs:
   preflight:
-    if: github.actor == 'ericson-j-santos' && inputs.mode == 'preflight'
+    if: github.actor == 'ericson-j-santos' && (inputs.mode == 'preflight' || inputs.mode == 'diagnose')
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 7
     env:
       EXPECTED_WORKFLOW_SHA: ${{ inputs.expected_workflow_sha }}
       EXPECTED_RULES_SHA: ${{ inputs.expected_rules_sha }}
+      MODE: ${{ inputs.mode }}
       CORRELATION_ID: noteri-gateway-pins-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout exact Noteri source
@@ -68,11 +69,15 @@ jobs:
             throw 'NOTERI_GATEWAY_PIN_PREFLIGHT_IDENTITY_INVALID'
           }
           $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $syncRef = 'origin/fix/noteri-gateway-canonical-profile-20261028'
+          if ($env:MODE -eq 'diagnose') {
+            $syncRef = 'origin/fix/noteri-gateway-failure-readback-20261028'
+          }
           $args = @('--policy', (Join-Path $rules 'config/command-gateway.policy.json'),
             '--repo', $env:GITHUB_WORKSPACE, '--session-prefix', 'noteri-gateway-pins',
             '--correlation-id', $env:CORRELATION_ID,
             '--expected-head', $env:EXPECTED_WORKFLOW_SHA,
-            '--sync-ref', 'origin/fix/noteri-gateway-canonical-profile-20261028',
+            '--sync-ref', $syncRef,
             '--require-runner-version-preflight')
           $raw = @(& python3 -B (Join-Path $rules 'scripts/session_launcher.py') @args)
           if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'NOTERI_GATEWAY_PIN_SESSION_BLOCKED' }
@@ -86,6 +91,7 @@ jobs:
           "target=$($session.target_path)" | Add-Content $env:GITHUB_OUTPUT
           "session=$($session.session_id)" | Add-Content $env:GITHUB_OUTPUT
       - name: Inventory legacy pins through risk1 Gateway
+        if: inputs.mode == 'preflight'
         shell: powershell
         env:
           TARGET_PATH: ${{ steps.session.outputs.target }}
@@ -128,10 +134,57 @@ jobs:
           } | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'noteri-gateway-pins.json') -Encoding UTF8
           Write-Output 'NOTERI_GATEWAY_PIN_INVENTORY_READONLY_OK'
       - name: Preserve sanitized pin inventory
+        if: inputs.mode == 'preflight'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: noteri-gateway-pins-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/noteri-gateway-pins.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Diagnose failure through risk1 Gateway
+        if: inputs.mode == 'diagnose'
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $args = @('--policy', (Join-Path $rules 'config/command-gateway.policy.json'),
+            '--correlation-id', $env:CORRELATION_ID, 'run', '--cwd', $env:TARGET_PATH,
+            '--session-id', $env:SESSION_ID, '--risk', '1', '--timeout', '30',
+            '--expected-head', $env:EXPECTED_WORKFLOW_SHA, '--', 'python3', '-B',
+            (Join-Path $env:TARGET_PATH 'scripts/noteri_gateway_failure_readback.py'),
+            '--expected-legacy-receipt-sha256', '4a4eaa3e9ca99afa053c371f9974da59c9f867a1f249b36dd79450e841e830bf',
+            '--expected-legacy-manifest-sha256', 'f415f09b37ef30ac765f3616810c45bb8b99d018aa3a59b3a1b349aa7c558209')
+          $raw = @(& python3 -B (Join-Path $rules 'scripts/command_gateway.py') @args)
+          if (-not $raw) { throw 'NOTERI_GATEWAY_FAILURE_GATEWAY_EMPTY' }
+          $envelope = @($raw)[-1] | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $envelope.result -ne 'ok' -or
+              $envelope.gateway_exit_code -ne 0 -or
+              $envelope.command_exit_code -ne 0 -or $envelope.state_changed -ne $false) {
+            if ($envelope.stdout) { Write-Output $envelope.stdout }
+            throw 'NOTERI_GATEWAY_FAILURE_GATEWAY_BLOCKED'
+          }
+          $report = $envelope.stdout | ConvertFrom-Json
+          if ($report.result -ne 'NOTERI_GATEWAY_FAILURE_READBACK' -or
+              $report.managed_runtime_changed_by_readback -ne $false) {
+            throw 'NOTERI_GATEWAY_FAILURE_REPORT_INVALID'
+          }
+          $report | Add-Member -NotePropertyName workflow_sha -NotePropertyValue $env:GITHUB_SHA
+          $report | Add-Member -NotePropertyName run_id -NotePropertyValue $env:GITHUB_RUN_ID
+          $report | Add-Member -NotePropertyName run_attempt -NotePropertyValue $env:GITHUB_RUN_ATTEMPT
+          $report | ConvertTo-Json -Depth 8 -Compress |
+            Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'noteri-gateway-failure-readback.json') -Encoding UTF8
+          Write-Output 'NOTERI_GATEWAY_FAILURE_READBACK_OK'
+      - name: Preserve sanitized failure readback
+        if: inputs.mode == 'diagnose'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: noteri-gateway-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/noteri-gateway-failure-readback.json
           if-no-files-found: error
           retention-days: 7
 
@@ -174,6 +227,43 @@ jobs:
                 .conclusion == "success" and
                 (.runner_name | ascii_downcase | startswith("noteri")))] | length == 1' >/dev/null
           echo NOTERI_GATEWAY_PIN_INDEPENDENT_READBACK_OK
+
+  diagnose_readback:
+    name: Independent Noteri failure readback
+    needs: preflight
+    if: inputs.mode == 'diagnose'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Download exact diagnostic artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: noteri-gateway-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: _failure_readback
+      - name: Verify producer and read-only contract
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_WORKFLOW_SHA: ${{ inputs.expected_workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_SHA" = "$EXPECTED_WORKFLOW_SHA"
+          jq -e --arg sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" \
+            --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            '(.result == "NOTERI_GATEWAY_FAILURE_READBACK") and
+             (.workflow_sha == $sha) and (.run_id == $run) and
+             (.run_attempt == $attempt) and
+             (.managed_runtime_changed_by_readback == false) and
+             (.receipt_sha256 | test("^[0-9a-f]{64}$")) and
+             (.manifest_sha256 | test("^[0-9a-f]{64}$"))' \
+            _failure_readback/noteri-gateway-failure-readback.json >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+            | jq -e '[.jobs[] | select(.name == "preflight" and
+                .conclusion == "success" and
+                (.runner_name | ascii_downcase | startswith("noteri")))] | length == 1' >/dev/null
+          echo NOTERI_GATEWAY_FAILURE_INDEPENDENT_READBACK_OK
 
   refresh:
     if: github.actor == 'ericson-j-santos' && inputs.mode == 'update'
