@@ -27,6 +27,7 @@ RULES_VERSION = "1.6.19"
 MANIFEST_SHA256 = "ffe7ba9c79f57952cec2e41d2476e470b16dbd8b7514f1bc7b5418b800c1b3e2"
 INSTALL_SHA256 = "73ef3c091a16a261dfe71fa0ac7bb2e2c6a7f07bdfa3bc592c44855751c92329"
 UPDATE_SHA256 = "e4961e1efeb38a9c763ead8f3900d392942421c495cdd8a28e08fb7ceb0d92fe"
+LEGACY_VERIFY_SHA256 = "b792692d6c86bccccfba9037596d3a7cbd4996e7d560f257194efa020357bef4"
 INSTALL_ROOT = Path(r"C:\dev\chatgpt-command-gateway")
 WORK_ROOT = Path(r"C:\dev\chatgpt-workers")
 RUN_RECEIPT_NAME = "refresh-run-receipt.json"
@@ -492,11 +493,15 @@ def run_elevated(
 
     install = fetch("scripts/install_command_gateway_host.py", INSTALL_SHA256)
     update = fetch("scripts/update_command_gateway_host.py", UPDATE_SHA256)
+    legacy_verify = fetch(
+        "scripts/noteri_gateway_legacy_v1_rebaseline.py", LEGACY_VERIFY_SHA256
+    )
     old_raw = current[1] if current is not None else None
     started_at = datetime.now(timezone.utc)
     with tempfile.TemporaryDirectory(prefix="noteri-gateway-refresh-") as temp:
         root = Path(temp)
         (root / "install_command_gateway_host.py").write_bytes(install)
+        (root / "noteri_gateway_legacy_v1_rebaseline.py").write_bytes(legacy_verify)
         updater = root / "update_command_gateway_host.py"
         updater.write_bytes(update)
         result = subprocess.run(

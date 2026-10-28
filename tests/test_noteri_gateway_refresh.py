@@ -128,6 +128,7 @@ def test_contract_is_fixed():
     assert m.INSTALL_ROOT == Path(r"C:\dev\chatgpt-command-gateway")
     assert m.INSTALL_SHA256 == "73ef3c091a16a261dfe71fa0ac7bb2e2c6a7f07bdfa3bc592c44855751c92329"
     assert m.UPDATE_SHA256 == "e4961e1efeb38a9c763ead8f3900d392942421c495cdd8a28e08fb7ceb0d92fe"
+    assert m.LEGACY_VERIFY_SHA256 == "b792692d6c86bccccfba9037596d3a7cbd4996e7d560f257194efa020357bef4"
 
 
 def test_rejects_other_host_confirmation_and_commit():
@@ -326,6 +327,7 @@ def test_complete_update_proves_new_install_and_full_rollback(monkeypatch):
             return manifest if path == "MANIFEST.json" else b"verified-script"
 
         def fake_updater(args, **kwargs):
+            assert (Path(args[1]).parent / "noteri_gateway_legacy_v1_rebaseline.py").read_bytes() == b"verified-script"
             assert "--noteri-wsl-inventory-profile" in args
             assert "--noteri-legacy-v1-rebaseline" in args
             assert args[args.index("--expected-legacy-receipt-sha256") + 1] == "a" * 64
