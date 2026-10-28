@@ -22,11 +22,12 @@ EXPECTED_HOST = "Noteri"
 EXPECTED_WORKFLOW_REPOSITORY = "ericson-j-santos/noteri-runtime"
 CONFIRM = "REFRESH-NOTERI-COMMAND-GATEWAY"
 RULES_REPO = "ericson-j-santos/chatgpt-operational-rules"
-RULES_COMMIT = "1dc0e4f07e52dbc634033878e2e98e67af8bd337"
-RULES_VERSION = "1.6.11"
-MANIFEST_SHA256 = "f0027395ca4ca1b1228ecc0968fb219592cb42a5bebbf3a9292033d4b30f5a3f"
-INSTALL_SHA256 = "5c31508b431a2a3bb9ea649e25e18fb0c6fd8c47afbe138aa2654f6bc92e262f"
-UPDATE_SHA256 = "fbed2c036415a4f97637c453c37e3060a580d549f68a519785d0a02926589103"
+RULES_COMMIT = "7d6ec0742ce9570408e8f3673a4f3c65c6777eb0"
+RULES_VERSION = "1.6.19"
+MANIFEST_SHA256 = "ffe7ba9c79f57952cec2e41d2476e470b16dbd8b7514f1bc7b5418b800c1b3e2"
+INSTALL_SHA256 = "73ef3c091a16a261dfe71fa0ac7bb2e2c6a7f07bdfa3bc592c44855751c92329"
+UPDATE_SHA256 = "e4961e1efeb38a9c763ead8f3900d392942421c495cdd8a28e08fb7ceb0d92fe"
+LEGACY_VERIFY_SHA256 = "b792692d6c86bccccfba9037596d3a7cbd4996e7d560f257194efa020357bef4"
 INSTALL_ROOT = Path(r"C:\dev\chatgpt-command-gateway")
 WORK_ROOT = Path(r"C:\dev\chatgpt-workers")
 RUN_RECEIPT_NAME = "refresh-run-receipt.json"
@@ -37,7 +38,7 @@ RUNTIME_MAP = {
     "scripts/session_preflight.py": "bin/session_preflight.py",
     "scripts/session_launcher.py": "bin/session_launcher.py",
     "scripts/runner_version_preflight.py": "bin/runner_version_preflight.py",
-    "config/command-gateway.policy.json": "config/policy.json",
+    "config/command-gateway.policy.noteri-wsl.json": "config/policy.json",
 }
 MANAGED_FILES = set(RUNTIME_MAP.values())
 HEAD_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -316,7 +317,8 @@ def verify_rollback(backup_dir: Path, expected: dict[str, dict]) -> str:
         snapshot = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RefreshError("manifesto de rollback invalido") from exc
-    if not isinstance(snapshot, dict) or snapshot.get("version") != 1:
+    if (not isinstance(snapshot, dict) or snapshot.get("version") != 2
+            or snapshot.get("metadata_contract") != "windows-owner-group-dacl-ads-v1"):
         raise RefreshError("schema do rollback invalido")
     snapshot_root = snapshot.get("install_root")
     if not isinstance(snapshot_root, str) or not _same_path(Path(snapshot_root), root):
@@ -336,6 +338,8 @@ def verify_rollback(backup_dir: Path, expected: dict[str, dict]) -> str:
             raise RefreshError(f"rollback nao pertence ao bundle: {destination}")
         previous = backup_dir.joinpath("files", *destination.split("/"))
         if entry["existed"]:
+            if not isinstance(entry.get("previous_windows_state"), dict):
+                raise RefreshError(f"metadados Windows ausentes: {destination}")
             digest = str(entry.get("previous_sha256", "")).lower()
             size = entry.get("previous_size")
             mode = entry.get("previous_mode")
@@ -377,6 +381,7 @@ def verify_update_receipt(
         receipt.get("result") != "HOST_UPDATE_OK"
         or receipt.get("source_commit") != RULES_COMMIT
         or receipt.get("rules_version") != RULES_VERSION
+        or receipt.get("noteri_wsl_inventory_profile") is not True
         or str(receipt.get("host", "")).casefold() != EXPECTED_HOST.casefold()
         or receipt.get("validation_head") != RULES_COMMIT
         or not _same_path(Path(str(receipt.get("install_root", ""))), INSTALL_ROOT)
@@ -425,6 +430,7 @@ def write_run_receipt(
         "host": EXPECTED_HOST,
         "source_commit": RULES_COMMIT,
         "rules_version": RULES_VERSION,
+        "noteri_wsl_inventory_profile": True,
         "install_root": str(INSTALL_ROOT),
         "validation_head": source_receipt["validation_head"],
         "source_receipt_updated_at": source_receipt["updated_at"],
@@ -444,11 +450,16 @@ def write_run_receipt(
 def run_elevated(
     confirm: str, commit: str, *, repository: str, workflow_sha: str,
     run_id: int, run_attempt: int,
+    legacy_receipt_sha256: str | None = None,
+    legacy_manifest_sha256: str | None = None,
 ) -> dict:
+    """Legacy entrypoint name; invokes only the canonical updater with explicit pins.
+
+    No UAC or privilege escalation is attempted. The updater's replaceability
+    preflight decides whether the existing runner identity may replace files.
+    """
     validate(socket.gethostname(), confirm, commit)
     validate_execution(repository, workflow_sha, run_id, run_attempt)
-    if not is_admin():
-        raise RefreshError("elevacao obrigatoria antes do refresh")
 
     manifest = fetch("MANIFEST.json", MANIFEST_SHA256)
     expected = canonical_files(manifest)
@@ -474,25 +485,37 @@ def run_elevated(
             )
             return {"ok": True, "result": bound["result"]}
 
+    if (not isinstance(legacy_receipt_sha256, str)
+            or not SHA256_RE.fullmatch(legacy_receipt_sha256)
+            or not isinstance(legacy_manifest_sha256, str)
+            or not SHA256_RE.fullmatch(legacy_manifest_sha256)):
+        raise RefreshError("pins legados obrigatorios para update")
+
     install = fetch("scripts/install_command_gateway_host.py", INSTALL_SHA256)
     update = fetch("scripts/update_command_gateway_host.py", UPDATE_SHA256)
+    legacy_verify = fetch(
+        "scripts/noteri_gateway_legacy_v1_rebaseline.py", LEGACY_VERIFY_SHA256
+    )
     old_raw = current[1] if current is not None else None
     started_at = datetime.now(timezone.utc)
     with tempfile.TemporaryDirectory(prefix="noteri-gateway-refresh-") as temp:
         root = Path(temp)
         (root / "install_command_gateway_host.py").write_bytes(install)
+        (root / "noteri_gateway_legacy_v1_rebaseline.py").write_bytes(legacy_verify)
         updater = root / "update_command_gateway_host.py"
         updater.write_bytes(update)
         result = subprocess.run(
             [sys.executable, str(updater), "--commit", RULES_COMMIT,
              "--expected-self-sha256", UPDATE_SHA256, "--install-root",
-             str(INSTALL_ROOT), "--work-root", str(WORK_ROOT)],
+             str(INSTALL_ROOT), "--work-root", str(WORK_ROOT),
+             "--noteri-legacy-v1-rebaseline",
+             "--expected-legacy-receipt-sha256", legacy_receipt_sha256,
+             "--expected-legacy-manifest-sha256", legacy_manifest_sha256,
+             "--noteri-wsl-inventory-profile"],
             capture_output=True, text=True, timeout=180, check=False,
         )
         if result.returncode != 0:
-            raise RefreshError(
-                f"updater_failed:{result.returncode}:{result.stderr[-500:]}"
-            )
+            raise RefreshError(f"updater_failed:{result.returncode}")
 
     updated = read_update_receipt()
     if updated is None:
@@ -525,12 +548,16 @@ def main() -> int:
     parser.add_argument("--workflow-sha", required=True)
     parser.add_argument("--workflow-run-id", type=int, required=True)
     parser.add_argument("--workflow-run-attempt", type=int, required=True)
+    parser.add_argument("--expected-legacy-receipt-sha256")
+    parser.add_argument("--expected-legacy-manifest-sha256")
     args = parser.parse_args()
     try:
         output = run_elevated(
             args.confirm, args.commit, repository=args.workflow_repository,
             workflow_sha=args.workflow_sha, run_id=args.workflow_run_id,
             run_attempt=args.workflow_run_attempt,
+            legacy_receipt_sha256=args.expected_legacy_receipt_sha256,
+            legacy_manifest_sha256=args.expected_legacy_manifest_sha256,
         )
     except Exception as exc:
         output = {"ok": False, "result": "NOTERI_GATEWAY_REFRESH_BLOCKED",

@@ -2,10 +2,29 @@ name: Noteri Command Gateway Refresh
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '.github/triggers/noteri-command-gateway-refresh'
+    inputs:
+      mode:
+        description: Read-only pin inventory or authorized update
+        required: true
+        default: preflight
+        type: choice
+        options: [preflight, update]
+      expected_workflow_sha:
+        description: Exact Noteri workflow source commit
+        required: true
+        type: string
+      expected_rules_sha:
+        description: Exact approved canonical rules commit
+        required: true
+        type: string
+      expected_legacy_receipt_sha256:
+        description: SHA-256 of the original blocked legacy receipt
+        required: false
+        type: string
+      expected_legacy_manifest_sha256:
+        description: SHA-256 of the original legacy manifest
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -15,7 +34,149 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    if: github.actor == 'ericson-j-santos' && inputs.mode == 'preflight'
+    runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
+    timeout-minutes: 7
+    env:
+      EXPECTED_WORKFLOW_SHA: ${{ inputs.expected_workflow_sha }}
+      EXPECTED_RULES_SHA: ${{ inputs.expected_rules_sha }}
+      CORRELATION_ID: noteri-gateway-pins-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout exact Noteri source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout exact canonical rules source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: 7d6ec0742ce9570408e8f3673a4f3c65c6777eb0
+          path: _rules
+          persist-credentials: false
+      - name: Launch governed read-only session
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_SHA -ne $env:EXPECTED_WORKFLOW_SHA -or
+              $env:EXPECTED_RULES_SHA -ne '7d6ec0742ce9570408e8f3673a4f3c65c6777eb0' -or
+              $env:COMPUTERNAME -ine 'Noteri' -or
+              -not $env:RUNNER_NAME.ToLowerInvariant().StartsWith('noteri')) {
+            throw 'NOTERI_GATEWAY_PIN_PREFLIGHT_IDENTITY_INVALID'
+          }
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $args = @('--policy', (Join-Path $rules 'config/command-gateway.policy.json'),
+            '--repo', $env:GITHUB_WORKSPACE, '--session-prefix', 'noteri-gateway-pins',
+            '--correlation-id', $env:CORRELATION_ID,
+            '--expected-head', $env:EXPECTED_WORKFLOW_SHA,
+            '--sync-ref', 'origin/fix/noteri-gateway-canonical-profile-20261028',
+            '--require-runner-version-preflight')
+          $raw = @(& python3 -B (Join-Path $rules 'scripts/session_launcher.py') @args)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'NOTERI_GATEWAY_PIN_SESSION_BLOCKED' }
+          $session = @($raw)[-1] | ConvertFrom-Json
+          if ($session.result -ne 'SESSION_LAUNCH_OK' -or
+              $session.state_validated -ne $true -or
+              $session.head -ne $env:EXPECTED_WORKFLOW_SHA -or
+              $session.runner_version_preflight.ok -ne $true) {
+            throw 'NOTERI_GATEWAY_PIN_SESSION_INVALID'
+          }
+          "target=$($session.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session=$($session.session_id)" | Add-Content $env:GITHUB_OUTPUT
+      - name: Inventory legacy pins through risk1 Gateway
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $args = @('--policy', (Join-Path $rules 'config/command-gateway.policy.json'),
+            '--correlation-id', $env:CORRELATION_ID, 'run', '--cwd', $env:TARGET_PATH,
+            '--session-id', $env:SESSION_ID, '--risk', '1', '--timeout', '30',
+            '--expected-head', $env:EXPECTED_WORKFLOW_SHA, '--', 'python3', '-B',
+            (Join-Path $env:TARGET_PATH 'scripts/noteri_gateway_legacy_pin_inventory.py'))
+          $raw = @(& python3 -B (Join-Path $rules 'scripts/command_gateway.py') @args)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'NOTERI_GATEWAY_PIN_INVENTORY_BLOCKED' }
+          $envelope = @($raw)[-1] | ConvertFrom-Json
+          if ($envelope.result -ne 'ok' -or $envelope.gateway_exit_code -ne 0 -or
+              $envelope.command_exit_code -ne 0 -or $envelope.state_changed -ne $false) {
+            throw 'NOTERI_GATEWAY_PIN_GATEWAY_INVALID'
+          }
+          $report = $envelope.stdout | ConvertFrom-Json
+          if ($report.result -ne 'NOTERI_LEGACY_PIN_INVENTORY' -or
+              $report.receipt_sha256 -notmatch '^[0-9a-f]{64}$' -or
+              $report.manifest_sha256 -notmatch '^[0-9a-f]{64}$' -or
+              $report.managed_runtime_changed -ne $false -or
+              $report.installation_authorized -ne $false) {
+            throw 'NOTERI_GATEWAY_PIN_REPORT_INVALID'
+          }
+          @{
+            result = $report.result
+            receipt_sha256 = $report.receipt_sha256
+            manifest_sha256 = $report.manifest_sha256
+            managed_runtime_changed = $false
+            installation_authorized = $false
+            workflow_sha = $env:GITHUB_SHA
+            rules_sha = $env:EXPECTED_RULES_SHA
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+          } | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'noteri-gateway-pins.json') -Encoding UTF8
+          Write-Output 'NOTERI_GATEWAY_PIN_INVENTORY_READONLY_OK'
+      - name: Preserve sanitized pin inventory
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: noteri-gateway-pins-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/noteri-gateway-pins.json
+          if-no-files-found: error
+          retention-days: 7
+
+  preflight_readback:
+    name: Independent legacy pin artifact and runner readback
+    needs: preflight
+    if: inputs.mode == 'preflight'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Download exact run artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: noteri-gateway-pins-${{ github.run_id }}-${{ github.run_attempt }}
+          path: _pin_readback
+      - name: Verify producer identity and non-promoting receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_WORKFLOW_SHA: ${{ inputs.expected_workflow_sha }}
+          EXPECTED_RULES_SHA: ${{ inputs.expected_rules_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_SHA" = "$EXPECTED_WORKFLOW_SHA"
+          test "$EXPECTED_RULES_SHA" = '7d6ec0742ce9570408e8f3673a4f3c65c6777eb0'
+          jq -e --arg sha "$GITHUB_SHA" --arg rules "$EXPECTED_RULES_SHA" \
+            --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            '(.result == "NOTERI_LEGACY_PIN_INVENTORY") and
+             (.workflow_sha == $sha) and (.rules_sha == $rules) and
+             (.run_id == $run) and (.run_attempt == $attempt) and
+             (.managed_runtime_changed == false) and
+             (.installation_authorized == false) and
+             (.receipt_sha256 | test("^[0-9a-f]{64}$")) and
+             (.manifest_sha256 | test("^[0-9a-f]{64}$"))' \
+            _pin_readback/noteri-gateway-pins.json >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+            | jq -e '[.jobs[] | select(.name == "preflight" and
+                .conclusion == "success" and
+                (.runner_name | ascii_downcase | startswith("noteri")))] | length == 1' >/dev/null
+          echo NOTERI_GATEWAY_PIN_INDEPENDENT_READBACK_OK
+
   refresh:
+    if: github.actor == 'ericson-j-santos' && inputs.mode == 'update'
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 5
     steps:
@@ -27,10 +188,24 @@ jobs:
           persist-credentials: false
       - name: Refresh gateway with fixed contract
         shell: powershell
+        env:
+          EXPECTED_WORKFLOW_SHA: ${{ inputs.expected_workflow_sha }}
+          EXPECTED_RULES_SHA: ${{ inputs.expected_rules_sha }}
+          EXPECTED_LEGACY_RECEIPT_SHA256: ${{ inputs.expected_legacy_receipt_sha256 }}
+          EXPECTED_LEGACY_MANIFEST_SHA256: ${{ inputs.expected_legacy_manifest_sha256 }}
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_SHA -ne $env:EXPECTED_WORKFLOW_SHA) {
+            throw 'NOTERI_GATEWAY_WORKFLOW_SHA_INVALID'
+          }
+          if ($env:EXPECTED_RULES_SHA -ne '7d6ec0742ce9570408e8f3673a4f3c65c6777eb0') {
+            throw 'NOTERI_GATEWAY_SOURCE_SHA_INVALID'
+          }
           python3 scripts/noteri_gateway_refresh.py `
             --confirm REFRESH-NOTERI-COMMAND-GATEWAY `
+            --commit $env:EXPECTED_RULES_SHA `
+            --expected-legacy-receipt-sha256 $env:EXPECTED_LEGACY_RECEIPT_SHA256 `
+            --expected-legacy-manifest-sha256 $env:EXPECTED_LEGACY_MANIFEST_SHA256 `
             --workflow-repository $env:GITHUB_REPOSITORY `
             --workflow-sha $env:GITHUB_SHA `
             --workflow-run-id $env:GITHUB_RUN_ID `
@@ -91,8 +266,9 @@ jobs:
             throw 'old installation was reassigned to current run'
           }
           if ($r.host -ne 'Noteri') { throw 'host mismatch' }
-          if ($r.source_commit -ne '1dc0e4f07e52dbc634033878e2e98e67af8bd337') { throw 'source commit mismatch' }
-          if ($r.rules_version -ne '1.6.11') { throw 'rules version mismatch' }
+          if ($r.source_commit -ne '7d6ec0742ce9570408e8f3673a4f3c65c6777eb0') { throw 'source commit mismatch' }
+          if ($r.rules_version -ne '1.6.19') { throw 'rules version mismatch' }
+          if ($r.noteri_wsl_inventory_profile -ne $true) { throw 'Noteri profile missing' }
           if ($r.validation_head -ne $r.source_commit) { throw 'validation head mismatch' }
           if ($r.install_root -ne $installRoot) { throw 'install root mismatch' }
           if ($r.workflow_repository -ne $env:GITHUB_REPOSITORY -or

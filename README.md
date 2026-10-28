@@ -25,6 +25,22 @@ Não duplicar aqui componentes compartilhados entre hosts:
 
 As regras canônicas permanecem em `ericson-j-santos/chatgpt-operational-rules`.
 
+## Atualização governada do Gateway no Noteri
+
+O workflow `Noteri Command Gateway Refresh` é somente `workflow_dispatch` e
+reutiliza o atualizador canônico fixado por commit, manifesto e SHA-256 do
+próprio script. Ele exige os SHA-256 do recibo e manifesto legados originais,
+seleciona explicitamente o perfil WSL exclusivo do Noteri e falha antes da
+substituição se os pins, host ou bundle divergirem. Não concede privilégios,
+não abre UAC e não inicia WSL ou serviços. O updater canônico executa preflight
+de substituição, backup v2, rollback e readback; a etapa seguinte compara os
+hashes instalados com o manifesto aprovado. A existência deste workflow não é
+autorização para dispará-lo nem comprovação de instalação física.
+O modo padrão `preflight` usa o runner gratuito apenas para inventário de
+hashes legados via Session Launcher e Gateway risco 1, com readback de artifact
+em runner hospedado. Esse resultado não promove prontidão nem autoriza o modo
+`update`; os pins devem ser revisados antes de uma transação separada.
+
 ## Migração
 
 A migração a partir de `ericson-j-santos/reqsys-v2-enterprise-real` é incremental e fail-closed. O código operacional antigo só pode ser removido após o equivalente neste repositório possuir testes e E2E aplicável no mesmo SHA.
