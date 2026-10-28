@@ -36,6 +36,10 @@ não abre UAC e não inicia WSL ou serviços. O updater canônico executa prefli
 de substituição, backup v2, rollback e readback; a etapa seguinte compara os
 hashes instalados com o manifesto aprovado. A existência deste workflow não é
 autorização para dispará-lo nem comprovação de instalação física.
+O modo padrão `preflight` usa o runner gratuito apenas para inventário de
+hashes legados via Session Launcher e Gateway risco 1, com readback de artifact
+em runner hospedado. Esse resultado não promove prontidão nem autoriza o modo
+`update`; os pins devem ser revisados antes de uma transação separada.
 
 ## Migração
 

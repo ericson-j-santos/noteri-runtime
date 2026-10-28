@@ -11,6 +11,12 @@ def test_gateway_refresh_requires_explicit_pinned_dispatch():
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "  workflow_dispatch:" in text
     assert "  push:" not in text
+    assert "options: [preflight, update]" in text
+    assert "inputs.mode == 'preflight'" in text
+    assert "inputs.mode == 'update'" in text
+    assert "--risk', '1'" in text
+    assert "noteri_gateway_legacy_pin_inventory.py" in text
+    assert "--require-runner-version-preflight" in text
     assert "expected_rules_sha:" in text
     assert "expected_legacy_receipt_sha256:" in text
     assert "expected_legacy_manifest_sha256:" in text
