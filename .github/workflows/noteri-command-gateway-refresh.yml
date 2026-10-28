@@ -53,7 +53,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ericson-j-santos/chatgpt-operational-rules
-          ref: c98e67cb12d23618d2a2ce19a30ae358637ec59d
+          ref: 7d6ec0742ce9570408e8f3673a4f3c65c6777eb0
           path: _rules
           persist-credentials: false
       - name: Launch governed read-only session
@@ -62,7 +62,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:GITHUB_SHA -ne $env:EXPECTED_WORKFLOW_SHA -or
-              $env:EXPECTED_RULES_SHA -ne 'c98e67cb12d23618d2a2ce19a30ae358637ec59d' -or
+              $env:EXPECTED_RULES_SHA -ne '7d6ec0742ce9570408e8f3673a4f3c65c6777eb0' -or
               $env:COMPUTERNAME -ine 'Noteri' -or
               -not $env:RUNNER_NAME.ToLowerInvariant().StartsWith('noteri')) {
             throw 'NOTERI_GATEWAY_PIN_PREFLIGHT_IDENTITY_INVALID'
@@ -158,7 +158,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_SHA" = "$EXPECTED_WORKFLOW_SHA"
-          test "$EXPECTED_RULES_SHA" = 'c98e67cb12d23618d2a2ce19a30ae358637ec59d'
+          test "$EXPECTED_RULES_SHA" = '7d6ec0742ce9570408e8f3673a4f3c65c6777eb0'
           jq -e --arg sha "$GITHUB_SHA" --arg rules "$EXPECTED_RULES_SHA" \
             --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
             '(.result == "NOTERI_LEGACY_PIN_INVENTORY") and
@@ -198,7 +198,7 @@ jobs:
           if ($env:GITHUB_SHA -ne $env:EXPECTED_WORKFLOW_SHA) {
             throw 'NOTERI_GATEWAY_WORKFLOW_SHA_INVALID'
           }
-          if ($env:EXPECTED_RULES_SHA -ne 'c98e67cb12d23618d2a2ce19a30ae358637ec59d') {
+          if ($env:EXPECTED_RULES_SHA -ne '7d6ec0742ce9570408e8f3673a4f3c65c6777eb0') {
             throw 'NOTERI_GATEWAY_SOURCE_SHA_INVALID'
           }
           python3 scripts/noteri_gateway_refresh.py `
@@ -266,7 +266,7 @@ jobs:
             throw 'old installation was reassigned to current run'
           }
           if ($r.host -ne 'Noteri') { throw 'host mismatch' }
-          if ($r.source_commit -ne 'c98e67cb12d23618d2a2ce19a30ae358637ec59d') { throw 'source commit mismatch' }
+          if ($r.source_commit -ne '7d6ec0742ce9570408e8f3673a4f3c65c6777eb0') { throw 'source commit mismatch' }
           if ($r.rules_version -ne '1.6.19') { throw 'rules version mismatch' }
           if ($r.noteri_wsl_inventory_profile -ne $true) { throw 'Noteri profile missing' }
           if ($r.validation_head -ne $r.source_commit) { throw 'validation head mismatch' }

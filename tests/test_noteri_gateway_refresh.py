@@ -122,12 +122,12 @@ def seed_current_receipt(monkeypatch, root: Path):
 
 
 def test_contract_is_fixed():
-    assert m.RULES_COMMIT == "c98e67cb12d23618d2a2ce19a30ae358637ec59d"
+    assert m.RULES_COMMIT == "7d6ec0742ce9570408e8f3673a4f3c65c6777eb0"
     assert m.RULES_VERSION == "1.6.19"
-    assert m.MANIFEST_SHA256 == "40b400a51ea46009faae1ef6590fc60e53a49297a1033f4f1ee1c2d92314e759"
+    assert m.MANIFEST_SHA256 == "ffe7ba9c79f57952cec2e41d2476e470b16dbd8b7514f1bc7b5418b800c1b3e2"
     assert m.INSTALL_ROOT == Path(r"C:\dev\chatgpt-command-gateway")
     assert m.INSTALL_SHA256 == "73ef3c091a16a261dfe71fa0ac7bb2e2c6a7f07bdfa3bc592c44855751c92329"
-    assert m.UPDATE_SHA256 == "29eaa497752d9437f2b3c8ae24c0b815fc0d7670d754bb93b5b87d57151f07e7"
+    assert m.UPDATE_SHA256 == "e4961e1efeb38a9c763ead8f3900d392942421c495cdd8a28e08fb7ceb0d92fe"
 
 
 def test_rejects_other_host_confirmation_and_commit():
