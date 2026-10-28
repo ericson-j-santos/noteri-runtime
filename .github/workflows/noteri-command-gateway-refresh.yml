@@ -2,10 +2,19 @@ name: Noteri Command Gateway Refresh
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '.github/triggers/noteri-command-gateway-refresh'
+    inputs:
+      expected_rules_sha:
+        description: Exact approved canonical rules commit
+        required: true
+        type: string
+      expected_legacy_receipt_sha256:
+        description: SHA-256 of the original blocked legacy receipt
+        required: true
+        type: string
+      expected_legacy_manifest_sha256:
+        description: SHA-256 of the original legacy manifest
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -27,10 +36,20 @@ jobs:
           persist-credentials: false
       - name: Refresh gateway with fixed contract
         shell: powershell
+        env:
+          EXPECTED_RULES_SHA: ${{ inputs.expected_rules_sha }}
+          EXPECTED_LEGACY_RECEIPT_SHA256: ${{ inputs.expected_legacy_receipt_sha256 }}
+          EXPECTED_LEGACY_MANIFEST_SHA256: ${{ inputs.expected_legacy_manifest_sha256 }}
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($env:EXPECTED_RULES_SHA -ne 'c98e67cb12d23618d2a2ce19a30ae358637ec59d') {
+            throw 'NOTERI_GATEWAY_SOURCE_SHA_INVALID'
+          }
           python3 scripts/noteri_gateway_refresh.py `
             --confirm REFRESH-NOTERI-COMMAND-GATEWAY `
+            --commit $env:EXPECTED_RULES_SHA `
+            --expected-legacy-receipt-sha256 $env:EXPECTED_LEGACY_RECEIPT_SHA256 `
+            --expected-legacy-manifest-sha256 $env:EXPECTED_LEGACY_MANIFEST_SHA256 `
             --workflow-repository $env:GITHUB_REPOSITORY `
             --workflow-sha $env:GITHUB_SHA `
             --workflow-run-id $env:GITHUB_RUN_ID `
@@ -91,8 +110,9 @@ jobs:
             throw 'old installation was reassigned to current run'
           }
           if ($r.host -ne 'Noteri') { throw 'host mismatch' }
-          if ($r.source_commit -ne '1dc0e4f07e52dbc634033878e2e98e67af8bd337') { throw 'source commit mismatch' }
-          if ($r.rules_version -ne '1.6.11') { throw 'rules version mismatch' }
+          if ($r.source_commit -ne 'c98e67cb12d23618d2a2ce19a30ae358637ec59d') { throw 'source commit mismatch' }
+          if ($r.rules_version -ne '1.6.19') { throw 'rules version mismatch' }
+          if ($r.noteri_wsl_inventory_profile -ne $true) { throw 'Noteri profile missing' }
           if ($r.validation_head -ne $r.source_commit) { throw 'validation head mismatch' }
           if ($r.install_root -ne $installRoot) { throw 'install root mismatch' }
           if ($r.workflow_repository -ne $env:GITHUB_REPOSITORY -or

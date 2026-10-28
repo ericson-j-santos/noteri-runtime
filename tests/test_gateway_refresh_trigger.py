@@ -7,12 +7,13 @@ WORKFLOW = ROOT / ".github/workflows/noteri-command-gateway-refresh.yml"
 SCRIPT = ROOT / "scripts/noteri_gateway_refresh.py"
 
 
-def test_gateway_refresh_has_narrow_push_trigger():
+def test_gateway_refresh_requires_explicit_pinned_dispatch():
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "  workflow_dispatch:" in text
-    assert "  push:" in text
-    assert "    branches: [main]" in text
-    assert "      - '.github/triggers/noteri-command-gateway-refresh'" in text
+    assert "  push:" not in text
+    assert "expected_rules_sha:" in text
+    assert "expected_legacy_receipt_sha256:" in text
+    assert "expected_legacy_manifest_sha256:" in text
     assert "repository_dispatch" not in text
     assert "permissions:\n  contents: read" in text
 
@@ -36,6 +37,9 @@ def test_gateway_refresh_readback_matches_script_contract():
     assert f"$r.rules_version -ne '{rules_version}'" in workflow
     assert "python3 scripts/noteri_gateway_refresh.py `" in workflow
     for argument in [
+        "--commit $env:EXPECTED_RULES_SHA",
+        "--expected-legacy-receipt-sha256 $env:EXPECTED_LEGACY_RECEIPT_SHA256",
+        "--expected-legacy-manifest-sha256 $env:EXPECTED_LEGACY_MANIFEST_SHA256",
         "--workflow-repository $env:GITHUB_REPOSITORY",
         "--workflow-sha $env:GITHUB_SHA",
         "--workflow-run-id $env:GITHUB_RUN_ID",

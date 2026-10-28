@@ -71,6 +71,7 @@ def write_snapshot(install: Path, expected: dict, previous: dict[str, bytes]):
                     "previous_sha256": hashlib.sha256(previous[destination]).hexdigest(),
                     "previous_size": observed.st_size,
                     "previous_mode": stat.S_IMODE(observed.st_mode),
+                    "previous_windows_state": {"version": 1},
                 }
             )
         entries[destination] = entry
@@ -78,7 +79,8 @@ def write_snapshot(install: Path, expected: dict, previous: dict[str, bytes]):
     (backup / "rollback-manifest.json").write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
+                "metadata_contract": "windows-owner-group-dacl-ads-v1",
                 "install_root": str(install.resolve()),
                 "created_at": datetime.now(timezone.utc).isoformat(),
                 "entries": entries,
@@ -104,6 +106,7 @@ def seed_current_receipt(monkeypatch, root: Path):
         "result": "HOST_UPDATE_OK",
         "source_commit": m.RULES_COMMIT,
         "rules_version": m.RULES_VERSION,
+        "noteri_wsl_inventory_profile": True,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "host": m.EXPECTED_HOST,
         "install_root": str(install),
@@ -119,12 +122,12 @@ def seed_current_receipt(monkeypatch, root: Path):
 
 
 def test_contract_is_fixed():
-    assert m.RULES_COMMIT == "1dc0e4f07e52dbc634033878e2e98e67af8bd337"
-    assert m.RULES_VERSION == "1.6.11"
-    assert m.MANIFEST_SHA256 == "f0027395ca4ca1b1228ecc0968fb219592cb42a5bebbf3a9292033d4b30f5a3f"
+    assert m.RULES_COMMIT == "c98e67cb12d23618d2a2ce19a30ae358637ec59d"
+    assert m.RULES_VERSION == "1.6.19"
+    assert m.MANIFEST_SHA256 == "40b400a51ea46009faae1ef6590fc60e53a49297a1033f4f1ee1c2d92314e759"
     assert m.INSTALL_ROOT == Path(r"C:\dev\chatgpt-command-gateway")
-    assert m.INSTALL_SHA256 == "5c31508b431a2a3bb9ea649e25e18fb0c6fd8c47afbe138aa2654f6bc92e262f"
-    assert m.UPDATE_SHA256 == "fbed2c036415a4f97637c453c37e3060a580d549f68a519785d0a02926589103"
+    assert m.INSTALL_SHA256 == "73ef3c091a16a261dfe71fa0ac7bb2e2c6a7f07bdfa3bc592c44855751c92329"
+    assert m.UPDATE_SHA256 == "29eaa497752d9437f2b3c8ae24c0b815fc0d7670d754bb93b5b87d57151f07e7"
 
 
 def test_rejects_other_host_confirmation_and_commit():
@@ -150,13 +153,13 @@ def test_rejects_invalid_execution_identity(repository, workflow_sha, run_id, ru
         m.validate_execution(repository, workflow_sha, run_id, run_attempt)
 
 
-def test_non_admin_fails_before_fetch_or_write(monkeypatch):
+def test_missing_legacy_pins_fails_before_updater_or_write(monkeypatch):
+    manifest, _, _ = canonical_fixture()
     calls = {"fetch": 0, "write": 0}
     monkeypatch.setattr(m.socket, "gethostname", lambda: "Noteri")
-    monkeypatch.setattr(m, "is_admin", lambda: False)
-    monkeypatch.setattr(m, "fetch", lambda *_args: calls.__setitem__("fetch", calls["fetch"] + 1))
+    monkeypatch.setattr(m, "fetch", lambda *_args: manifest)
     monkeypatch.setattr(m, "atomic_json", lambda *_args: calls.__setitem__("write", calls["write"] + 1))
-    with pytest.raises(m.RefreshError, match="elevacao obrigatoria"):
+    with pytest.raises(m.RefreshError, match="pins legados obrigatorios"):
         m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution())
     assert calls == {"fetch": 0, "write": 0}
 
@@ -322,7 +325,12 @@ def test_complete_update_proves_new_install_and_full_rollback(monkeypatch):
         def fake_fetch(path, *_args):
             return manifest if path == "MANIFEST.json" else b"verified-script"
 
-        def fake_updater(*_args, **_kwargs):
+        def fake_updater(args, **kwargs):
+            assert "--noteri-wsl-inventory-profile" in args
+            assert "--noteri-legacy-v1-rebaseline" in args
+            assert args[args.index("--expected-legacy-receipt-sha256") + 1] == "a" * 64
+            assert args[args.index("--expected-legacy-manifest-sha256") + 1] == "b" * 64
+            assert kwargs["timeout"] == 180 and kwargs["check"] is False
             backup = write_snapshot(install, expected, previous)
             for destination, payload in payloads.items():
                 target = install.joinpath(*destination.split("/"))
@@ -331,6 +339,7 @@ def test_complete_update_proves_new_install_and_full_rollback(monkeypatch):
                 "result": "HOST_UPDATE_OK",
                 "source_commit": m.RULES_COMMIT,
                 "rules_version": m.RULES_VERSION,
+                "noteri_wsl_inventory_profile": True,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "host": m.EXPECTED_HOST,
                 "install_root": str(install),
@@ -345,10 +354,12 @@ def test_complete_update_proves_new_install_and_full_rollback(monkeypatch):
             return SimpleNamespace(returncode=0, stderr="")
 
         monkeypatch.setattr(m.socket, "gethostname", lambda: "Noteri")
-        monkeypatch.setattr(m, "is_admin", lambda: True)
+        monkeypatch.setattr(m, "is_admin", lambda: pytest.fail("no UAC or admin escalation"))
         monkeypatch.setattr(m, "fetch", fake_fetch)
         monkeypatch.setattr(m.subprocess, "run", fake_updater)
-        result = m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution())
+        result = m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution(),
+                                legacy_receipt_sha256="a" * 64,
+                                legacy_manifest_sha256="b" * 64)
         assert result["result"] == "NOTERI_GATEWAY_REFRESHED"
         run_receipt = json.loads(
             (install / m.RUN_RECEIPT_NAME).read_text(encoding="utf-8")
@@ -368,7 +379,9 @@ def test_stale_successful_subprocess_receipt_is_rejected(monkeypatch):
         monkeypatch.setattr(m, "fetch", lambda path, *_args: manifest if path == "MANIFEST.json" else b"script")
         monkeypatch.setattr(m.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stderr=""))
         with pytest.raises(m.RefreshError, match="nao foi renovado"):
-            m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution())
+            m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution(),
+                           legacy_receipt_sha256="a" * 64,
+                           legacy_manifest_sha256="b" * 64)
 
 
 def test_atomic_json_cleans_owned_temp_but_preserves_divergent(monkeypatch):
@@ -400,6 +413,8 @@ def test_updater_failure_never_creates_run_receipt(monkeypatch):
         monkeypatch.setattr(m, "fetch", lambda path, *_args: manifest if path == "MANIFEST.json" else b"payload")
         monkeypatch.setattr(m.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=28, stderr="HOST_UPDATE_BLOCKED"))
         with pytest.raises(m.RefreshError, match="updater_failed:28"):
-            m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution())
+            m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution(),
+                           legacy_receipt_sha256="a" * 64,
+                           legacy_manifest_sha256="b" * 64)
         assert not (install / m.RUN_RECEIPT_NAME).exists()
 
