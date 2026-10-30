@@ -143,6 +143,29 @@ def test_failure_readback_detects_late_recovery_ambiguity(tmp_path, monkeypatch)
         m.inventory(root, original, "0" * 64, primary_sha)
 
 
+def test_failure_readback_detects_stable_name_reclassification(tmp_path, monkeypatch):
+    monkeypatch.setattr(m, "host_context", lambda: ("nt", "Noteri"))
+    root, original, _ = _fixture(tmp_path)
+    primary_sha = hashlib.sha256((root / "update-receipt.json").read_bytes()).hexdigest()
+    _write_current_recovery(root, "b" * 32)
+    _write_current_recovery(root, "c" * 32)
+    ignored = root / f"update-recovery-{'c' * 32}.json"
+    ignored_receipt = json.loads(ignored.read_text())
+    ignored_receipt["source_commit"] = m.EXPECTED_PRIMARY_SOURCE_COMMIT
+    ignored.write_text(json.dumps(ignored_receipt), encoding="utf-8")
+    original_evidence = m._recovery_evidence
+
+    def reclassifying_evidence(target):
+        changed = json.loads(ignored.read_text())
+        changed["source_commit"] = m.CURRENT_DIAGNOSTIC_RULES_SHA
+        ignored.write_text(json.dumps(changed), encoding="utf-8")
+        return original_evidence(target)
+
+    monkeypatch.setattr(m, "_recovery_evidence", reclassifying_evidence)
+    with pytest.raises(m.ReadbackBlocked, match="EVIDENCE_CHANGED"):
+        m.inventory(root, original, "0" * 64, primary_sha)
+
+
 def test_failure_readback_rejects_ambiguous_current_recoveries(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "host_context", lambda: ("nt", "Noteri"))
     root, original, _ = _fixture(tmp_path)
