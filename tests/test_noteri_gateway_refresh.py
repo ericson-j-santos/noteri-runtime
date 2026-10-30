@@ -122,12 +122,12 @@ def seed_current_receipt(monkeypatch, root: Path):
 
 
 def test_contract_is_fixed():
-    assert m.RULES_COMMIT == "7d6ec0742ce9570408e8f3673a4f3c65c6777eb0"
+    assert m.RULES_COMMIT == "b5ade370fa11877ff7b899b5c6feacc3bfaf34e7"
     assert m.RULES_VERSION == "1.6.19"
-    assert m.MANIFEST_SHA256 == "ffe7ba9c79f57952cec2e41d2476e470b16dbd8b7514f1bc7b5418b800c1b3e2"
+    assert m.MANIFEST_SHA256 == "fbf4af678a11111b8a895bee1f19211523f0bdcb292838f64e252ab67d37f96c"
     assert m.INSTALL_ROOT == Path(r"C:\dev\chatgpt-command-gateway")
-    assert m.INSTALL_SHA256 == "73ef3c091a16a261dfe71fa0ac7bb2e2c6a7f07bdfa3bc592c44855751c92329"
-    assert m.UPDATE_SHA256 == "e4961e1efeb38a9c763ead8f3900d392942421c495cdd8a28e08fb7ceb0d92fe"
+    assert m.INSTALL_SHA256 == "4b2c200680de7e0db6bd44905a246d7e1773b36d0f516d9756046e758827e35a"
+    assert m.UPDATE_SHA256 == "fa5d03b0cecb46cf02477af4a75c81c57b92d7b609d4bd4abd54f28a7b22b1a2"
     assert m.LEGACY_VERIFY_SHA256 == "b792692d6c86bccccfba9037596d3a7cbd4996e7d560f257194efa020357bef4"
 
 
