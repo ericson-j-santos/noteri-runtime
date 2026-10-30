@@ -256,6 +256,7 @@ jobs:
              (.workflow_sha == $sha) and (.run_id == $run) and
              (.run_attempt == $attempt) and
              (.managed_runtime_changed_by_readback == false) and
+             (.receipt_origin == "recovery") and
              (.source_commit == "b5ade370fa11877ff7b899b5c6feacc3bfaf34e7") and
              (.failure_operation != "legacy_unknown") and
              (.failure_operation | type == "string" and
