@@ -283,6 +283,8 @@ jobs:
     if: github.actor == 'ericson-j-santos' && inputs.mode == 'update'
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 5
+    outputs:
+      failure_evidence: ${{ steps.refresh.outputs.failure_evidence }}
     steps:
       - name: Checkout immutable workflow SHA
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -291,6 +293,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Refresh gateway with fixed contract
+        id: refresh
         shell: powershell
         env:
           EXPECTED_WORKFLOW_SHA: ${{ inputs.expected_workflow_sha }}
@@ -305,7 +308,7 @@ jobs:
           if ($env:EXPECTED_RULES_SHA -ne 'b5ade370fa11877ff7b899b5c6feacc3bfaf34e7') {
             throw 'NOTERI_GATEWAY_SOURCE_SHA_INVALID'
           }
-          python3 scripts/noteri_gateway_refresh.py `
+          $raw = @(& python3 scripts/noteri_gateway_refresh.py `
             --confirm REFRESH-NOTERI-COMMAND-GATEWAY `
             --commit $env:EXPECTED_RULES_SHA `
             --expected-legacy-receipt-sha256 $env:EXPECTED_LEGACY_RECEIPT_SHA256 `
@@ -313,8 +316,134 @@ jobs:
             --workflow-repository $env:GITHUB_REPOSITORY `
             --workflow-sha $env:GITHUB_SHA `
             --workflow-run-id $env:GITHUB_RUN_ID `
-            --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT
-          if ($LASTEXITCODE -ne 0) { throw 'NOTERI_GATEWAY_REFRESH_BLOCKED' }
+            --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT)
+          $exitCode = $LASTEXITCODE
+          if ($raw) { $raw | Write-Output }
+          if ($exitCode -ne 0) {
+            $envelope = $null
+            if ($raw) {
+              try { $envelope = @($raw)[-1] | ConvertFrom-Json } catch { $envelope = $null }
+            }
+            $failurePath = Join-Path $env:RUNNER_TEMP 'noteri-gateway-refresh-failure.json'
+            $failureHash = $null
+            if (Test-Path -LiteralPath $failurePath -PathType Leaf) {
+              $failureHash = (Get-FileHash -LiteralPath $failurePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+            if ($null -ne $envelope -and
+                $envelope.result -eq 'NOTERI_GATEWAY_REFRESH_BLOCKED' -and
+                $envelope.failure_evidence_persisted -eq $true -and
+                $envelope.failure_artifact_name -eq 'noteri-gateway-refresh-failure.json' -and
+                $envelope.failure_evidence_sha256 -match '^[0-9a-f]{64}      - name: Independently read back run evidence and installed hashes
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installRoot = 'C:\dev\chatgpt-command-gateway'
+          function Get-ConfinedRegularFile {
+            param(
+              [Parameter(Mandatory=$true)][string]$Root,
+              [Parameter(Mandatory=$true)][string]$Relative
+            )
+            $rootItem = Get-Item -LiteralPath $Root -Force
+            if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw ('reparse root rejected: ' + $Root)
+            }
+            $rootResolved = (Resolve-Path -LiteralPath $Root).Path.TrimEnd('\')
+            $current = $rootResolved
+            foreach ($part in ($Relative -split '/')) {
+              if ([string]::IsNullOrWhiteSpace($part) -or $part -eq '.' -or $part -eq '..') {
+                throw ('invalid relative path: ' + $Relative)
+              }
+              $current = Join-Path $current $part
+              $item = Get-Item -LiteralPath $current -Force
+              if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw ('reparse component rejected: ' + $Relative)
+              }
+              $resolved = (Resolve-Path -LiteralPath $current).Path
+              $prefix = $rootResolved + '\'
+              if (-not $resolved.StartsWith(
+                    $prefix, [StringComparison]::OrdinalIgnoreCase) -and
+                  $resolved -ne $rootResolved) {
+                throw ('path escaped root: ' + $Relative)
+              }
+            }
+            if (-not (Test-Path -LiteralPath $current -PathType Leaf)) {
+              throw ('regular file missing: ' + $Relative)
+            }
+            return $current
+          }
+          $p = Join-Path $installRoot 'refresh-run-receipt.json'
+          if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { throw 'run receipt missing' }
+          $r = Get-Content -LiteralPath $p -Raw | ConvertFrom-Json
+          $allowed = @(
+            'NOTERI_GATEWAY_REFRESHED',
+            'NOTERI_GATEWAY_ALREADY_CURRENT_VERIFIED'
+          )
+          if ($r.result -notin $allowed) { throw 'run result invalid' }
+          if ($r.result -eq 'NOTERI_GATEWAY_REFRESHED' -and
+              $r.installation_performed_by_run -ne $true) {
+            throw 'new installation proof missing'
+          }
+          if ($r.result -eq 'NOTERI_GATEWAY_ALREADY_CURRENT_VERIFIED' -and
+              $r.installation_performed_by_run -ne $false) {
+            throw 'old installation was reassigned to current run'
+          }
+          if ($r.host -ne 'Noteri') { throw 'host mismatch' }
+          if ($r.source_commit -ne 'b5ade370fa11877ff7b899b5c6feacc3bfaf34e7') { throw 'source commit mismatch' }
+          if ($r.rules_version -ne '1.6.19') { throw 'rules version mismatch' }
+          if ($r.noteri_wsl_inventory_profile -ne $true) { throw 'Noteri profile missing' }
+          if ($r.validation_head -ne $r.source_commit) { throw 'validation head mismatch' }
+          if ($r.install_root -ne $installRoot) { throw 'install root mismatch' }
+          if ($r.workflow_repository -ne $env:GITHUB_REPOSITORY -or
+              $r.workflow_sha -ne $env:GITHUB_SHA -or
+              [string]$r.workflow_run_id -ne $env:GITHUB_RUN_ID -or
+              [string]$r.workflow_run_attempt -ne $env:GITHUB_RUN_ATTEMPT) {
+            throw 'workflow execution identity mismatch'
+          }
+          $expectedFiles = @(
+            'bin/command_gateway.py',
+            'bin/host_health_check.py',
+            'bin/session_bootstrap.py',
+            'bin/session_preflight.py',
+            'bin/session_launcher.py',
+            'bin/runner_version_preflight.py',
+            'config/policy.json'
+          )
+          $properties = @($r.files.PSObject.Properties)
+          if ($properties.Count -ne $expectedFiles.Count) { throw 'managed file count mismatch' }
+          foreach ($relative in $expectedFiles) {
+            $property = $r.files.PSObject.Properties[$relative]
+            if ($null -eq $property) { throw ('managed file missing: ' + $relative) }
+            $target = Get-ConfinedRegularFile -Root $installRoot -Relative $relative
+            $item = Get-Item -LiteralPath $target
+            $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne $property.Value.sha256 -or
+                [int64]$item.Length -ne [int64]$property.Value.size) {
+              throw ('installed file hash mismatch: ' + $relative)
+            }
+          }
+          $rollbackManifest = Get-ConfinedRegularFile `
+            -Root ([string]$r.backup_dir) `
+            -Relative 'rollback-manifest.json'
+          $rollbackHash = (Get-FileHash -LiteralPath $rollbackManifest -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($rollbackHash -ne $r.rollback_manifest_sha256) {
+            throw 'rollback manifest changed after verification'
+          }
+          Write-Host ('NOTERI_GATEWAY_READBACK_OK result=' + $r.result)
+
+ -and
+                $envelope.failure_evidence_sha256 -eq $failureHash) {
+              'failure_evidence=true' | Add-Content $env:GITHUB_OUTPUT
+            }
+            throw 'NOTERI_GATEWAY_REFRESH_BLOCKED'
+          }
+      - name: Preserve sanitized updater failure evidence
+        if: failure() && steps.refresh.outputs.failure_evidence == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: noteri-gateway-refresh-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/noteri-gateway-refresh-failure.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Independently read back run evidence and installed hashes
         shell: powershell
         run: |
@@ -412,3 +541,85 @@ jobs:
           }
           Write-Host ('NOTERI_GATEWAY_READBACK_OK result=' + $r.result)
 
+
+  refresh_failure_readback:
+    name: Independent sanitized updater failure readback
+    needs: refresh
+    if: always() && inputs.mode == 'update' && needs.refresh.outputs.failure_evidence == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Download exact updater failure artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: noteri-gateway-refresh-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: _refresh_failure
+      - name: Verify sanitized failure contract and producer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_WORKFLOW_SHA: ${{ inputs.expected_workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_SHA" = "$EXPECTED_WORKFLOW_SHA"
+          jq -e --arg sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" \
+            --arg attempt "$GITHUB_RUN_ATTEMPT" --arg repo "$GITHUB_REPOSITORY" \
+            '((keys | sort) == [
+                "evidence_authenticated", "failure_category", "failure_operation",
+                "failure_os_error", "failure_type",
+                "managed_runtime_changed_by_capture", "mutation_started", "phase",
+                "result", "rollback_attempted", "rollback_succeeded",
+                "source_commit", "transaction_id", "updater_exit_code",
+                "updater_result", "version", "workflow_repository",
+                "workflow_run_attempt", "workflow_run_id", "workflow_sha"
+              ]) and
+             (.version == 1) and
+             (.result == "NOTERI_GATEWAY_REFRESH_BLOCKED") and
+             (.workflow_repository == $repo) and (.workflow_sha == $sha) and
+             ((.workflow_run_id | tostring) == $run) and
+             ((.workflow_run_attempt | tostring) == $attempt) and
+             (.managed_runtime_changed_by_capture == false) and
+             (.source_commit == "b5ade370fa11877ff7b899b5c6feacc3bfaf34e7") and
+             (.updater_exit_code | type == "number") and
+             (.updater_exit_code != 0) and
+             (.evidence_authenticated | type == "boolean") and
+             ((.failure_os_error | keys | sort) == ["errno", "winerror"]) and
+             (if .evidence_authenticated then
+                (.updater_exit_code == 28) and
+                (.updater_result == "HOST_UPDATE_BLOCKED" or
+                 .updater_result == "HOST_UPDATE_LEGACY_PREFLIGHT_BLOCKED") and
+                (.transaction_id | test("^[0-9a-f]{32}$")) and
+                (.phase | test("^[a-z][a-z0-9_]{0,63}$")) and
+                (.failure_type | test("^[A-Za-z][A-Za-z0-9_]{0,63}$")) and
+                ((.failure_category == null) or
+                 (.failure_category | test("^[a-z][a-z0-9_]{0,63}$"))) and
+                ((.failure_operation == null) or
+                 (.failure_operation | test("^[a-z][a-z0-9_]{0,63}$"))) and
+                ((.failure_os_error.errno == null) or
+                 ((.failure_os_error.errno | type == "number") and
+                  .failure_os_error.errno >= -2147483648 and
+                  .failure_os_error.errno <= 2147483647)) and
+                ((.failure_os_error.winerror == null) or
+                 ((.failure_os_error.winerror | type == "number") and
+                  .failure_os_error.winerror >= -2147483648 and
+                  .failure_os_error.winerror <= 2147483647)) and
+                (.mutation_started | type == "boolean") and
+                (.rollback_attempted | type == "boolean") and
+                ((.rollback_succeeded == null) or
+                 (.rollback_succeeded | type == "boolean"))
+              else
+                (.updater_result == null) and (.transaction_id == null) and
+                (.phase == null) and (.failure_type == null) and
+                (.failure_category == null) and (.failure_operation == null) and
+                (.failure_os_error == {"errno": null, "winerror": null}) and
+                (.mutation_started == null) and (.rollback_attempted == null) and
+                (.rollback_succeeded == null)
+              end)' \
+            _refresh_failure/noteri-gateway-refresh-failure.json >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+            | jq -e '[.jobs[] | select(.name == "refresh" and
+                .conclusion == "failure" and
+                (.runner_name | ascii_downcase | startswith("noteri")))] | length == 1' >/dev/null
+          echo NOTERI_GATEWAY_REFRESH_FAILURE_INDEPENDENT_READBACK_OK
