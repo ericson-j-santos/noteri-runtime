@@ -74,6 +74,20 @@ def test_failure_readback_preserves_old_content_and_sanitizes_error(tmp_path, mo
     assert "error" not in report
 
 
+
+def test_current_rules_receipt_requires_operation_and_os_codes(tmp_path, monkeypatch):
+    monkeypatch.setattr(m, "host_context", lambda: ("nt", "Noteri"))
+    root, original, _ = _fixture(tmp_path)
+    receipt_path = root / "update-receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["source_commit"] = m.CURRENT_DIAGNOSTIC_RULES_SHA
+    receipt["failure"].pop("operation")
+    receipt["failure"].pop("os_error")
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    with pytest.raises(m.ReadbackBlocked, match="FAILURE_OPERATION_INVALID"):
+        m.inventory(root, original, "0" * 64)
+
+
 def test_failure_readback_reports_divergent_content_without_false_success(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "host_context", lambda: ("nt", "Noteri"))
     root, original, _ = _fixture(tmp_path, current=b"new")
