@@ -277,7 +277,10 @@ def _authenticate_updater_failure(candidate: object, returncode: int) -> dict | 
             or not isinstance(failure, dict)
             or not isinstance(candidate.get("mutation_started"), bool)
             or not isinstance(candidate.get("rollback_attempted"), bool)
-            or candidate.get("rollback_succeeded") not in (None, True, False)
+            or (
+                candidate.get("rollback_succeeded") is not None
+                and not isinstance(candidate.get("rollback_succeeded"), bool)
+            )
         ):
             return None
         failure_type = failure.get("type")
