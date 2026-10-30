@@ -1,0 +1,173 @@
+name: Noteri Gateway Forensic Readonly
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_workflow_sha:
+        description: Exact Noteri main SHA
+        type: string
+        required: true
+      expected_rules_sha:
+        description: Exact immutable canonical rules commit
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: noteri-gateway-forensic-readonly
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    name: Noteri physical risk1 forensic inspection
+    if: github.actor == 'ericson-j-santos'
+    runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
+    timeout-minutes: 7
+    env:
+      EXPECTED_WORKFLOW_SHA: ${{ inputs.expected_workflow_sha }}
+      EXPECTED_RULES_SHA: ${{ inputs.expected_rules_sha }}
+      CORRELATION_ID: noteri-gateway-forensic-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout immutable Noteri source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout immutable canonical rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: 78e6706bfbf606945543983305480343d04977f8
+          path: _rules
+          persist-credentials: false
+      - name: Establish governed session and exact host/SHA identity
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_SHA -ne $env:EXPECTED_WORKFLOW_SHA -or
+              $env:EXPECTED_RULES_SHA -ne '78e6706bfbf606945543983305480343d04977f8' -or
+              $env:COMPUTERNAME -ine 'Noteri' -or
+              -not $env:RUNNER_NAME.ToLowerInvariant().StartsWith('noteri')) {
+            throw 'NOTERI_GATEWAY_FORENSIC_IDENTITY_BLOCKED'
+          }
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $args = @('--policy', (Join-Path $rules 'config/command-gateway.policy.json'),
+            '--repo', $env:GITHUB_WORKSPACE,
+            '--session-prefix', 'noteri-gateway-forensic',
+            '--correlation-id', $env:CORRELATION_ID,
+            '--expected-head', $env:EXPECTED_WORKFLOW_SHA,
+            '--sync-ref', 'origin/main',
+            '--require-runner-version-preflight')
+          $raw = @(& python3 -B (Join-Path $rules 'scripts/session_launcher.py') @args)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'NOTERI_GATEWAY_FORENSIC_SESSION_BLOCKED' }
+          $session = @($raw)[-1] | ConvertFrom-Json
+          if ($session.result -ne 'SESSION_LAUNCH_OK' -or
+              $session.state_validated -ne $true -or
+              $session.head -ne $env:EXPECTED_WORKFLOW_SHA -or
+              $session.runner_version_preflight.ok -ne $true) {
+            throw 'NOTERI_GATEWAY_FORENSIC_SESSION_INVALID'
+          }
+          "target=$($session.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session=$($session.session_id)" | Add-Content $env:GITHUB_OUTPUT
+      - name: Inspect journal and Windows metadata through risk1 Gateway
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $args = @('--policy', (Join-Path $rules 'config/command-gateway.policy.json'),
+            '--correlation-id', $env:CORRELATION_ID,
+            'run', '--cwd', $env:TARGET_PATH,
+            '--session-id', $env:SESSION_ID, '--risk', '1', '--timeout', '30',
+            '--expected-head', $env:EXPECTED_WORKFLOW_SHA,
+            '--', 'python3', '-B',
+            (Join-Path $env:TARGET_PATH 'scripts/noteri_gateway_forensic_inventory.py'),
+            '--canonical-helper-path', (Join-Path $rules 'scripts/install_command_gateway_host.py'))
+          $raw = @(& python3 -B (Join-Path $rules 'scripts/command_gateway.py') @args)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'NOTERI_GATEWAY_FORENSIC_READ_BLOCKED' }
+          $envelope = @($raw)[-1] | ConvertFrom-Json
+          if ($envelope.result -ne 'ok' -or $envelope.gateway_exit_code -ne 0 -or
+              $envelope.command_exit_code -ne 0 -or $envelope.state_changed -ne $false) {
+            throw 'NOTERI_GATEWAY_FORENSIC_GATEWAY_INVALID'
+          }
+          $report = $envelope.stdout | ConvertFrom-Json
+          if ($report.result -ne 'NOTERI_GATEWAY_FORENSIC_READONLY' -or
+              $report.journal_bound_to_incident -ne $true -or
+              $report.recovery_authorized -ne $false -or
+              $report.host_ready -ne $false -or
+              $report.managed_runtime_changed -ne $false -or
+              $report.forensic_contract -ne 'noteri-gateway-journal-windows-v1') {
+            throw 'NOTERI_GATEWAY_FORENSIC_REPORT_INVALID'
+          }
+          $report | Add-Member -NotePropertyName workflow_sha -NotePropertyValue $env:GITHUB_SHA
+          $report | Add-Member -NotePropertyName rules_sha -NotePropertyValue $env:EXPECTED_RULES_SHA
+          $report | Add-Member -NotePropertyName run_id -NotePropertyValue $env:GITHUB_RUN_ID
+          $report | Add-Member -NotePropertyName run_attempt -NotePropertyValue $env:GITHUB_RUN_ATTEMPT
+          $report | Add-Member -NotePropertyName host -NotePropertyValue $env:COMPUTERNAME
+          $report | Add-Member -NotePropertyName session_id -NotePropertyValue $env:SESSION_ID
+          $report | Add-Member -NotePropertyName correlation_id -NotePropertyValue $env:CORRELATION_ID
+          $report | ConvertTo-Json -Depth 8 -Compress |
+            Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'noteri-gateway-forensic.json') -Encoding UTF8
+          Write-Output 'NOTERI_GATEWAY_FORENSIC_READONLY_OK'
+      - name: Preserve sanitized non-promoting forensic receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: noteri-gateway-forensic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/noteri-gateway-forensic.json
+          retention-days: 7
+          if-no-files-found: error
+
+  independent_readback:
+    name: GitHub-hosted independent receipt readback
+    needs: inspect
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Read same-run forensic artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: noteri-gateway-forensic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: _forensic_readback
+      - name: Validate receipt, host, journal and non-promoting state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_WORKFLOW_SHA: ${{ inputs.expected_workflow_sha }}
+          EXPECTED_RULES_SHA: ${{ inputs.expected_rules_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_SHA" = "$EXPECTED_WORKFLOW_SHA"
+          test "$EXPECTED_RULES_SHA" = '78e6706bfbf606945543983305480343d04977f8'
+          jq -e --arg sha "$GITHUB_SHA" --arg rules "$EXPECTED_RULES_SHA" \
+            --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            '(.result == "NOTERI_GATEWAY_FORENSIC_READONLY") and
+             (.forensic_contract == "noteri-gateway-journal-windows-v1") and
+             (.workflow_sha == $sha) and (.rules_sha == $rules) and
+             (.run_id == $run) and (.run_attempt == $attempt) and
+             ((.host | ascii_downcase) == "noteri") and
+             ((.session_id | length) > 0) and
+             (.journal_present == true) and (.journal_bound_to_incident == true) and
+             (.journal_sha256 | test("^[0-9a-f]{64}$")) and
+             (.rollback_manifest_sha256 == "2a689e8d3696368c08128da2b3ac4c1f15760005462de615f9b27d2e233f6e09") and
+             (.metadata_contract == "windows-owner-group-dacl-ads-v1") and
+             (.metadata_assessment == "MATCH" or .metadata_assessment == "DIVERGENT") and
+             ((.metadata_states | length) == 7) and
+             (.recovery_authorized == false) and
+             (.host_ready == false) and
+             (.managed_runtime_changed == false)' \
+            _forensic_readback/noteri-gateway-forensic.json >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
+            | jq -e '[.jobs[] | select(.name == "Noteri physical risk1 forensic inspection" and
+                .conclusion == "success" and
+                (.runner_name | ascii_downcase | startswith("noteri")))] | length == 1' >/dev/null
+          echo NOTERI_GATEWAY_FORENSIC_INDEPENDENT_READBACK_OK
