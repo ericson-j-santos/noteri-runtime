@@ -67,3 +67,88 @@ jobs:
         run: python -m pytest -q tests/test_noteri_sql_application_eventlog_workflow_powershell.py -k windows_powershell_51
       - name: Test real forensic receipt encoding in hosted Windows PowerShell 5.1
         run: python -m pytest -q tests/test_noteri_gateway_forensic_job_outputs_windows.py
+
+  forensic_synthetic_windows:
+    name: Synthetic forensic receipt / Windows producer
+    runs-on: windows-latest
+    timeout-minutes: 4
+    env:
+      EVALUATED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+    outputs:
+      receipt_b64: ${{ steps.produce.outputs.receipt_b64 }}
+      receipt_sha256: ${{ steps.produce.outputs.receipt_sha256 }}
+    steps:
+      - name: Checkout exact evaluated SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ env.EVALUATED_SHA }}
+          persist-credentials: false
+      - name: Verify exact checkout
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD).Trim() -ne $env:EVALUATED_SHA) { throw 'SHA_MISMATCH' }
+      - name: Emit strictly synthetic non-promoting receipt
+        id: produce
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $report = [ordered]@{
+            result = 'NOTERI_GATEWAY_FORENSIC_READONLY'
+            journal_sha256 = ('a' * 64)
+            metadata_assessment = 'DIVERGENT'
+            metadata_states = @{
+              'bin/command_gateway.py' = @{
+                current = $false; backup = $true; preexisting = $true
+              }
+            }
+            host_ready = $false
+            recovery_authorized = $false
+            managed_runtime_changed = $false
+            synthetic_test_only = $true
+          }
+          $json = [string]($report | ConvertTo-Json -Depth 8 -Compress)
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+          if ($bytes.Length -lt 100 -or $bytes.Length -gt 8192) { throw 'SIZE_INVALID' }
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          try {
+            $digest = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+          } finally { $sha.Dispose() }
+          "receipt_b64=$([Convert]::ToBase64String($bytes))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          "receipt_sha256=$digest" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+
+  forensic_synthetic_linux:
+    name: Synthetic forensic receipt / cross-runner readback
+    needs: forensic_synthetic_windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    env:
+      RECEIPT_B64: ${{ needs.forensic_synthetic_windows.outputs.receipt_b64 }}
+      RECEIPT_SHA256: ${{ needs.forensic_synthetic_windows.outputs.receipt_sha256 }}
+    steps:
+      - name: Prove real job outputs and controls against false positive
+        run: |
+          set -euo pipefail
+          verify() {
+            local b64="$1" digest="$2" observed
+            test -n "$b64" || return 1
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+            observed="$(printf '%s' "$b64" | base64 --decode | sha256sum | cut -d' ' -f1)" || return 1
+            test "$observed" = "$digest"
+          }
+          verify "$RECEIPT_B64" "$RECEIPT_SHA256"
+          if verify "" "$RECEIPT_SHA256"; then
+            echo 'MISSING_OUTPUT_FALSE_POSITIVE'
+            exit 2
+          fi
+          if verify "$RECEIPT_B64" '0000000000000000000000000000000000000000000000000000000000000000'; then
+            echo 'TAMPERED_OUTPUT_FALSE_POSITIVE'
+            exit 3
+          fi
+          printf '%s' "$RECEIPT_B64" | base64 --decode |
+            jq -e '(.synthetic_test_only == true) and
+              (.result == "NOTERI_GATEWAY_FORENSIC_READONLY") and
+              (.metadata_assessment == "DIVERGENT") and
+              (.metadata_states["bin/command_gateway.py"].current == false) and
+              (.host_ready == false) and (.recovery_authorized == false) and
+              (.managed_runtime_changed == false)' >/dev/null
+          echo FORENSIC_SYNTHETIC_CROSS_JOB_READBACK_OK

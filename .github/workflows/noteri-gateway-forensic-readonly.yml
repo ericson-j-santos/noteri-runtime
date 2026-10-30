@@ -181,7 +181,16 @@ jobs:
              (.rollback_manifest_sha256 == "2a689e8d3696368c08128da2b3ac4c1f15760005462de615f9b27d2e233f6e09") and
              (.metadata_contract == "windows-owner-group-dacl-ads-v1") and
              (.metadata_assessment == "MATCH" or .metadata_assessment == "DIVERGENT") and
-             ((.metadata_states | length) == 7) and
+             ((.metadata_states | keys) == [
+                "bin/command_gateway.py", "bin/host_health_check.py",
+                "bin/runner_version_preflight.py", "bin/session_bootstrap.py",
+                "bin/session_launcher.py", "bin/session_preflight.py",
+                "config/policy.json"
+              ]) and
+             (.metadata_states | to_entries | all(.[];
+                 ((.value.current | type) == "boolean") and
+                 ((.value.backup | type) == "boolean") and
+                 ((.value.preexisting | type) == "boolean"))) and
              (.recovery_authorized == false) and
              (.host_ready == false) and
              (.managed_runtime_changed == false)' \
@@ -190,10 +199,19 @@ jobs:
             | jq -e '[.jobs[] | select(.name == "Noteri physical risk1 forensic inspection" and
                 .conclusion == "success" and
                 (.runner_name | ascii_downcase | startswith("noteri")))] | length == 1' >/dev/null
-          # Hash e fatos estritamente sanitizados ficam no log e summary do run.
+          # Publica somente 7 paths fixos e booleanos por arquivo; nunca DACL/SID/ADS.
           echo "Receipt SHA256: $RECEIPT_SHA256"
-          jq -c '{result, journal_sha256, metadata_assessment, metadata_checked_files,
+          jq -c '{result, workflow_sha, run_id, run_attempt, correlation_id,
+             journal_sha256, metadata_assessment, metadata_checked_files, metadata_states,
              all_previous_content, all_previous_windows_metadata, backup_windows_metadata_intact,
-             host_ready, recovery_authorized, managed_runtime_changed}'              _forensic_readback/noteri-gateway-forensic.json
-          printf 'Noteri Gateway forensics (read-only): SHA256 %s\n' "$RECEIPT_SHA256" >> "$GITHUB_STEP_SUMMARY"
+             host_ready, recovery_authorized, managed_runtime_changed}' \
+             _forensic_readback/noteri-gateway-forensic.json
+          {
+            printf 'Noteri Gateway forensic run %s, receipt SHA256 %s\n' "$GITHUB_RUN_ID" "$RECEIPT_SHA256"
+            printf '| Managed path | Current matches | Backup matches | Existed |\n'
+            printf '|---|---|---|---|\n'
+            jq -r '.metadata_states | to_entries | sort_by(.key)[] |
+              "| \(.key) | \(.value.current) | \(.value.backup) | \(.value.preexisting) |"' \
+              _forensic_readback/noteri-gateway-forensic.json
+          } >> "$GITHUB_STEP_SUMMARY"
           echo NOTERI_GATEWAY_FORENSIC_INDEPENDENT_READBACK_OK
