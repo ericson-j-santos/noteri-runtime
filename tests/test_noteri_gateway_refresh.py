@@ -4,7 +4,9 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -659,3 +661,43 @@ def test_workflow_preserves_failure_artifact_without_retry_or_success_promotion(
     assert ".managed_runtime_changed_by_capture == false" in workflow
     assert "throw 'NOTERI_GATEWAY_REFRESH_BLOCKED'" in workflow
     assert "continue-on-error" not in workflow
+
+
+def test_refresh_workflow_powershell_block_parses():
+    yaml = pytest.importorskip("yaml")
+    workflow_path = (
+        Path(__file__).resolve().parents[1]
+        / ".github/workflows/noteri-command-gateway-refresh.yml"
+    )
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["refresh"]["steps"]
+    matches = [
+        step["run"]
+        for step in steps
+        if step.get("name") == "Refresh gateway with fixed contract"
+    ]
+    assert len(matches) == 1
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell parser unavailable")
+    parser = """
+$source = [Console]::In.ReadToEnd()
+$tokens = $null
+$errors = $null
+[System.Management.Automation.Language.Parser]::ParseInput(
+  $source, [ref]$tokens, [ref]$errors
+) | Out-Null
+if ($errors.Count -ne 0) {
+  $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }
+  exit 1
+}
+"""
+    completed = subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-Command", parser],
+        input=matches[0],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
