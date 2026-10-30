@@ -31,6 +31,7 @@ LEGACY_VERIFY_SHA256 = "b792692d6c86bccccfba9037596d3a7cbd4996e7d560f257194efa02
 INSTALL_ROOT = Path(r"C:\dev\chatgpt-command-gateway")
 WORK_ROOT = Path(r"C:\dev\chatgpt-workers")
 RUN_RECEIPT_NAME = "refresh-run-receipt.json"
+FAILURE_ARTIFACT_NAME = "noteri-gateway-refresh-failure.json"
 RUNTIME_MAP = {
     "scripts/command_gateway.py": "bin/command_gateway.py",
     "scripts/host_health_check.py": "bin/host_health_check.py",
@@ -43,10 +44,28 @@ RUNTIME_MAP = {
 MANAGED_FILES = set(RUNTIME_MAP.values())
 HEAD_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+TRANSACTION_RE = re.compile(r"^[0-9a-f]{32}$")
+TOKEN_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+FAILURE_RESULTS = frozenset({
+    "HOST_UPDATE_BLOCKED",
+    "HOST_UPDATE_LEGACY_PREFLIGHT_BLOCKED",
+})
+MAX_UPDATER_STDERR_BYTES = 256 * 1024
+MAX_UPDATER_LINE_BYTES = 32 * 1024
+MIN_OS_ERROR = -(2 ** 31)
+MAX_OS_ERROR = 2 ** 31 - 1
 
 
 class RefreshError(RuntimeError):
     pass
+
+
+class UpdaterBlocked(RefreshError):
+    def __init__(self, returncode: int, evidence: dict) -> None:
+        super().__init__(f"updater_failed:{returncode}")
+        self.returncode = returncode
+        self.evidence = evidence
 
 
 def sha256(data: bytes) -> str:
@@ -189,6 +208,195 @@ def read_update_receipt() -> tuple[dict, bytes] | None:
     if not isinstance(receipt, dict):
         raise RefreshError("recibo de update invalido")
     return receipt, raw
+
+
+def _strict_json_object(pairs: list[tuple[str, object]]) -> dict:
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate key")
+        value[key] = item
+    return value
+
+
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-finite number")
+
+
+def _optional_token(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not TOKEN_RE.fullmatch(value):
+        raise ValueError("invalid token")
+    return value
+
+
+def _valid_os_code(value: object) -> bool:
+    return value is None or (
+        not isinstance(value, bool)
+        and isinstance(value, int)
+        and MIN_OS_ERROR <= value <= MAX_OS_ERROR
+    )
+
+
+def _unclassified_updater_failure(returncode: int) -> dict:
+    return {
+        "version": 1,
+        "result": "NOTERI_GATEWAY_REFRESH_BLOCKED",
+        "updater_result": None,
+        "source_commit": RULES_COMMIT,
+        "updater_exit_code": returncode,
+        "evidence_authenticated": False,
+        "transaction_id": None,
+        "phase": None,
+        "failure_type": None,
+        "failure_category": None,
+        "failure_operation": None,
+        "failure_os_error": {"errno": None, "winerror": None},
+        "mutation_started": None,
+        "rollback_attempted": None,
+        "rollback_succeeded": None,
+    }
+
+
+def _authenticate_updater_failure(candidate: object, returncode: int) -> dict | None:
+    if not isinstance(candidate, dict) or candidate.get("result") not in FAILURE_RESULTS:
+        return None
+    try:
+        transaction_id = candidate["transaction_id"]
+        phase = candidate["phase"]
+        failure = candidate["failure"]
+        if (
+            returncode != 28
+            or candidate.get("gateway_exit_code") != returncode
+            or candidate.get("source_commit") != RULES_COMMIT
+            or not isinstance(transaction_id, str)
+            or not TRANSACTION_RE.fullmatch(transaction_id)
+            or not isinstance(phase, str)
+            or not TOKEN_RE.fullmatch(phase)
+            or not isinstance(failure, dict)
+            or not isinstance(candidate.get("mutation_started"), bool)
+            or not isinstance(candidate.get("rollback_attempted"), bool)
+            or (
+                candidate.get("rollback_succeeded") is not None
+                and not isinstance(candidate.get("rollback_succeeded"), bool)
+            )
+        ):
+            return None
+        failure_type = failure.get("type")
+        if not isinstance(failure_type, str) or not TYPE_RE.fullmatch(failure_type):
+            return None
+        category = _optional_token(failure.get("category"))
+        operation = _optional_token(failure.get("operation"))
+        source_os_error = failure.get("os_error")
+        if source_os_error is None:
+            errno = winerror = None
+        elif isinstance(source_os_error, dict):
+            errno = source_os_error.get("errno")
+            winerror = source_os_error.get("winerror")
+            if not _valid_os_code(errno) or not _valid_os_code(winerror):
+                return None
+        else:
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return {
+        "version": 1,
+        "result": "NOTERI_GATEWAY_REFRESH_BLOCKED",
+        "updater_result": candidate["result"],
+        "source_commit": RULES_COMMIT,
+        "updater_exit_code": returncode,
+        "evidence_authenticated": True,
+        "transaction_id": transaction_id,
+        "phase": phase,
+        "failure_type": failure_type,
+        "failure_category": category,
+        "failure_operation": operation,
+        "failure_os_error": {"errno": errno, "winerror": winerror},
+        "mutation_started": candidate["mutation_started"],
+        "rollback_attempted": candidate["rollback_attempted"],
+        "rollback_succeeded": candidate.get("rollback_succeeded"),
+    }
+
+
+def sanitize_updater_failure(stderr: object, returncode: int) -> dict:
+    generic = _unclassified_updater_failure(returncode)
+    if not isinstance(stderr, str):
+        return generic
+    encoded = stderr.encode("utf-8", errors="replace")
+    if len(encoded) > MAX_UPDATER_STDERR_BYTES:
+        return generic
+    for line in reversed(stderr.splitlines()):
+        if len(line.encode("utf-8", errors="replace")) > MAX_UPDATER_LINE_BYTES:
+            continue
+        try:
+            candidate = json.loads(
+                line,
+                object_pairs_hook=_strict_json_object,
+                parse_constant=_reject_json_constant,
+            )
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        authenticated = _authenticate_updater_failure(candidate, returncode)
+        if authenticated is not None:
+            return authenticated
+    return generic
+
+
+def bind_failure_evidence(
+    evidence: dict, *, repository: str, workflow_sha: str,
+    run_id: int, run_attempt: int,
+) -> dict:
+    validate_execution(repository, workflow_sha, run_id, run_attempt)
+    return {
+        **evidence,
+        "workflow_repository": repository,
+        "workflow_sha": workflow_sha,
+        "workflow_run_id": run_id,
+        "workflow_run_attempt": run_attempt,
+        "managed_runtime_changed_by_capture": False,
+    }
+
+
+def persist_failure_evidence(artifact: dict) -> tuple[Path, str]:
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    if not runner_temp:
+        raise RefreshError("runner_temp_unavailable")
+    root = Path(runner_temp)
+    observed = os.lstat(root)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or _is_reparse_point(observed)
+        or not stat.S_ISDIR(observed.st_mode)
+    ):
+        raise RefreshError("runner_temp_invalid")
+    target = root / FAILURE_ARTIFACT_NAME
+    if os.path.lexists(target):
+        raise RefreshError("failure_artifact_already_exists")
+    raw = (json.dumps(artifact, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
+    with target.open("xb") as handle:
+        handle.write(raw)
+        handle.flush()
+        os.fsync(handle.fileno())
+    reread = target.read_bytes()
+    target_stat = os.lstat(target)
+    try:
+        decoded = json.loads(
+            reread.decode("utf-8"),
+            object_pairs_hook=_strict_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise RefreshError("failure_artifact_readback_invalid") from exc
+    if (
+        reread != raw
+        or decoded != artifact
+        or stat.S_ISLNK(target_stat.st_mode)
+        or _is_reparse_point(target_stat)
+        or not stat.S_ISREG(target_stat.st_mode)
+    ):
+        raise RefreshError("failure_artifact_readback_invalid")
+    return target, sha256(reread)
 
 
 def _same_path(left: Path, right: Path) -> bool:
@@ -515,7 +723,8 @@ def run_elevated(
             capture_output=True, text=True, timeout=180, check=False,
         )
         if result.returncode != 0:
-            raise RefreshError(f"updater_failed:{result.returncode}")
+            evidence = sanitize_updater_failure(result.stderr, result.returncode)
+            raise UpdaterBlocked(result.returncode, evidence)
 
     updated = read_update_receipt()
     if updated is None:
@@ -559,9 +768,46 @@ def main() -> int:
             legacy_receipt_sha256=args.expected_legacy_receipt_sha256,
             legacy_manifest_sha256=args.expected_legacy_manifest_sha256,
         )
+    except UpdaterBlocked as exc:
+        artifact = bind_failure_evidence(
+            exc.evidence,
+            repository=args.workflow_repository,
+            workflow_sha=args.workflow_sha,
+            run_id=args.workflow_run_id,
+            run_attempt=args.workflow_run_attempt,
+        )
+        persisted = False
+        evidence_sha256 = None
+        try:
+            _path, evidence_sha256 = persist_failure_evidence(artifact)
+            persisted = True
+        except Exception:
+            persisted = False
+            evidence_sha256 = None
+        output = {
+            "ok": False,
+            "result": "NOTERI_GATEWAY_REFRESH_BLOCKED",
+            "error_type": "UpdaterBlocked",
+            "updater_exit_code": exc.returncode,
+            "failure_evidence": artifact,
+            "failure_evidence_persisted": persisted,
+            "failure_evidence_sha256": evidence_sha256,
+            "failure_artifact_name": FAILURE_ARTIFACT_NAME if persisted else None,
+        }
+    except RefreshError as exc:
+        output = {
+            "ok": False,
+            "result": "NOTERI_GATEWAY_REFRESH_BLOCKED",
+            "error_type": "RefreshError",
+            "error": str(exc)[:160],
+        }
     except Exception as exc:
-        output = {"ok": False, "result": "NOTERI_GATEWAY_REFRESH_BLOCKED",
-                  "error_type": type(exc).__name__, "error": str(exc)[:1000]}
+        output = {
+            "ok": False,
+            "result": "NOTERI_GATEWAY_REFRESH_BLOCKED",
+            "error_type": type(exc).__name__,
+            "error": "unexpected_failure",
+        }
     print(json.dumps(output, sort_keys=True))
     return 0 if output.get("ok") else 3
 

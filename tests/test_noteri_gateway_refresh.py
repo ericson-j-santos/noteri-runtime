@@ -4,7 +4,9 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -405,18 +407,297 @@ def test_atomic_json_cleans_owned_temp_but_preserves_divergent(monkeypatch):
         assert len(leftovers) == 1 and leftovers[0].read_bytes() == b"divergent"
 
 
-def test_updater_failure_never_creates_run_receipt(monkeypatch):
+def blocked_updater_payload():
+    return {
+        "result": "HOST_UPDATE_LEGACY_PREFLIGHT_BLOCKED",
+        "gateway_exit_code": 28,
+        "transaction_id": "b" * 32,
+        "source_commit": m.RULES_COMMIT,
+        "phase": "install_runtime",
+        "error": r"raw C:\\sensitive\\path must not leak",
+        "failure": {
+            "type": "RuntimeInstallError",
+            "category": "install_runtime_os_error",
+            "operation": "activate_stage",
+            "destination": r"C:\\sensitive\\path",
+            "raw_error": "must-not-leak",
+            "os_error": {
+                "errno": 13,
+                "winerror": 5,
+                "strerror": r"C:\\sensitive\\path",
+            },
+        },
+        "mutation_started": True,
+        "rollback_attempted": True,
+        "rollback_succeeded": True,
+        "rollback_error": None,
+    }
+
+
+def blocked_updater_stderr(payload=None):
+    blocked = payload or blocked_updater_payload()
+    warning = {
+        "result": "HOST_UPDATE_LOCK_RELEASE_WARNING",
+        "error": "raw warning must not leak",
+    }
+    return "non-json noise\n" + json.dumps(blocked) + "\n" + json.dumps(warning)
+
+
+def test_updater_failure_is_sanitized_and_never_creates_success_receipt(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         install = Path(tmp) / "install"
         monkeypatch.setattr(m, "INSTALL_ROOT", install)
         manifest, _, _ = canonical_fixture()
+        calls = 0
+
+        def updater(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return SimpleNamespace(returncode=28, stderr=blocked_updater_stderr())
+
         monkeypatch.setattr(m.socket, "gethostname", lambda: "Noteri")
-        monkeypatch.setattr(m, "is_admin", lambda: True)
-        monkeypatch.setattr(m, "fetch", lambda path, *_args: manifest if path == "MANIFEST.json" else b"payload")
-        monkeypatch.setattr(m.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=28, stderr="HOST_UPDATE_BLOCKED"))
-        with pytest.raises(m.RefreshError, match="updater_failed:28"):
-            m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution(),
-                           legacy_receipt_sha256="a" * 64,
-                           legacy_manifest_sha256="b" * 64)
+        monkeypatch.setattr(
+            m, "fetch",
+            lambda path, *_args: manifest if path == "MANIFEST.json" else b"payload",
+        )
+        monkeypatch.setattr(m.subprocess, "run", updater)
+        with pytest.raises(m.UpdaterBlocked, match="updater_failed:28") as caught:
+            m.run_elevated(
+                m.CONFIRM, m.RULES_COMMIT, **execution(),
+                legacy_receipt_sha256="a" * 64,
+                legacy_manifest_sha256="b" * 64,
+            )
+        evidence = caught.value.evidence
+        assert calls == 1
+        assert evidence["evidence_authenticated"] is True
+        assert evidence["phase"] == "install_runtime"
+        assert evidence["failure_type"] == "RuntimeInstallError"
+        assert evidence["failure_category"] == "install_runtime_os_error"
+        assert evidence["failure_operation"] == "activate_stage"
+        assert evidence["failure_os_error"] == {"errno": 13, "winerror": 5}
+        serialized = json.dumps(evidence)
+        for forbidden in (
+            "sensitive", "must-not-leak", "strerror", "destination",
+            "raw_error", "backup_dir", "receipt_path", "rollback_error",
+            "primary_receipt_error",
+        ):
+            assert forbidden not in serialized
         assert not (install / m.RUN_RECEIPT_NAME).exists()
 
+
+def test_reverse_scan_selects_last_authenticated_receipt_before_warning():
+    first = blocked_updater_payload()
+    first["transaction_id"] = "a" * 32
+    first["phase"] = "replaceability_preflight"
+    second = blocked_updater_payload()
+    stderr = "\n".join([
+        json.dumps(first), json.dumps(second),
+        json.dumps({"result": "HOST_UPDATE_LOCK_RELEASE_WARNING"}),
+    ])
+    evidence = m.sanitize_updater_failure(stderr, 28)
+    assert evidence["evidence_authenticated"] is True
+    assert evidence["transaction_id"] == "b" * 32
+    assert evidence["phase"] == "install_runtime"
+
+
+def test_failure_evidence_artifact_is_exclusive_bound_hashed_and_sanitized(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        runner_temp = Path(tmp) / "runner-temp"
+        runner_temp.mkdir()
+        monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
+        evidence = m.sanitize_updater_failure(blocked_updater_stderr(), 28)
+        artifact = m.bind_failure_evidence(evidence, **execution())
+        path, digest = m.persist_failure_evidence(artifact)
+        observed = json.loads(path.read_text(encoding="utf-8"))
+        assert observed == artifact
+        assert artifact["managed_runtime_changed_by_capture"] is False
+        assert path.name == m.FAILURE_ARTIFACT_NAME
+        assert digest == hashlib.sha256(path.read_bytes()).hexdigest()
+        serialized = path.read_text(encoding="utf-8")
+        for forbidden in (
+            "sensitive", "must-not-leak", "strerror", "destination",
+            "raw_error", "backup_dir", "receipt_path", "rollback_error",
+            "primary_receipt_error",
+        ):
+            assert forbidden not in serialized
+        with pytest.raises(m.RefreshError, match="already_exists"):
+            m.persist_failure_evidence(artifact)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda p: p.update(source_commit="0" * 40),
+        lambda p: p.update(result="HOST_UPDATE_OK"),
+        lambda p: p.update(gateway_exit_code=3),
+        lambda p: p.update(transaction_id="bad"),
+        lambda p: p.update(phase="INVALID PHASE"),
+        lambda p: p["failure"].update(type="bad type"),
+        lambda p: p["failure"].update(os_error={"errno": True, "winerror": 5}),
+        lambda p: p["failure"].update(os_error={"errno": 2 ** 40, "winerror": 5}),
+        lambda p: p.update(rollback_succeeded=0),
+    ],
+)
+def test_invalid_updater_failure_evidence_becomes_safe_unclassified(mutate):
+    payload = blocked_updater_payload()
+    mutate(payload)
+    evidence = m.sanitize_updater_failure(blocked_updater_stderr(payload), 28)
+    assert evidence["evidence_authenticated"] is False
+    assert evidence["phase"] is None
+    assert evidence["failure_type"] is None
+    assert evidence["failure_os_error"] == {"errno": None, "winerror": None}
+
+
+def test_duplicate_nonfinite_oversized_and_success_json_are_unclassified():
+    duplicate = '{"result":"HOST_UPDATE_BLOCKED","result":"HOST_UPDATE_BLOCKED"}'
+    nonfinite = '{"result":"HOST_UPDATE_BLOCKED","gateway_exit_code":NaN}'
+    too_long = "x" * (m.MAX_UPDATER_LINE_BYTES + 1)
+    too_large = "x\n" * (m.MAX_UPDATER_STDERR_BYTES // 2 + 1)
+    success = json.dumps({"result": "HOST_UPDATE_OK", "source_commit": m.RULES_COMMIT})
+    for stderr in (duplicate, nonfinite, too_long, too_large, success):
+        evidence = m.sanitize_updater_failure(stderr, 28)
+        assert evidence["evidence_authenticated"] is False
+        assert evidence["updater_result"] is None
+
+
+def test_missing_blocked_json_and_other_exit_code_are_unclassified():
+    warning = json.dumps({"result": "HOST_UPDATE_LOCK_RELEASE_WARNING"})
+    assert m.sanitize_updater_failure(warning, 28)["evidence_authenticated"] is False
+    evidence = m.sanitize_updater_failure(blocked_updater_stderr(), 7)
+    assert evidence["evidence_authenticated"] is False
+    assert evidence["updater_exit_code"] == 7
+
+
+def test_failure_artifact_readback_tamper_is_rejected(monkeypatch, tmp_path):
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
+    evidence = m.sanitize_updater_failure(blocked_updater_stderr(), 28)
+    artifact = m.bind_failure_evidence(evidence, **execution())
+    original = Path.read_bytes
+
+    def tampered_readback(path):
+        if path.name == m.FAILURE_ARTIFACT_NAME:
+            return b"{}\n"
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", tampered_readback)
+    with pytest.raises(m.RefreshError, match="readback_invalid"):
+        m.persist_failure_evidence(artifact)
+
+
+def _main_argv():
+    return [
+        str(P), "--confirm", m.CONFIRM, "--commit", m.RULES_COMMIT,
+        "--workflow-repository", m.EXPECTED_WORKFLOW_REPOSITORY,
+        "--workflow-sha", "a" * 40, "--workflow-run-id", "123",
+        "--workflow-run-attempt", "1",
+    ]
+
+
+def test_main_persists_failure_artifact_without_turning_failure_into_success(
+    monkeypatch, capsys, tmp_path,
+):
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
+    evidence = m.sanitize_updater_failure(blocked_updater_stderr(), 28)
+
+    def blocked(*_args, **_kwargs):
+        raise m.UpdaterBlocked(28, evidence)
+
+    monkeypatch.setattr(m, "run_elevated", blocked)
+    monkeypatch.setattr(sys, "argv", _main_argv())
+    assert m.main() == 3
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["ok"] is False
+    assert "error" not in envelope
+    assert envelope["failure_evidence_persisted"] is True
+    artifact_path = runner_temp / m.FAILURE_ARTIFACT_NAME
+    artifact = json.loads(artifact_path.read_text())
+    assert envelope["failure_evidence"] == artifact
+    assert envelope["failure_evidence_sha256"] == hashlib.sha256(
+        artifact_path.read_bytes()
+    ).hexdigest()
+
+
+def test_failure_artifact_persistence_error_does_not_mask_or_promote(
+    monkeypatch, capsys, tmp_path,
+):
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    (runner_temp / m.FAILURE_ARTIFACT_NAME).write_text("stale", encoding="utf-8")
+    monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
+    evidence = m.sanitize_updater_failure(blocked_updater_stderr(), 28)
+    monkeypatch.setattr(
+        m, "run_elevated",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(m.UpdaterBlocked(28, evidence)),
+    )
+    monkeypatch.setattr(sys, "argv", _main_argv())
+    assert m.main() == 3
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["ok"] is False
+    assert "error" not in envelope
+    assert envelope["failure_evidence_persisted"] is False
+    assert envelope["failure_evidence_sha256"] is None
+    assert envelope["failure_evidence"]["evidence_authenticated"] is True
+
+
+def test_workflow_preserves_failure_artifact_without_retry_or_success_promotion():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github/workflows/noteri-command-gateway-refresh.yml"
+    ).read_text(encoding="utf-8")
+    assert workflow.count("python3 scripts/noteri_gateway_refresh.py") == 1
+    assert workflow.count("Independently read back run evidence and installed hashes") == 1
+    assert workflow.count("Preserve sanitized updater failure evidence") == 1
+    assert "$envelope.failure_evidence_sha256 -match '^[0-9a-f]{64}$' -and" in workflow
+    assert "id: refresh" in workflow
+    assert "failure_evidence_sha256" in workflow
+    assert "Preserve sanitized updater failure evidence" in workflow
+    assert "if: failure() && steps.refresh.outputs.failure_evidence == 'true'" in workflow
+    assert "Independent sanitized updater failure readback" in workflow
+    assert "NOTERI_GATEWAY_REFRESH_FAILURE_INDEPENDENT_READBACK_OK" in workflow
+    assert ".managed_runtime_changed_by_capture == false" in workflow
+    assert "throw 'NOTERI_GATEWAY_REFRESH_BLOCKED'" in workflow
+    assert "continue-on-error" not in workflow
+
+
+def test_refresh_workflow_powershell_block_parses():
+    yaml = pytest.importorskip("yaml")
+    workflow_path = (
+        Path(__file__).resolve().parents[1]
+        / ".github/workflows/noteri-command-gateway-refresh.yml"
+    )
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["refresh"]["steps"]
+    matches = [
+        step["run"]
+        for step in steps
+        if step.get("name") == "Refresh gateway with fixed contract"
+    ]
+    assert len(matches) == 1
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell parser unavailable")
+    parser = """
+$source = [Console]::In.ReadToEnd()
+$tokens = $null
+$errors = $null
+[System.Management.Automation.Language.Parser]::ParseInput(
+  $source, [ref]$tokens, [ref]$errors
+) | Out-Null
+if ($errors.Count -ne 0) {
+  $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }
+  exit 1
+}
+"""
+    completed = subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-Command", parser],
+        input=matches[0],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
