@@ -446,14 +446,19 @@ def test_updater_failure_is_sanitized_and_never_creates_success_receipt(monkeypa
         install = Path(tmp) / "install"
         monkeypatch.setattr(m, "INSTALL_ROOT", install)
         manifest, _, _ = canonical_fixture()
+        calls = 0
+
+        def updater(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            return SimpleNamespace(returncode=28, stderr=blocked_updater_stderr())
+
         monkeypatch.setattr(m.socket, "gethostname", lambda: "Noteri")
-        monkeypatch.setattr(m, "fetch", lambda path, *_args: manifest if path == "MANIFEST.json" else b"payload")
         monkeypatch.setattr(
-            m.subprocess, "run",
-            lambda *_args, **_kwargs: SimpleNamespace(
-                returncode=28, stderr=blocked_updater_stderr()
-            ),
+            m, "fetch",
+            lambda path, *_args: manifest if path == "MANIFEST.json" else b"payload",
         )
+        monkeypatch.setattr(m.subprocess, "run", updater)
         with pytest.raises(m.UpdaterBlocked, match="updater_failed:28") as caught:
             m.run_elevated(
                 m.CONFIRM, m.RULES_COMMIT, **execution(),
@@ -461,64 +466,130 @@ def test_updater_failure_is_sanitized_and_never_creates_success_receipt(monkeypa
                 legacy_manifest_sha256="b" * 64,
             )
         evidence = caught.value.evidence
+        assert calls == 1
+        assert evidence["evidence_authenticated"] is True
         assert evidence["phase"] == "install_runtime"
-        assert evidence["failure"] == {
-            "type": "RuntimeInstallError",
-            "category": "install_runtime_os_error",
-            "operation": "activate_stage",
-            "os_error": {"errno": 13, "winerror": 5},
-        }
+        assert evidence["failure_type"] == "RuntimeInstallError"
+        assert evidence["failure_category"] == "install_runtime_os_error"
+        assert evidence["failure_operation"] == "activate_stage"
+        assert evidence["failure_os_error"] == {"errno": 13, "winerror": 5}
         serialized = json.dumps(evidence)
-        for forbidden in ("sensitive", "must-not-leak", "strerror", "destination", "raw_error"):
+        for forbidden in (
+            "sensitive", "must-not-leak", "strerror", "destination",
+            "raw_error", "backup_dir", "receipt_path", "rollback_error",
+            "primary_receipt_error",
+        ):
             assert forbidden not in serialized
         assert not (install / m.RUN_RECEIPT_NAME).exists()
 
 
-def test_failure_evidence_artifact_is_exclusive_bound_and_sanitized(monkeypatch):
+def test_reverse_scan_selects_last_authenticated_receipt_before_warning():
+    first = blocked_updater_payload()
+    first["transaction_id"] = "a" * 32
+    first["phase"] = "replaceability_preflight"
+    second = blocked_updater_payload()
+    stderr = "\n".join([
+        json.dumps(first), json.dumps(second),
+        json.dumps({"result": "HOST_UPDATE_LOCK_RELEASE_WARNING"}),
+    ])
+    evidence = m.sanitize_updater_failure(stderr, 28)
+    assert evidence["evidence_authenticated"] is True
+    assert evidence["transaction_id"] == "b" * 32
+    assert evidence["phase"] == "install_runtime"
+
+
+def test_failure_evidence_artifact_is_exclusive_bound_hashed_and_sanitized(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         runner_temp = Path(tmp) / "runner-temp"
         runner_temp.mkdir()
         monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
         evidence = m.sanitize_updater_failure(blocked_updater_stderr(), 28)
-        path = m.persist_failure_evidence(evidence, **execution())
-        artifact = json.loads(path.read_text(encoding="utf-8"))
-        assert set(artifact) == {
-            "result", "workflow_repository", "workflow_sha", "run_id",
-            "run_attempt", "managed_runtime_changed_by_capture", "updater",
-        }
-        assert artifact["result"] == "NOTERI_GATEWAY_REFRESH_FAILURE_EVIDENCE"
+        artifact = m.bind_failure_evidence(evidence, **execution())
+        path, digest = m.persist_failure_evidence(artifact)
+        observed = json.loads(path.read_text(encoding="utf-8"))
+        assert observed == artifact
         assert artifact["managed_runtime_changed_by_capture"] is False
-        assert artifact["updater"] == evidence
         assert path.name == m.FAILURE_ARTIFACT_NAME
+        assert digest == hashlib.sha256(path.read_bytes()).hexdigest()
         serialized = path.read_text(encoding="utf-8")
-        for forbidden in ("sensitive", "must-not-leak", "strerror", "destination", "raw_error"):
+        for forbidden in (
+            "sensitive", "must-not-leak", "strerror", "destination",
+            "raw_error", "backup_dir", "receipt_path", "rollback_error",
+            "primary_receipt_error",
+        ):
             assert forbidden not in serialized
         with pytest.raises(m.RefreshError, match="already_exists"):
-            m.persist_failure_evidence(evidence, **execution())
+            m.persist_failure_evidence(artifact)
 
 
 @pytest.mark.parametrize(
     "mutate",
     [
         lambda p: p.update(source_commit="0" * 40),
+        lambda p: p.update(result="HOST_UPDATE_OK"),
+        lambda p: p.update(gateway_exit_code=3),
         lambda p: p.update(transaction_id="bad"),
         lambda p: p.update(phase="INVALID PHASE"),
         lambda p: p["failure"].update(type="bad type"),
         lambda p: p["failure"].update(os_error={"errno": True, "winerror": 5}),
+        lambda p: p["failure"].update(os_error={"errno": 2 ** 40, "winerror": 5}),
     ],
 )
-def test_invalid_updater_failure_evidence_is_rejected(mutate):
+def test_invalid_updater_failure_evidence_becomes_safe_unclassified(mutate):
     payload = blocked_updater_payload()
     mutate(payload)
-    with pytest.raises(m.RefreshError, match="updater_failed:28"):
-        m.sanitize_updater_failure(blocked_updater_stderr(payload), 28)
+    evidence = m.sanitize_updater_failure(blocked_updater_stderr(payload), 28)
+    assert evidence["evidence_authenticated"] is False
+    assert evidence["phase"] is None
+    assert evidence["failure_type"] is None
+    assert evidence["failure_os_error"] == {"errno": None, "winerror": None}
 
 
-def test_missing_blocked_json_is_not_promoted_to_evidence():
-    with pytest.raises(m.RefreshError, match="evidence_unavailable"):
-        m.sanitize_updater_failure(
-            json.dumps({"result": "HOST_UPDATE_LOCK_RELEASE_WARNING"}), 28
-        )
+def test_duplicate_nonfinite_oversized_and_success_json_are_unclassified():
+    duplicate = '{"result":"HOST_UPDATE_BLOCKED","result":"HOST_UPDATE_BLOCKED"}'
+    nonfinite = '{"result":"HOST_UPDATE_BLOCKED","gateway_exit_code":NaN}'
+    too_long = "x" * (m.MAX_UPDATER_LINE_BYTES + 1)
+    too_large = "x\n" * (m.MAX_UPDATER_STDERR_BYTES // 2 + 1)
+    success = json.dumps({"result": "HOST_UPDATE_OK", "source_commit": m.RULES_COMMIT})
+    for stderr in (duplicate, nonfinite, too_long, too_large, success):
+        evidence = m.sanitize_updater_failure(stderr, 28)
+        assert evidence["evidence_authenticated"] is False
+        assert evidence["updater_result"] is None
+
+
+def test_missing_blocked_json_and_other_exit_code_are_unclassified():
+    warning = json.dumps({"result": "HOST_UPDATE_LOCK_RELEASE_WARNING"})
+    assert m.sanitize_updater_failure(warning, 28)["evidence_authenticated"] is False
+    evidence = m.sanitize_updater_failure(blocked_updater_stderr(), 7)
+    assert evidence["evidence_authenticated"] is False
+    assert evidence["updater_exit_code"] == 7
+
+
+def test_failure_artifact_readback_tamper_is_rejected(monkeypatch, tmp_path):
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
+    evidence = m.sanitize_updater_failure(blocked_updater_stderr(), 28)
+    artifact = m.bind_failure_evidence(evidence, **execution())
+    original = Path.read_bytes
+
+    def tampered_readback(path):
+        if path.name == m.FAILURE_ARTIFACT_NAME:
+            return b"{}\n"
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", tampered_readback)
+    with pytest.raises(m.RefreshError, match="readback_invalid"):
+        m.persist_failure_evidence(artifact)
+
+
+def _main_argv():
+    return [
+        str(P), "--confirm", m.CONFIRM, "--commit", m.RULES_COMMIT,
+        "--workflow-repository", m.EXPECTED_WORKFLOW_REPOSITORY,
+        "--workflow-sha", "a" * 40, "--workflow-run-id", "123",
+        "--workflow-run-attempt", "1",
+    ]
 
 
 def test_main_persists_failure_artifact_without_turning_failure_into_success(
@@ -533,21 +604,38 @@ def test_main_persists_failure_artifact_without_turning_failure_into_success(
         raise m.UpdaterBlocked(28, evidence)
 
     monkeypatch.setattr(m, "run_elevated", blocked)
-    monkeypatch.setattr(
-        sys, "argv",
-        [
-            str(P), "--confirm", m.CONFIRM, "--commit", m.RULES_COMMIT,
-            "--workflow-repository", m.EXPECTED_WORKFLOW_REPOSITORY,
-            "--workflow-sha", "a" * 40, "--workflow-run-id", "123",
-            "--workflow-run-attempt", "1",
-        ],
-    )
+    monkeypatch.setattr(sys, "argv", _main_argv())
     assert m.main() == 3
     envelope = json.loads(capsys.readouterr().out)
     assert envelope["ok"] is False
+    assert "error" not in envelope
     assert envelope["failure_evidence_persisted"] is True
-    assert envelope["failure_evidence"] == evidence
-    artifact = runner_temp / m.FAILURE_ARTIFACT_NAME
-    assert artifact.is_file()
-    assert json.loads(artifact.read_text())["updater"] == evidence
+    artifact_path = runner_temp / m.FAILURE_ARTIFACT_NAME
+    artifact = json.loads(artifact_path.read_text())
+    assert envelope["failure_evidence"] == artifact
+    assert envelope["failure_evidence_sha256"] == hashlib.sha256(
+        artifact_path.read_bytes()
+    ).hexdigest()
+
+
+def test_failure_artifact_persistence_error_does_not_mask_or_promote(
+    monkeypatch, capsys, tmp_path,
+):
+    runner_temp = tmp_path / "runner-temp"
+    runner_temp.mkdir()
+    (runner_temp / m.FAILURE_ARTIFACT_NAME).write_text("stale", encoding="utf-8")
+    monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
+    evidence = m.sanitize_updater_failure(blocked_updater_stderr(), 28)
+    monkeypatch.setattr(
+        m, "run_elevated",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(m.UpdaterBlocked(28, evidence)),
+    )
+    monkeypatch.setattr(sys, "argv", _main_argv())
+    assert m.main() == 3
+    envelope = json.loads(capsys.readouterr().out)
+    assert envelope["ok"] is False
+    assert "error" not in envelope
+    assert envelope["failure_evidence_persisted"] is False
+    assert envelope["failure_evidence_sha256"] is None
+    assert envelope["failure_evidence"]["evidence_authenticated"] is True
 
