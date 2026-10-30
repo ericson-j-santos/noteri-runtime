@@ -647,6 +647,9 @@ def test_workflow_preserves_failure_artifact_without_retry_or_success_promotion(
         / ".github/workflows/noteri-command-gateway-refresh.yml"
     ).read_text(encoding="utf-8")
     assert workflow.count("python3 scripts/noteri_gateway_refresh.py") == 1
+    assert workflow.count("Independently read back run evidence and installed hashes") == 1
+    assert workflow.count("Preserve sanitized updater failure evidence") == 1
+    assert "$envelope.failure_evidence_sha256 -match '^[0-9a-f]{64}$' -and" in workflow
     assert "id: refresh" in workflow
     assert "failure_evidence_sha256" in workflow
     assert "Preserve sanitized updater failure evidence" in workflow
