@@ -20,6 +20,7 @@ MANAGED = frozenset({
 })
 BACKUP_NAME = re.compile(r"backup-[0-9]{8}-[0-9]{6}-[0-9a-f]{32}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+CURRENT_DIAGNOSTIC_RULES_SHA = "b5ade370fa11877ff7b899b5c6feacc3bfaf34e7"
 
 
 class ReadbackBlocked(RuntimeError):
