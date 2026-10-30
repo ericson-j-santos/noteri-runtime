@@ -639,3 +639,19 @@ def test_failure_artifact_persistence_error_does_not_mask_or_promote(
     assert envelope["failure_evidence_sha256"] is None
     assert envelope["failure_evidence"]["evidence_authenticated"] is True
 
+
+def test_workflow_preserves_failure_artifact_without_retry_or_success_promotion():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github/workflows/noteri-command-gateway-refresh.yml"
+    ).read_text(encoding="utf-8")
+    assert workflow.count("python3 scripts/noteri_gateway_refresh.py") == 1
+    assert "id: refresh" in workflow
+    assert "failure_evidence_sha256" in workflow
+    assert "Preserve sanitized updater failure evidence" in workflow
+    assert "if: failure() && steps.refresh.outputs.failure_evidence == 'true'" in workflow
+    assert "Independent sanitized updater failure readback" in workflow
+    assert "NOTERI_GATEWAY_REFRESH_FAILURE_INDEPENDENT_READBACK_OK" in workflow
+    assert ".managed_runtime_changed_by_capture == false" in workflow
+    assert "throw 'NOTERI_GATEWAY_REFRESH_BLOCKED'" in workflow
+    assert "continue-on-error" not in workflow
