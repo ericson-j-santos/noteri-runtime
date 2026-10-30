@@ -19,8 +19,11 @@ MANAGED = frozenset({
     "config/policy.json",
 })
 BACKUP_NAME = re.compile(r"backup-[0-9]{8}-[0-9]{6}-[0-9a-f]{32}\Z")
+RECOVERY_NAME = re.compile(r"update-recovery-([0-9a-f]{32})\.json\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 CURRENT_DIAGNOSTIC_RULES_SHA = "b5ade370fa11877ff7b899b5c6feacc3bfaf34e7"
+EXPECTED_PRIMARY_SOURCE_COMMIT = "7d6ec0742ce9570408e8f3673a4f3c65c6777eb0"
 
 
 class ReadbackBlocked(RuntimeError):
@@ -73,7 +76,77 @@ def _state(path: Path, digest: object, size: object) -> bool:
     return len(raw) == size and hashlib.sha256(raw).hexdigest() == digest
 
 
-def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str) -> dict:
+def _recovery_inventory(root: Path) -> tuple[tuple[Path, re.Match[str]], ...]:
+    recoveries: list[tuple[Path, re.Match[str]]] = []
+    for path in root.iterdir():
+        match = RECOVERY_NAME.fullmatch(path.name)
+        if match:
+            recoveries.append((path, match))
+    if len(recoveries) > 16:
+        raise ReadbackBlocked("RECOVERY_RECEIPT_INVENTORY_AMBIGUOUS")
+    return tuple(sorted(recoveries, key=lambda item: item[0].name))
+
+
+def _recovery_evidence(root: Path) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (path.name, _json(path)[1])
+        for path, _ in _recovery_inventory(root)
+    )
+
+
+def _select_receipt(
+    root: Path, expected_primary_receipt_sha: str | None
+) -> tuple[dict, Path, str, str, dict, str, tuple[tuple[str, str], ...]]:
+    primary_path = root / "update-receipt.json"
+    primary, primary_sha = _json(primary_path)
+    primary_source = primary.get("source_commit")
+    if not isinstance(primary_source, str) or not COMMIT.fullmatch(primary_source):
+        raise ReadbackBlocked("PRIMARY_SOURCE_COMMIT_INVALID")
+    recoveries = _recovery_inventory(root)
+    recovery_evidence: list[tuple[str, str]] = []
+    current: list[tuple[dict, Path, str]] = []
+    for path, match in recoveries:
+        candidate, candidate_sha = _json(path)
+        recovery_evidence.append((path.name, candidate_sha))
+        if candidate.get("source_commit") != CURRENT_DIAGNOSTIC_RULES_SHA:
+            continue
+        if (
+            candidate.get("result") != "HOST_UPDATE_BLOCKED"
+            or candidate.get("transaction_id") != match.group(1)
+            or not isinstance(candidate.get("primary_receipt_error"), str)
+            or not candidate["primary_receipt_error"]
+        ):
+            raise ReadbackBlocked("RECOVERY_RECEIPT_INVALID")
+        current.append((candidate, path, candidate_sha))
+    if primary_source == CURRENT_DIAGNOSTIC_RULES_SHA:
+        if current:
+            raise ReadbackBlocked("RECOVERY_RECEIPT_CONFLICT")
+        return (
+            primary, primary_path, primary_sha, "primary", primary, primary_sha,
+            tuple(recovery_evidence),
+        )
+    if len(current) > 1:
+        raise ReadbackBlocked("RECOVERY_RECEIPT_AMBIGUOUS")
+    if current:
+        if (
+            not isinstance(expected_primary_receipt_sha, str)
+            or not SHA256.fullmatch(expected_primary_receipt_sha)
+            or primary_sha != expected_primary_receipt_sha
+            or primary_source != EXPECTED_PRIMARY_SOURCE_COMMIT
+        ):
+            raise ReadbackBlocked("PRIMARY_RECEIPT_PIN_MISMATCH")
+        receipt, receipt_path, receipt_sha = current[0]
+        return (
+            receipt, receipt_path, receipt_sha, "recovery", primary, primary_sha,
+            tuple(recovery_evidence),
+        )
+    return (
+        primary, primary_path, primary_sha, "primary", primary, primary_sha,
+        tuple(recovery_evidence),
+    )
+
+def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str,
+              expected_primary_receipt_sha: str | None = None) -> dict:
     platform, host = host_context()
     if platform != "nt" or host.casefold() != "noteri":
         raise ReadbackBlocked("NOTERI_WINDOWS_REQUIRED")
@@ -81,7 +154,10 @@ def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str) -> 
         raise ReadbackBlocked("PIN_INVALID")
     if root.is_symlink() or not root.is_dir():
         raise ReadbackBlocked("ROOT_INVALID")
-    receipt, receipt_sha = _json(root / "update-receipt.json")
+    (receipt, receipt_path, receipt_sha, receipt_origin, primary_receipt,
+     primary_receipt_sha, recovery_evidence) = _select_receipt(
+         root, expected_primary_receipt_sha
+     )
     backup_text = receipt.get("backup_dir")
     if not isinstance(backup_text, str):
         raise ReadbackBlocked("BACKUP_REFERENCE_INVALID")
@@ -144,6 +220,9 @@ def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str) -> 
     result = {
         "result": "NOTERI_GATEWAY_FAILURE_READBACK",
         "receipt_sha256": receipt_sha,
+        "receipt_origin": receipt_origin,
+        "primary_receipt_sha256": primary_receipt_sha,
+        "primary_receipt_source_commit": primary_receipt.get("source_commit"),
         "receipt_is_original": receipt_sha == legacy_receipt_sha,
         "receipt_result": receipt.get("result"),
         "source_commit": receipt.get("source_commit"),
@@ -167,7 +246,10 @@ def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str) -> 
         "journal_present": (root / "update-transaction.json").exists(),
         "managed_runtime_changed_by_readback": False,
     }
-    if _json(root / "update-receipt.json")[1] != receipt_sha or _json(backup / "rollback-manifest.json")[1] != manifest_sha:
+    if (_json(receipt_path)[1] != receipt_sha
+            or _json(root / "update-receipt.json")[1] != primary_receipt_sha
+            or _recovery_evidence(root) != recovery_evidence
+            or _json(backup / "rollback-manifest.json")[1] != manifest_sha):
         raise ReadbackBlocked("EVIDENCE_CHANGED")
     return result
 
@@ -176,10 +258,14 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--expected-legacy-receipt-sha256", required=True)
     parser.add_argument("--expected-legacy-manifest-sha256", required=True)
+    parser.add_argument("--expected-primary-receipt-sha256", required=True)
     args = parser.parse_args()
     try:
-        report = inventory(ROOT, args.expected_legacy_receipt_sha256,
-                           args.expected_legacy_manifest_sha256)
+        report = inventory(
+            ROOT, args.expected_legacy_receipt_sha256,
+            args.expected_legacy_manifest_sha256,
+            args.expected_primary_receipt_sha256,
+        )
         print(json.dumps(report, sort_keys=True))
         return 0
     except Exception as exc:
