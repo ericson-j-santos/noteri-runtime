@@ -533,6 +533,7 @@ def test_failure_evidence_artifact_is_exclusive_bound_hashed_and_sanitized(monke
         lambda p: p["failure"].update(type="bad type"),
         lambda p: p["failure"].update(os_error={"errno": True, "winerror": 5}),
         lambda p: p["failure"].update(os_error={"errno": 2 ** 40, "winerror": 5}),
+        lambda p: p.update(rollback_succeeded=0),
     ],
 )
 def test_invalid_updater_failure_evidence_becomes_safe_unclassified(mutate):
