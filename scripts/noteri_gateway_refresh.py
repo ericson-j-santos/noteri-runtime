@@ -31,6 +31,7 @@ LEGACY_VERIFY_SHA256 = "b792692d6c86bccccfba9037596d3a7cbd4996e7d560f257194efa02
 INSTALL_ROOT = Path(r"C:\dev\chatgpt-command-gateway")
 WORK_ROOT = Path(r"C:\dev\chatgpt-workers")
 RUN_RECEIPT_NAME = "refresh-run-receipt.json"
+FAILURE_ARTIFACT_NAME = "noteri-gateway-refresh-failure.json"
 RUNTIME_MAP = {
     "scripts/command_gateway.py": "bin/command_gateway.py",
     "scripts/host_health_check.py": "bin/host_health_check.py",
@@ -43,10 +44,24 @@ RUNTIME_MAP = {
 MANAGED_FILES = set(RUNTIME_MAP.values())
 HEAD_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+TRANSACTION_RE = re.compile(r"^[0-9a-f]{32}$")
+TOKEN_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+TYPE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+FAILURE_RESULTS = frozenset({
+    "HOST_UPDATE_BLOCKED",
+    "HOST_UPDATE_LEGACY_PREFLIGHT_BLOCKED",
+})
 
 
 class RefreshError(RuntimeError):
     pass
+
+
+class UpdaterBlocked(RefreshError):
+    def __init__(self, returncode: int, evidence: dict) -> None:
+        super().__init__(f"updater_failed:{returncode}")
+        self.returncode = returncode
+        self.evidence = evidence
 
 
 def sha256(data: bytes) -> str:
@@ -189,6 +204,122 @@ def read_update_receipt() -> tuple[dict, bytes] | None:
     if not isinstance(receipt, dict):
         raise RefreshError("recibo de update invalido")
     return receipt, raw
+
+
+def _optional_token(value: object, *, label: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not TOKEN_RE.fullmatch(value):
+        raise RefreshError(f"updater_failed:28:{label}_invalid")
+    return value
+
+
+def sanitize_updater_failure(stderr: object, returncode: int) -> dict:
+    if returncode != 28 or not isinstance(stderr, str):
+        raise RefreshError(f"updater_failed:{returncode}:evidence_unavailable")
+    for line in reversed(stderr.splitlines()):
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(candidate, dict) or candidate.get("result") not in FAILURE_RESULTS:
+            continue
+        if (
+            candidate.get("gateway_exit_code") != returncode
+            or candidate.get("source_commit") != RULES_COMMIT
+            or not isinstance(candidate.get("transaction_id"), str)
+            or not TRANSACTION_RE.fullmatch(candidate["transaction_id"])
+            or not isinstance(candidate.get("phase"), str)
+            or not TOKEN_RE.fullmatch(candidate["phase"])
+            or not isinstance(candidate.get("mutation_started"), bool)
+            or not isinstance(candidate.get("rollback_attempted"), bool)
+            or candidate.get("rollback_succeeded") not in (None, True, False)
+        ):
+            raise RefreshError("updater_failed:28:evidence_invalid")
+        failure = candidate.get("failure")
+        if not isinstance(failure, dict):
+            raise RefreshError("updater_failed:28:evidence_invalid")
+        failure_type = failure.get("type")
+        if not isinstance(failure_type, str) or not TYPE_RE.fullmatch(failure_type):
+            raise RefreshError("updater_failed:28:failure_type_invalid")
+        category = _optional_token(failure.get("category"), label="failure_category")
+        operation = _optional_token(failure.get("operation"), label="failure_operation")
+        source_os_error = failure.get("os_error")
+        if source_os_error is None:
+            os_error = {"errno": None, "winerror": None}
+        else:
+            if not isinstance(source_os_error, dict):
+                raise RefreshError("updater_failed:28:os_error_invalid")
+            os_error = {}
+            for key in ("errno", "winerror"):
+                value = source_os_error.get(key)
+                if value is not None and (
+                    isinstance(value, bool) or not isinstance(value, int)
+                ):
+                    raise RefreshError("updater_failed:28:os_error_invalid")
+                os_error[key] = value
+        return {
+            "result": candidate["result"],
+            "gateway_exit_code": returncode,
+            "source_commit": RULES_COMMIT,
+            "transaction_id": candidate["transaction_id"],
+            "phase": candidate["phase"],
+            "failure": {
+                "type": failure_type,
+                "category": category,
+                "operation": operation,
+                "os_error": os_error,
+            },
+            "mutation_started": candidate["mutation_started"],
+            "rollback_attempted": candidate["rollback_attempted"],
+            "rollback_succeeded": candidate.get("rollback_succeeded"),
+        }
+    raise RefreshError(f"updater_failed:{returncode}:evidence_unavailable")
+
+
+def persist_failure_evidence(
+    evidence: dict, *, repository: str, workflow_sha: str,
+    run_id: int, run_attempt: int,
+) -> Path:
+    validate_execution(repository, workflow_sha, run_id, run_attempt)
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    if not runner_temp:
+        raise RefreshError("runner_temp_unavailable")
+    root = Path(runner_temp)
+    observed = os.lstat(root)
+    if (
+        stat.S_ISLNK(observed.st_mode)
+        or _is_reparse_point(observed)
+        or not stat.S_ISDIR(observed.st_mode)
+    ):
+        raise RefreshError("runner_temp_invalid")
+    target = root / FAILURE_ARTIFACT_NAME
+    if os.path.lexists(target):
+        raise RefreshError("failure_artifact_already_exists")
+    artifact = {
+        "result": "NOTERI_GATEWAY_REFRESH_FAILURE_EVIDENCE",
+        "workflow_repository": repository,
+        "workflow_sha": workflow_sha,
+        "run_id": run_id,
+        "run_attempt": run_attempt,
+        "managed_runtime_changed_by_capture": False,
+        "updater": evidence,
+    }
+    raw = (json.dumps(artifact, sort_keys=True) + "\n").encode("utf-8")
+    with target.open("xb") as handle:
+        handle.write(raw)
+        handle.flush()
+        os.fsync(handle.fileno())
+    reread = target.read_bytes()
+    target_stat = os.lstat(target)
+    if (
+        reread != raw
+        or stat.S_ISLNK(target_stat.st_mode)
+        or _is_reparse_point(target_stat)
+        or not stat.S_ISREG(target_stat.st_mode)
+    ):
+        raise RefreshError("failure_artifact_readback_invalid")
+    return target
 
 
 def _same_path(left: Path, right: Path) -> bool:
@@ -515,7 +646,8 @@ def run_elevated(
             capture_output=True, text=True, timeout=180, check=False,
         )
         if result.returncode != 0:
-            raise RefreshError(f"updater_failed:{result.returncode}")
+            evidence = sanitize_updater_failure(result.stderr, result.returncode)
+            raise UpdaterBlocked(result.returncode, evidence)
 
     updated = read_update_receipt()
     if updated is None:
@@ -559,9 +691,42 @@ def main() -> int:
             legacy_receipt_sha256=args.expected_legacy_receipt_sha256,
             legacy_manifest_sha256=args.expected_legacy_manifest_sha256,
         )
+    except UpdaterBlocked as exc:
+        persisted = False
+        try:
+            persist_failure_evidence(
+                exc.evidence,
+                repository=args.workflow_repository,
+                workflow_sha=args.workflow_sha,
+                run_id=args.workflow_run_id,
+                run_attempt=args.workflow_run_attempt,
+            )
+            persisted = True
+        except Exception:
+            persisted = False
+        output = {
+            "ok": False,
+            "result": "NOTERI_GATEWAY_REFRESH_BLOCKED",
+            "error_type": "UpdaterBlocked",
+            "error": str(exc),
+            "failure_evidence": exc.evidence,
+            "failure_evidence_persisted": persisted,
+            "failure_artifact_name": FAILURE_ARTIFACT_NAME if persisted else None,
+        }
+    except RefreshError as exc:
+        output = {
+            "ok": False,
+            "result": "NOTERI_GATEWAY_REFRESH_BLOCKED",
+            "error_type": "RefreshError",
+            "error": str(exc)[:160],
+        }
     except Exception as exc:
-        output = {"ok": False, "result": "NOTERI_GATEWAY_REFRESH_BLOCKED",
-                  "error_type": type(exc).__name__, "error": str(exc)[:1000]}
+        output = {
+            "ok": False,
+            "result": "NOTERI_GATEWAY_REFRESH_BLOCKED",
+            "error_type": type(exc).__name__,
+            "error": "unexpected_failure",
+        }
     print(json.dumps(output, sort_keys=True))
     return 0 if output.get("ok") else 3
 
