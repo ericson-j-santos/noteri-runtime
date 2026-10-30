@@ -116,22 +116,30 @@ def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str) -> 
     failure = receipt.get("failure")
     failure = failure if isinstance(failure, dict) else {}
     failure_operation = failure.get("operation")
-    if (
-        not isinstance(failure_operation, str)
-        or not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", failure_operation)
-    ):
-        raise ReadbackBlocked("FAILURE_OPERATION_INVALID")
     failure_os_error = failure.get("os_error")
-    if not isinstance(failure_os_error, dict):
-        raise ReadbackBlocked("FAILURE_OS_ERROR_INVALID")
-    sanitized_os_error = {}
-    for key in ("errno", "winerror"):
-        value = failure_os_error.get(key)
-        if value is not None and (
-            isinstance(value, bool) or not isinstance(value, int)
+    if (
+        failure_operation is None
+        and failure_os_error is None
+        and receipt.get("source_commit") != CURRENT_DIAGNOSTIC_RULES_SHA
+    ):
+        failure_operation = "legacy_unknown"
+        sanitized_os_error = {"errno": None, "winerror": None}
+    else:
+        if (
+            not isinstance(failure_operation, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", failure_operation)
         ):
+            raise ReadbackBlocked("FAILURE_OPERATION_INVALID")
+        if not isinstance(failure_os_error, dict):
             raise ReadbackBlocked("FAILURE_OS_ERROR_INVALID")
-        sanitized_os_error[key] = value
+        sanitized_os_error = {}
+        for key in ("errno", "winerror"):
+            value = failure_os_error.get(key)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int)
+            ):
+                raise ReadbackBlocked("FAILURE_OS_ERROR_INVALID")
+            sanitized_os_error[key] = value
     result = {
         "result": "NOTERI_GATEWAY_FAILURE_READBACK",
         "receipt_sha256": receipt_sha,
