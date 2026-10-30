@@ -71,7 +71,7 @@ jobs:
           $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
           $syncRef = 'origin/fix/noteri-gateway-canonical-profile-20261028'
           if ($env:MODE -eq 'diagnose') {
-            $syncRef = 'origin/fix/noteri-gateway-failure-readback-20261028'
+            $syncRef = 'origin/main'
           }
           $args = @('--policy', (Join-Path $rules 'config/command-gateway.policy.json'),
             '--repo', $env:GITHUB_WORKSPACE, '--session-prefix', 'noteri-gateway-pins',
@@ -256,6 +256,13 @@ jobs:
              (.workflow_sha == $sha) and (.run_id == $run) and
              (.run_attempt == $attempt) and
              (.managed_runtime_changed_by_readback == false) and
+             (.failure_operation | type == "string" and
+                test("^[a-z][a-z0-9_]{1,63}$")) and
+             ((.failure_os_error | keys | sort) == ["errno", "winerror"]) and
+             ((.failure_os_error.errno == null) or
+                (.failure_os_error.errno | type == "number")) and
+             ((.failure_os_error.winerror == null) or
+                (.failure_os_error.winerror | type == "number")) and
              (.receipt_sha256 | test("^[0-9a-f]{64}$")) and
              (.manifest_sha256 | test("^[0-9a-f]{64}$"))' \
             _failure_readback/noteri-gateway-failure-readback.json >/dev/null
