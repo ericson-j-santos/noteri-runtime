@@ -115,6 +115,23 @@ def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str) -> 
                               if archive.exists() else False)
     failure = receipt.get("failure")
     failure = failure if isinstance(failure, dict) else {}
+    failure_operation = failure.get("operation")
+    if (
+        not isinstance(failure_operation, str)
+        or not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", failure_operation)
+    ):
+        raise ReadbackBlocked("FAILURE_OPERATION_INVALID")
+    failure_os_error = failure.get("os_error")
+    if not isinstance(failure_os_error, dict):
+        raise ReadbackBlocked("FAILURE_OS_ERROR_INVALID")
+    sanitized_os_error = {}
+    for key in ("errno", "winerror"):
+        value = failure_os_error.get(key)
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int)
+        ):
+            raise ReadbackBlocked("FAILURE_OS_ERROR_INVALID")
+        sanitized_os_error[key] = value
     result = {
         "result": "NOTERI_GATEWAY_FAILURE_READBACK",
         "receipt_sha256": receipt_sha,
@@ -124,6 +141,8 @@ def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str) -> 
         "phase": receipt.get("phase"),
         "failure_type": failure.get("type"),
         "failure_category": failure.get("category"),
+        "failure_operation": failure_operation,
+        "failure_os_error": sanitized_os_error,
         "mutation_started": receipt.get("mutation_started"),
         "rollback_attempted": receipt.get("rollback_attempted"),
         "rollback_succeeded": receipt.get("rollback_succeeded"),
