@@ -158,7 +158,8 @@ jobs:
             '--expected-head', $env:EXPECTED_WORKFLOW_SHA, '--', 'python3', '-B',
             (Join-Path $env:TARGET_PATH 'scripts/noteri_gateway_failure_readback.py'),
             '--expected-legacy-receipt-sha256', '4a4eaa3e9ca99afa053c371f9974da59c9f867a1f249b36dd79450e841e830bf',
-            '--expected-legacy-manifest-sha256', 'f415f09b37ef30ac765f3616810c45bb8b99d018aa3a59b3a1b349aa7c558209')
+            '--expected-legacy-manifest-sha256', 'f415f09b37ef30ac765f3616810c45bb8b99d018aa3a59b3a1b349aa7c558209',
+            '--expected-primary-receipt-sha256', '4a0ee0fad909c63cb4cff89577720e5ee1cd4c9832cfe18e691e3555ba81c512')
           $raw = @(& python3 -B (Join-Path $rules 'scripts/command_gateway.py') @args)
           if (-not $raw) { throw 'NOTERI_GATEWAY_FAILURE_GATEWAY_EMPTY' }
           $envelope = @($raw)[-1] | ConvertFrom-Json
@@ -257,6 +258,9 @@ jobs:
              (.run_attempt == $attempt) and
              (.managed_runtime_changed_by_readback == false) and
              (.receipt_origin == "recovery") and
+             (.primary_receipt_sha256 == "4a0ee0fad909c63cb4cff89577720e5ee1cd4c9832cfe18e691e3555ba81c512") and
+             (.primary_receipt_source_commit == "7d6ec0742ce9570408e8f3673a4f3c65c6777eb0") and
+             (.legacy_archive_matches == true) and
              (.source_commit == "b5ade370fa11877ff7b899b5c6feacc3bfaf34e7") and
              (.failure_operation != "legacy_unknown") and
              (.failure_operation | type == "string" and
