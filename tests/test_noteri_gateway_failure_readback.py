@@ -41,7 +41,17 @@ def _fixture(tmp_path: Path, *, current: bytes = b"old") -> tuple[Path, str, str
         "backup_dir": str(backup), "phase": "replaceability_preflight",
         "mutation_started": False, "rollback_attempted": False,
         "rollback_succeeded": None,
-        "failure": {"type": "RuntimeReplaceabilityError", "category": "acl_denied"},
+        "failure": {
+            "type": "RuntimeReplaceabilityError",
+            "category": "acl_denied",
+            "operation": "activate_stage",
+            "os_error": {
+                "errno": 13,
+                "winerror": 5,
+                "strerror": r"C:\\sensitive\\path",
+            },
+            "raw_error": "must-not-leak",
+        },
     }).encode())
     return root, original_sha, manifest_sha
 
@@ -52,12 +62,30 @@ def test_failure_readback_preserves_old_content_and_sanitizes_error(tmp_path, mo
     report = m.inventory(root, original, "0" * 64)
     assert report["phase"] == "replaceability_preflight"
     assert report["failure_category"] == "acl_denied"
+    assert report["failure_operation"] == "activate_stage"
+    assert report["failure_os_error"] == {"errno": 13, "winerror": 5}
+    assert "strerror" not in json.dumps(report)
+    assert "must-not-leak" not in json.dumps(report)
     assert report["legacy_archive_matches"] is True
     assert report["backup_content_intact"] is True
     assert report["all_previous_content"] is True
     assert report["all_desired_content"] is False
     assert report["mutation_started"] is False
     assert "error" not in report
+
+
+
+def test_current_rules_receipt_requires_operation_and_os_codes(tmp_path, monkeypatch):
+    monkeypatch.setattr(m, "host_context", lambda: ("nt", "Noteri"))
+    root, original, _ = _fixture(tmp_path)
+    receipt_path = root / "update-receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["source_commit"] = m.CURRENT_DIAGNOSTIC_RULES_SHA
+    receipt["failure"].pop("operation")
+    receipt["failure"].pop("os_error")
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    with pytest.raises(m.ReadbackBlocked, match="FAILURE_OPERATION_INVALID"):
+        m.inventory(root, original, "0" * 64)
 
 
 def test_failure_readback_reports_divergent_content_without_false_success(tmp_path, monkeypatch):
@@ -87,4 +115,7 @@ def test_diagnostic_workflow_is_read_only_and_separate_from_update():
     assert "--risk', '1'" in workflow
     assert "noteri_gateway_failure_readback.py" in workflow
     assert "NOTERI_GATEWAY_FAILURE_INDEPENDENT_READBACK_OK" in workflow
+    assert "failure_operation" in workflow
+    assert "failure_os_error" in workflow
+    assert "$syncRef = 'origin/main'" in workflow
     assert "if: github.actor == 'ericson-j-santos' && inputs.mode == 'update'" in workflow

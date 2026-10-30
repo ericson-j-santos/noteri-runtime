@@ -20,6 +20,7 @@ MANAGED = frozenset({
 })
 BACKUP_NAME = re.compile(r"backup-[0-9]{8}-[0-9]{6}-[0-9a-f]{32}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+CURRENT_DIAGNOSTIC_RULES_SHA = "b5ade370fa11877ff7b899b5c6feacc3bfaf34e7"
 
 
 class ReadbackBlocked(RuntimeError):
@@ -115,6 +116,31 @@ def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str) -> 
                               if archive.exists() else False)
     failure = receipt.get("failure")
     failure = failure if isinstance(failure, dict) else {}
+    failure_operation = failure.get("operation")
+    failure_os_error = failure.get("os_error")
+    if (
+        failure_operation is None
+        and failure_os_error is None
+        and receipt.get("source_commit") != CURRENT_DIAGNOSTIC_RULES_SHA
+    ):
+        failure_operation = "legacy_unknown"
+        sanitized_os_error = {"errno": None, "winerror": None}
+    else:
+        if (
+            not isinstance(failure_operation, str)
+            or not re.fullmatch(r"[a-z][a-z0-9_]{1,63}", failure_operation)
+        ):
+            raise ReadbackBlocked("FAILURE_OPERATION_INVALID")
+        if not isinstance(failure_os_error, dict):
+            raise ReadbackBlocked("FAILURE_OS_ERROR_INVALID")
+        sanitized_os_error = {}
+        for key in ("errno", "winerror"):
+            value = failure_os_error.get(key)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int)
+            ):
+                raise ReadbackBlocked("FAILURE_OS_ERROR_INVALID")
+            sanitized_os_error[key] = value
     result = {
         "result": "NOTERI_GATEWAY_FAILURE_READBACK",
         "receipt_sha256": receipt_sha,
@@ -124,6 +150,8 @@ def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str) -> 
         "phase": receipt.get("phase"),
         "failure_type": failure.get("type"),
         "failure_category": failure.get("category"),
+        "failure_operation": failure_operation,
+        "failure_os_error": sanitized_os_error,
         "mutation_started": receipt.get("mutation_started"),
         "rollback_attempted": receipt.get("rollback_attempted"),
         "rollback_succeeded": receipt.get("rollback_succeeded"),
