@@ -102,13 +102,45 @@ def test_current_rules_receipt_requires_operation_and_os_codes(tmp_path, monkeyp
 def test_failure_readback_prefers_current_fallback_recovery_receipt(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "host_context", lambda: ("nt", "Noteri"))
     root, original, _ = _fixture(tmp_path)
+    primary_sha = hashlib.sha256((root / "update-receipt.json").read_bytes()).hexdigest()
     _write_current_recovery(root, "b" * 32)
-    report = m.inventory(root, original, "0" * 64)
+    report = m.inventory(root, original, "0" * 64, primary_sha)
     assert report["receipt_origin"] == "recovery"
     assert report["source_commit"] == m.CURRENT_DIAGNOSTIC_RULES_SHA
     assert report["primary_receipt_source_commit"] == "7d6ec0742ce9570408e8f3673a4f3c65c6777eb0"
     assert report["failure_operation"] == "activate_stage"
     assert report["all_previous_content"] is True
+
+
+def test_failure_readback_rejects_tampered_primary_for_recovery(tmp_path, monkeypatch):
+    monkeypatch.setattr(m, "host_context", lambda: ("nt", "Noteri"))
+    root, original, _ = _fixture(tmp_path)
+    primary = root / "update-receipt.json"
+    expected_primary_sha = hashlib.sha256(primary.read_bytes()).hexdigest()
+    _write_current_recovery(root, "b" * 32)
+    primary.write_bytes(primary.read_bytes() + b"\n")
+    with pytest.raises(m.ReadbackBlocked, match="PRIMARY_RECEIPT_PIN_MISMATCH"):
+        m.inventory(root, original, "0" * 64, expected_primary_sha)
+
+
+def test_failure_readback_detects_late_recovery_ambiguity(tmp_path, monkeypatch):
+    monkeypatch.setattr(m, "host_context", lambda: ("nt", "Noteri"))
+    root, original, _ = _fixture(tmp_path)
+    primary_sha = hashlib.sha256((root / "update-receipt.json").read_bytes()).hexdigest()
+    _write_current_recovery(root, "b" * 32)
+    original_inventory = m._recovery_inventory
+    calls = 0
+
+    def changing_inventory(target):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            _write_current_recovery(target, "c" * 32)
+        return original_inventory(target)
+
+    monkeypatch.setattr(m, "_recovery_inventory", changing_inventory)
+    with pytest.raises(m.ReadbackBlocked, match="EVIDENCE_CHANGED"):
+        m.inventory(root, original, "0" * 64, primary_sha)
 
 
 def test_failure_readback_rejects_ambiguous_current_recoveries(tmp_path, monkeypatch):
@@ -150,5 +182,6 @@ def test_diagnostic_workflow_is_read_only_and_separate_from_update():
     assert "failure_operation" in workflow
     assert "failure_os_error" in workflow
     assert '.receipt_origin == "recovery"' in workflow
+    assert '.primary_receipt_sha256 == "4a0ee0fad909c63cb4cff89577720e5ee1cd4c9832cfe18e691e3555ba81c512"' in workflow
     assert "$syncRef = 'origin/main'" in workflow
     assert "if: github.actor == 'ericson-j-santos' && inputs.mode == 'update'" in workflow
