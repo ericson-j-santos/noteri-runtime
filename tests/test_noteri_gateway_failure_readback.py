@@ -56,6 +56,17 @@ def _fixture(tmp_path: Path, *, current: bytes = b"old") -> tuple[Path, str, str
     return root, original_sha, manifest_sha
 
 
+def _write_current_recovery(root: Path, transaction_id: str) -> None:
+    receipt = json.loads((root / "update-receipt.json").read_text())
+    receipt["source_commit"] = m.CURRENT_DIAGNOSTIC_RULES_SHA
+    receipt["transaction_id"] = transaction_id
+    receipt["primary_receipt_error"] = "PermissionError"
+    _put(
+        root / f"update-recovery-{transaction_id}.json",
+        json.dumps(receipt).encode(),
+    )
+
+
 def test_failure_readback_preserves_old_content_and_sanitizes_error(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "host_context", lambda: ("nt", "Noteri"))
     root, original, _ = _fixture(tmp_path)
@@ -85,6 +96,27 @@ def test_current_rules_receipt_requires_operation_and_os_codes(tmp_path, monkeyp
     receipt["failure"].pop("os_error")
     receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
     with pytest.raises(m.ReadbackBlocked, match="FAILURE_OPERATION_INVALID"):
+        m.inventory(root, original, "0" * 64)
+
+
+def test_failure_readback_prefers_current_fallback_recovery_receipt(tmp_path, monkeypatch):
+    monkeypatch.setattr(m, "host_context", lambda: ("nt", "Noteri"))
+    root, original, _ = _fixture(tmp_path)
+    _write_current_recovery(root, "b" * 32)
+    report = m.inventory(root, original, "0" * 64)
+    assert report["receipt_origin"] == "recovery"
+    assert report["source_commit"] == m.CURRENT_DIAGNOSTIC_RULES_SHA
+    assert report["primary_receipt_source_commit"] == "7d6ec0742ce9570408e8f3673a4f3c65c6777eb0"
+    assert report["failure_operation"] == "activate_stage"
+    assert report["all_previous_content"] is True
+
+
+def test_failure_readback_rejects_ambiguous_current_recoveries(tmp_path, monkeypatch):
+    monkeypatch.setattr(m, "host_context", lambda: ("nt", "Noteri"))
+    root, original, _ = _fixture(tmp_path)
+    _write_current_recovery(root, "b" * 32)
+    _write_current_recovery(root, "c" * 32)
+    with pytest.raises(m.ReadbackBlocked, match="RECOVERY_RECEIPT_AMBIGUOUS"):
         m.inventory(root, original, "0" * 64)
 
 
