@@ -149,5 +149,6 @@ def test_diagnostic_workflow_is_read_only_and_separate_from_update():
     assert "NOTERI_GATEWAY_FAILURE_INDEPENDENT_READBACK_OK" in workflow
     assert "failure_operation" in workflow
     assert "failure_os_error" in workflow
+    assert '.receipt_origin == "recovery"' in workflow
     assert "$syncRef = 'origin/main'" in workflow
     assert "if: github.actor == 'ericson-j-santos' && inputs.mode == 'update'" in workflow
