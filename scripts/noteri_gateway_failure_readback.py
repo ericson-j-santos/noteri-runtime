@@ -73,6 +73,41 @@ def _state(path: Path, digest: object, size: object) -> bool:
     return len(raw) == size and hashlib.sha256(raw).hexdigest() == digest
 
 
+def _select_receipt(root: Path) -> tuple[dict, Path, str, str, dict, str]:
+    primary_path = root / "update-receipt.json"
+    primary, primary_sha = _json(primary_path)
+    recoveries: list[tuple[Path, re.Match[str]]] = []
+    for path in root.iterdir():
+        match = RECOVERY_NAME.fullmatch(path.name)
+        if match:
+            recoveries.append((path, match))
+    if len(recoveries) > 16:
+        raise ReadbackBlocked("RECOVERY_RECEIPT_INVENTORY_AMBIGUOUS")
+    current: list[tuple[dict, Path, str]] = []
+    for path, match in recoveries:
+        candidate, candidate_sha = _json(path)
+        if candidate.get("source_commit") != CURRENT_DIAGNOSTIC_RULES_SHA:
+            continue
+        if (
+            candidate.get("result") != "HOST_UPDATE_BLOCKED"
+            or candidate.get("transaction_id") != match.group(1)
+            or not isinstance(candidate.get("primary_receipt_error"), str)
+            or not candidate["primary_receipt_error"]
+        ):
+            raise ReadbackBlocked("RECOVERY_RECEIPT_INVALID")
+        current.append((candidate, path, candidate_sha))
+    if primary.get("source_commit") == CURRENT_DIAGNOSTIC_RULES_SHA:
+        if current:
+            raise ReadbackBlocked("RECOVERY_RECEIPT_CONFLICT")
+        return primary, primary_path, primary_sha, "primary", primary, primary_sha
+    if len(current) > 1:
+        raise ReadbackBlocked("RECOVERY_RECEIPT_AMBIGUOUS")
+    if current:
+        receipt, receipt_path, receipt_sha = current[0]
+        return receipt, receipt_path, receipt_sha, "recovery", primary, primary_sha
+    return primary, primary_path, primary_sha, "primary", primary, primary_sha
+
+
 def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str) -> dict:
     platform, host = host_context()
     if platform != "nt" or host.casefold() != "noteri":
@@ -81,7 +116,7 @@ def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str) -> 
         raise ReadbackBlocked("PIN_INVALID")
     if root.is_symlink() or not root.is_dir():
         raise ReadbackBlocked("ROOT_INVALID")
-    receipt, receipt_sha = _json(root / "update-receipt.json")
+    receipt, receipt_path, receipt_sha, receipt_origin, primary_receipt, primary_receipt_sha = _select_receipt(root)
     backup_text = receipt.get("backup_dir")
     if not isinstance(backup_text, str):
         raise ReadbackBlocked("BACKUP_REFERENCE_INVALID")
@@ -144,6 +179,9 @@ def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str) -> 
     result = {
         "result": "NOTERI_GATEWAY_FAILURE_READBACK",
         "receipt_sha256": receipt_sha,
+        "receipt_origin": receipt_origin,
+        "primary_receipt_sha256": primary_receipt_sha,
+        "primary_receipt_source_commit": primary_receipt.get("source_commit"),
         "receipt_is_original": receipt_sha == legacy_receipt_sha,
         "receipt_result": receipt.get("result"),
         "source_commit": receipt.get("source_commit"),
@@ -167,7 +205,9 @@ def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str) -> 
         "journal_present": (root / "update-transaction.json").exists(),
         "managed_runtime_changed_by_readback": False,
     }
-    if _json(root / "update-receipt.json")[1] != receipt_sha or _json(backup / "rollback-manifest.json")[1] != manifest_sha:
+    if (_json(receipt_path)[1] != receipt_sha
+            or _json(root / "update-receipt.json")[1] != primary_receipt_sha
+            or _json(backup / "rollback-manifest.json")[1] != manifest_sha):
         raise ReadbackBlocked("EVIDENCE_CHANGED")
     return result
 
