@@ -86,6 +86,7 @@ def inspect(root: Path, helper_path: Path) -> dict[str, Any]:
     helper = _canonical_helper(helper_path)
     states: dict[str, dict[str, bool]] = {}
     checked = 0
+    observations: dict[str, tuple[dict, dict]] = {}
     for name in sorted(baseline.MANAGED):
         entry = manifest["entries"][name]
         previous_content = old["managed_states"][name]["previous_content"]
@@ -110,6 +111,17 @@ def inspect(root: Path, helper_path: Path) -> dict[str, Any]:
             "backup": bool(saved_ok),
             "preexisting": True,
         }
+        observations[name] = (current, saved)
+
+    # Segunda captura física detecta ACL/ADS alterados durante a leitura.
+    for name, (first_current, first_saved) in observations.items():
+        try:
+            now_current = helper._windows_persisted_file_state(root.joinpath(*name.split("/")))
+            now_saved = helper._windows_persisted_file_state(backup / "files" / name)
+        except Exception:
+            raise baseline.ReadbackBlocked("WINDOWS_METADATA_READ_BLOCKED") from None
+        if now_current != first_current or now_saved != first_saved:
+            raise baseline.ReadbackBlocked("WINDOWS_METADATA_CHANGED")
 
     if (
         baseline._json(root / "update-receipt.json")[1] != receipt_digest
@@ -132,9 +144,13 @@ def inspect(root: Path, helper_path: Path) -> dict[str, Any]:
         "metadata_checked_files": checked,
         "metadata_states": states,
         "all_previous_content": old["all_previous_content"],
+        "backup_content_intact": old["backup_content_intact"],
         "all_previous_windows_metadata": all_current,
         "backup_windows_metadata_intact": all_backup,
-        "metadata_assessment": "MATCH" if all_current and all_backup else "DIVERGENT",
+        "metadata_assessment": "MATCH" if (
+            all_current and all_backup and old["all_previous_content"]
+            and old["backup_content_intact"]
+        ) else "DIVERGENT",
         "recovery_authorized": False,
         "host_ready": False,
         "managed_runtime_changed": False,

@@ -167,3 +167,28 @@ def test_forensic_workflow_is_manual_risk1_and_never_updater():
     assert "inputs.expected_workflow_sha" in text
     assert "update_command_gateway_host.py" not in text
     assert "REFRESH-NOTERI-COMMAND-GATEWAY" not in text
+
+
+def test_backup_bytes_divergence_cannot_be_reported_as_match(tmp_path, monkeypatch):
+    root, backup, _ = _fixture(tmp_path, monkeypatch)
+    target = backup / "files" / sorted(f.baseline.MANAGED)[0]
+    target.write_bytes(b"tampered-backup")
+    report = f.inspect(root, tmp_path / "helper")
+    assert report["all_previous_content"] is True
+    assert report["backup_content_intact"] is False
+    assert report["metadata_assessment"] == "DIVERGENT"
+    assert report["host_ready"] is False
+
+
+def test_windows_metadata_changes_during_inspection_fail_closed(tmp_path, monkeypatch):
+    root, _, fixture = _fixture(tmp_path, monkeypatch)
+    calls = {}
+
+    def changing_metadata(path):
+        key = str(path)
+        calls[key] = calls.get(key, 0) + 1
+        return {"ok": True, "sequence": calls[key]}
+
+    fixture["helper"]._windows_persisted_file_state = changing_metadata
+    with pytest.raises(f.baseline.ReadbackBlocked, match="WINDOWS_METADATA_CHANGED"):
+        f.inspect(root, tmp_path / "helper")
