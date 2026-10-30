@@ -87,19 +87,27 @@ def _recovery_inventory(root: Path) -> tuple[tuple[Path, re.Match[str]], ...]:
     return tuple(sorted(recoveries, key=lambda item: item[0].name))
 
 
+def _recovery_evidence(root: Path) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (path.name, _json(path)[1])
+        for path, _ in _recovery_inventory(root)
+    )
+
+
 def _select_receipt(
     root: Path, expected_primary_receipt_sha: str | None
-) -> tuple[dict, Path, str, str, dict, str, tuple[str, ...]]:
+) -> tuple[dict, Path, str, str, dict, str, tuple[tuple[str, str], ...]]:
     primary_path = root / "update-receipt.json"
     primary, primary_sha = _json(primary_path)
     primary_source = primary.get("source_commit")
     if not isinstance(primary_source, str) or not COMMIT.fullmatch(primary_source):
         raise ReadbackBlocked("PRIMARY_SOURCE_COMMIT_INVALID")
     recoveries = _recovery_inventory(root)
-    recovery_names = tuple(path.name for path, _ in recoveries)
+    recovery_evidence: list[tuple[str, str]] = []
     current: list[tuple[dict, Path, str]] = []
     for path, match in recoveries:
         candidate, candidate_sha = _json(path)
+        recovery_evidence.append((path.name, candidate_sha))
         if candidate.get("source_commit") != CURRENT_DIAGNOSTIC_RULES_SHA:
             continue
         if (
@@ -115,7 +123,7 @@ def _select_receipt(
             raise ReadbackBlocked("RECOVERY_RECEIPT_CONFLICT")
         return (
             primary, primary_path, primary_sha, "primary", primary, primary_sha,
-            recovery_names,
+            tuple(recovery_evidence),
         )
     if len(current) > 1:
         raise ReadbackBlocked("RECOVERY_RECEIPT_AMBIGUOUS")
@@ -130,11 +138,11 @@ def _select_receipt(
         receipt, receipt_path, receipt_sha = current[0]
         return (
             receipt, receipt_path, receipt_sha, "recovery", primary, primary_sha,
-            recovery_names,
+            tuple(recovery_evidence),
         )
     return (
         primary, primary_path, primary_sha, "primary", primary, primary_sha,
-        recovery_names,
+        tuple(recovery_evidence),
     )
 
 def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str,
@@ -147,7 +155,7 @@ def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str,
     if root.is_symlink() or not root.is_dir():
         raise ReadbackBlocked("ROOT_INVALID")
     (receipt, receipt_path, receipt_sha, receipt_origin, primary_receipt,
-     primary_receipt_sha, recovery_names) = _select_receipt(
+     primary_receipt_sha, recovery_evidence) = _select_receipt(
          root, expected_primary_receipt_sha
      )
     backup_text = receipt.get("backup_dir")
@@ -240,7 +248,7 @@ def inventory(root: Path, legacy_receipt_sha: str, legacy_manifest_sha: str,
     }
     if (_json(receipt_path)[1] != receipt_sha
             or _json(root / "update-receipt.json")[1] != primary_receipt_sha
-            or tuple(path.name for path, _ in _recovery_inventory(root)) != recovery_names
+            or _recovery_evidence(root) != recovery_evidence
             or _json(backup / "rollback-manifest.json")[1] != manifest_sha):
         raise ReadbackBlocked("EVIDENCE_CHANGED")
     return result
