@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, fix/noteri-gateway-forensic-readonly-20261030]
+    branches: [main]
   pull_request:
 
 permissions:
