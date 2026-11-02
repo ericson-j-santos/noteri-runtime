@@ -49,6 +49,9 @@ jobs:
           if ($e.expected_sha -ne '${{ github.sha }}') { throw 'evidence_sha_mismatch' }
           if ($e.observed_sha -ne '${{ github.sha }}') { throw 'observed_sha_mismatch' }
           if (-not $e.source_sha_verified) { throw 'source_sha_not_verified' }
+          if ($e.watchdog_installation.installed_attested -ne $true) { throw 'watchdog_not_installed' }
+          if ($e.watchdog_installation.source_sha -ne '${{ github.sha }}') { throw 'watchdog_installed_source_sha_mismatch' }
+          if ($e.watchdog_installation.installed_sha256 -notmatch '^[0-9a-f]{64}$') { throw 'watchdog_installed_digest_invalid' }
           if ($e.production_touched) { throw 'production_touched' }
           if ($e.secrets_read) { throw 'secrets_read' }
           if ($e.rdc_required) { throw 'rdc_dependency_detected' }

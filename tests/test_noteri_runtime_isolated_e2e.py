@@ -115,3 +115,69 @@ def test_validate_independent_state_rejects_non_normal_final_state(tmp_path: Pat
             correlation_id="corr-noteri-runtime-001",
             e2e={"negative_control": {"http_status": 409, "error": "host_target_mismatch"}},
         )
+
+
+def test_attest_installed_watchdog_matches_git_source_and_runtime(tmp_path: Path) -> None:
+    source_root = tmp_path / "checkout"
+    localappdata = tmp_path / "local"
+    source = source_root / "scripts" / "noteri_control_plane_watchdog.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("print('watch')\\n", encoding="utf-8")
+    version = "a" * 40
+    runtime = localappdata / "ReqSys" / "NoteriControlPlaneWatchdog"
+    release = runtime / "releases" / version / "scripts" / source.name
+    release.parent.mkdir(parents=True)
+    release.write_bytes(source.read_bytes())
+    import hashlib
+
+    meta = {
+        "source_sha": version,
+        "release_script": str(release.resolve()),
+        "release_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "task": {"exists": True},
+    }
+    (runtime / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+    result = module.attest_installed_watchdog(source_root, version, localappdata=localappdata)
+    assert result["installed_attested"] is True
+    assert result["source_sha"] == version
+    assert result["installed_sha256"] == meta["release_sha256"]
+
+
+@pytest.mark.parametrize("failure", [
+    "missing", "wrong_sha", "wrong_path", "wrong_hash", "modified_binary", "no_task",
+])
+def test_attest_installed_watchdog_fails_closed(
+    tmp_path: Path, failure: str,
+) -> None:
+    import hashlib
+
+    source_root = tmp_path / "repo"
+    local = tmp_path / "local"
+    src = source_root / "scripts" / "noteri_control_plane_watchdog.py"
+    src.parent.mkdir(parents=True)
+    src.write_bytes(b"source-v1")
+    sha = "b" * 40
+    runtime = local / "ReqSys" / "NoteriControlPlaneWatchdog"
+    release = runtime / "releases" / sha / "scripts" / src.name
+    release.parent.mkdir(parents=True)
+    release.write_bytes(src.read_bytes())
+    meta = {
+        "source_sha": sha,
+        "release_script": str(release.resolve()),
+        "release_sha256": hashlib.sha256(src.read_bytes()).hexdigest(),
+        "task": {"exists": True},
+    }
+    if failure == "wrong_sha":
+        meta["source_sha"] = "a" * 40
+    elif failure == "wrong_path":
+        meta["release_script"] = str(src.resolve())
+    elif failure == "wrong_hash":
+        meta["release_sha256"] = "0" * 64
+    elif failure == "modified_binary":
+        release.write_bytes(b"tampered")
+    elif failure == "no_task":
+        meta["task"] = {"exists": False}
+    if failure != "missing":
+        (runtime / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises((RuntimeError, OSError)):
+        module.attest_installed_watchdog(source_root, sha, localappdata=local)

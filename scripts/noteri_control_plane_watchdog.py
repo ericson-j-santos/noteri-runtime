@@ -110,6 +110,9 @@ def runner_running() -> bool:
 
 
 def start_runner(runner_home: Path, timeout_seconds: float = 15.0) -> bool:
+    # Releitura imediatamente antes do processo: transições para ESTUDO são bloqueantes.
+    if runtime_profile() != "NORMAL":
+        return False
     root = validate_runner_home(runner_home)
     comspec = Path(os.environ.get("ComSpec") or r"C:\Windows\System32\cmd.exe")
     if not comspec.is_file():
@@ -120,7 +123,7 @@ def start_runner(runner_home: Path, timeout_seconds: float = 15.0) -> bool:
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
         close_fds=True,
     )
     deadline = time.monotonic() + timeout_seconds
@@ -138,8 +141,49 @@ def atomic_json(path: Path, payload: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def runtime_profile() -> str:
+    """Consulta o perfil persistido; perfil ausente/inconsistente bloqueia o runner."""
+    path = runtime_root().parent / "TodoGlobal24x7" / "host-profile.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return "UNVERIFIED"
+    if not isinstance(payload, dict):
+        return "UNVERIFIED"
+    if str(payload.get("host") or "").casefold() != EXPECTED_HOST.casefold():
+        return "UNVERIFIED"
+    profile = payload.get("profile")
+    accepts_development = payload.get("accepts_new_development")
+    if profile == "NORMAL" and accepts_development is True:
+        return "NORMAL"
+    if profile == "ESTUDO" and accepts_development is False:
+        return "ESTUDO"
+    return "UNVERIFIED"
+
+
 def cycle(runner_home: Path) -> dict[str, Any]:
     host = require_noteri()
+    profile = runtime_profile()
+    if profile != "NORMAL":
+        # ESTUDO não deve sondar nem iniciar executores. Perfil inválido falha fechado.
+        payload = {
+            "ok": profile == "ESTUDO",
+            "status": "paused_study_mode" if profile == "ESTUDO" else "blocked_profile_unverified",
+            "service": SERVICE_NAME,
+            "host": host,
+            "profile": profile,
+            "runner_running_before": None,
+            "runner_start_attempted": False,
+            "runner_started": False,
+            "runner_running_after": None,
+            "rdc_required": False,
+            "production_touched": False,
+            "secrets_read": False,
+            "reboot_performed": False,
+            "observed_at": now_iso(),
+        }
+        atomic_json(state_path(), payload)
+        return payload
     root = validate_runner_home(runner_home)
     before = runner_running()
     started = False
@@ -150,6 +194,7 @@ def cycle(runner_home: Path) -> dict[str, Any]:
         "ok": bool(after),
         "service": SERVICE_NAME,
         "host": host,
+        "profile": profile,
         "runner_home": str(root),
         "runner_running_before": before,
         "runner_start_attempted": not before,
@@ -649,9 +694,14 @@ def watch(runner_home: Path, interval_seconds: int) -> int:
     require_noteri()
     validate_runner_home(runner_home)
     interval = max(5, min(interval_seconds, 300))
+    retry_delay = interval
     while True:
-        cycle(runner_home)
-        time.sleep(interval)
+        result = cycle(runner_home)
+        if result.get("profile") == "NORMAL" and not result.get("ok"):
+            retry_delay = min(300, max(interval, retry_delay * 2))
+        else:
+            retry_delay = interval
+        time.sleep(retry_delay)
 
 
 def main() -> int:
