@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -158,6 +159,52 @@ def validate_independent_state(
     }
 
 
+
+def attest_installed_watchdog(root: Path, expected_sha: str, *, localappdata: Path | None = None) -> dict[str, Any]:
+    """Comprova os bytes instalados, não somente o checkout do GitHub.
+
+    Este gate NÃO atesta processo em execução nem ausência de janelas CMD;
+    tais efeitos exigem E2E físico separado e observação independente.
+    """
+    if not _SHA_RE.fullmatch(expected_sha):
+        raise ValueError("watchdog_expected_sha_invalid")
+    if localappdata is None:
+        appdata = os.environ.get("LOCALAPPDATA")
+        if not appdata:
+            raise RuntimeError("watchdog_localappdata_missing")
+        localappdata = Path(appdata)
+    runtime = localappdata / "ReqSys" / "NoteriControlPlaneWatchdog"
+    meta = read_json(runtime / "metadata.json")
+    release = runtime / "releases" / expected_sha / "scripts" / "noteri_control_plane_watchdog.py"
+    source = root / "scripts" / "noteri_control_plane_watchdog.py"
+
+    # Atribuições do metadata não podem escolher outro caminho.
+    if meta.get("source_sha") != expected_sha:
+        raise RuntimeError("watchdog_installed_sha_mismatch")
+    recorded = meta.get("release_script")
+    if not isinstance(recorded, str) or not recorded.strip():
+        raise RuntimeError("watchdog_release_path_missing")
+    if Path(recorded).resolve() != release.resolve():
+        raise RuntimeError("watchdog_release_path_mismatch")
+    if not source.is_file() or not release.is_file():
+        raise RuntimeError("watchdog_installation_missing")
+    expected_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    actual_digest = hashlib.sha256(release.read_bytes()).hexdigest()
+    if meta.get("release_sha256") != expected_digest or actual_digest != expected_digest:
+        raise RuntimeError("watchdog_installed_digest_mismatch")
+    # O metadata não comprova sozinho o vínculo com o Agendador; exigir prova
+    # explícita e limitada da tarefa persistente antes de qualificar a cópia.
+    if (meta.get("task") or {}).get("exists") is not True:
+        raise RuntimeError("watchdog_persistent_task_unverified")
+    return {
+        "installed_attested": True,
+        "source_sha": expected_sha,
+        "installed_sha256": actual_digest,
+        "persistent_task_reported": True,
+        "limitation": "task_and_process_live_readback_required",
+    }
+
+
 def terminate(process: subprocess.Popen[str]) -> None:
     if process.poll() is not None:
         return
@@ -186,7 +233,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     if observed_sha != expected_sha:
         raise RuntimeError(f"source_sha_mismatch:{observed_sha}")
 
+    # Falhar antes do E2E isolado se a cópia persistente no Noteri estiver velha.
+    installed = attest_installed_watchdog(root, expected_sha)
+
     evidence: dict[str, Any] = {
+        "watchdog_installation": installed,
         "schema_version": "1",
         "ok": False,
         "host": socket.gethostname(),
