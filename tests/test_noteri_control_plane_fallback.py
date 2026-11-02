@@ -153,6 +153,7 @@ def test_watchdog_cycle_starts_runner_when_listener_missing(monkeypatch, tmp_pat
     (root / "bin" / "Runner.Listener.exe").write_bytes(b"stub")
     observed = iter([False, True])
     monkeypatch.setattr(watchdog, "require_noteri", lambda: "Noteri")
+    monkeypatch.setattr(watchdog, "runtime_profile", lambda: "NORMAL")
     monkeypatch.setattr(watchdog, "runner_running", lambda: next(observed))
     monkeypatch.setattr(watchdog, "start_runner", lambda path: True)
     monkeypatch.setattr(watchdog, "runtime_root", lambda: tmp_path / "runtime")
@@ -490,3 +491,100 @@ def test_probe_runner_registry_reports_access_denied_without_secret_leak(monkeyp
         "state": "runner_registry_access_denied",
         "http_hint": "forbidden_or_missing_permission",
     }
+
+
+def test_watchdog_profile_fail_closed_and_valid_transitions(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    target = tmp_path / "ReqSys" / "TodoGlobal24x7" / "host-profile.json"
+    assert watchdog.runtime_profile() == "UNVERIFIED"
+
+    target.parent.mkdir(parents=True)
+    target.write_text(json.dumps({
+        "host": "Noteri", "profile": "NORMAL", "accepts_new_development": True,
+    }), encoding="utf-8")
+    assert watchdog.runtime_profile() == "NORMAL"
+
+    target.write_text(json.dumps({
+        "host": "Noteri", "profile": "ESTUDO", "accepts_new_development": False,
+    }), encoding="utf-8")
+    assert watchdog.runtime_profile() == "ESTUDO"
+
+    for invalid in [
+        {"host": "Noteri", "profile": "NORMAL", "accepts_new_development": False},
+        {"host": "wrong-host", "profile": "NORMAL", "accepts_new_development": True},
+        {"host": "Noteri", "profile": "UNKNOWN", "accepts_new_development": True},
+        {"host": "Noteri", "profile": "NORMAL"},
+    ]:
+        target.write_text(json.dumps(invalid), encoding="utf-8")
+        assert watchdog.runtime_profile() == "UNVERIFIED"
+    target.write_text("{corrupted", encoding="utf-8")
+    assert watchdog.runtime_profile() == "UNVERIFIED"
+
+
+@pytest.mark.parametrize("profile,expected_status,expected_ok", [
+    ("ESTUDO", "paused_study_mode", True),
+    ("UNVERIFIED", "blocked_profile_unverified", False),
+])
+def test_watchdog_study_and_unverified_never_probe_or_launch(
+    monkeypatch, tmp_path: Path, profile: str, expected_status: str, expected_ok: bool,
+) -> None:
+    def forbidden(*args, **kwargs):
+        raise AssertionError("No runner or cmd invocation allowed in ESTUDO/UNVERIFIED")
+
+    written = {}
+    monkeypatch.setattr(watchdog, "require_noteri", lambda: "Noteri")
+    monkeypatch.setattr(watchdog, "runtime_profile", lambda: profile)
+    monkeypatch.setattr(watchdog, "validate_runner_home", forbidden)
+    monkeypatch.setattr(watchdog, "runner_running", forbidden)
+    monkeypatch.setattr(watchdog, "start_runner", forbidden)
+    monkeypatch.setattr(watchdog, "atomic_json", lambda path, payload: written.update(payload))
+    monkeypatch.setattr(watchdog, "runtime_root", lambda: tmp_path)
+
+    for _ in range(2):  # repetição idempotente
+        result = watchdog.cycle(tmp_path / "runner")
+        assert result["status"] == expected_status
+        assert result["ok"] is expected_ok
+        assert result["runner_start_attempted"] is False
+        assert written["status"] == expected_status
+
+
+def test_start_runner_blocks_change_to_estudo_before_cmd(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(watchdog, "runtime_profile", lambda: "ESTUDO")
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Runner must not be started after study transition")
+    monkeypatch.setattr(watchdog, "validate_runner_home", forbidden)
+    monkeypatch.setattr(watchdog.subprocess, "Popen", forbidden)
+    assert watchdog.start_runner(tmp_path / "runner") is False
+
+
+def test_start_runner_uses_hidden_console_in_normal(monkeypatch, tmp_path: Path) -> None:
+    runner = tmp_path / "runner"
+    runner.mkdir()
+    (runner / "run.cmd").write_text("@echo off", encoding="utf-8")
+    cmd = tmp_path / "cmd.exe"
+    cmd.write_bytes(b"fake")
+    monkeypatch.setenv("ComSpec", str(cmd))
+    monkeypatch.setattr(watchdog, "runtime_profile", lambda: "NORMAL")
+    monkeypatch.setattr(watchdog, "validate_runner_home", lambda path: runner)
+    monkeypatch.setattr(watchdog, "runner_running", lambda: True)
+    monkeypatch.setattr(watchdog.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(watchdog.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    observed = {}
+
+    class FakeProcess:
+        pid = 12345
+        def poll(self):
+            return None
+
+    def fake_popen(command, **kwargs):
+        observed["command"] = command
+        observed.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(watchdog.subprocess, "Popen", fake_popen)
+    assert watchdog.start_runner(runner) is True
+    assert observed["command"][0] == str(cmd)
+    assert observed["command"][1:3] == ["/d", "/c"]
+    assert observed["creationflags"] & 0x08000000
+    assert observed["stdout"] is watchdog.subprocess.DEVNULL
+    assert observed["stderr"] is watchdog.subprocess.DEVNULL
