@@ -78,6 +78,13 @@ def test_probe_proves_runner_without_rdc(monkeypatch) -> None:
             "elevated": {"exists": False},
         },
     )
+    # Este teste de contrato do host não deve chamar gh api / rede real;
+    # a lógica do registro GitHub tem testes específicos com subprocess mockado.
+    monkeypatch.setattr(
+        probe,
+        "github_runner_registry_probe",
+        lambda: {"ok": False, "state": "unit_test_no_external_probe"},
+    )
     monkeypatch.setenv("RUNNER_NAME", "noteri-reqsys-dev")
     monkeypatch.setenv("RUNNER_OS", "Windows")
     monkeypatch.setenv("RUNNER_ARCH", "X64")
@@ -88,6 +95,7 @@ def test_probe_proves_runner_without_rdc(monkeypatch) -> None:
     assert result["headless_ready"] is True
     assert result["headless_task"]["trigger_at_startup"] is True
     assert result["headless_task"]["logon_type"] == "S4U"
+    assert result["github_runner_registry"]["state"] == "unit_test_no_external_probe"
     assert result["rdc_required"] is False
     assert result["production_touched"] is False
     assert result["secrets_read"] is False
