@@ -21,7 +21,7 @@ def assert_readonly_contract(text: str) -> None:
     assert "runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]" in text
     assert "permissions:\n  contents: read" in text
     assert "21fd68dec6f0da92b3e7da201463401ac5429d64" in text
-    assert "4e6091a133f8d7d157abe6f83c31ca597812e0a4" in text
+    assert "11e2e86d0283e83247d8058d05bbabe3dd7cc2c2" in text
     assert "repository: ericson-j-santos/engineering-worker-pool" in text
     assert "path: _worker_pool" in text
     assert text.count("persist-credentials: false") == 4
