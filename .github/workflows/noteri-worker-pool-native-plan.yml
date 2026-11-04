@@ -16,7 +16,7 @@ concurrency:
 
 env:
   WORKER_POOL_SHA: 21fd68dec6f0da92b3e7da201463401ac5429d64
-  RULES_SHA: 4e6091a133f8d7d157abe6f83c31ca597812e0a4
+  RULES_SHA: 11e2e86d0283e83247d8058d05bbabe3dd7cc2c2
   CORRELATION_ID: noteri-pool-plan-${{ github.run_id }}-${{ github.run_attempt }}
   EVIDENCE_FILE: artifacts/noteri-pool-stage-plan/evidence.json
   PYTHONDONTWRITEBYTECODE: '1'
