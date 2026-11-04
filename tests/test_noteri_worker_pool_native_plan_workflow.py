@@ -41,6 +41,11 @@ def assert_readonly_contract(text: str) -> None:
     assert "needs.native-plan.outputs.receipt_b64" in text
     assert "needs.native-plan.outputs.receipt_sha256" in text
     assert "NOTERI_STAGE_PLAN_CROSS_JOB_SHA256_OK" in text
+    assert "STAGE_PLAN_EVIDENCE_SCHEMA_INVALID" in text
+    assert "STAGE_PLAN_FILE_COUNT_INVALID" in text
+    assert "Where-Object { $_ -cnotin $allowedKeys }" in text
+    assert "$safeReceipt | ConvertTo-Json" in text
+    assert "$evidence | ConvertTo-Json" not in text
     assert "MISSING_RECEIPT_FALSE_POSITIVE" in text
     assert "TAMPERED_RECEIPT_FALSE_POSITIVE" in text
     assert "sha256sum" in text
@@ -70,6 +75,8 @@ def test_stage_plan_workflow_is_bounded_and_read_only() -> None:
         ("'--risk', '1'", "'--risk', '3'"),
         ("github.ref == 'refs/heads/main'", "github.ref != 'refs/heads/main'"),
         ("persist-credentials: false", "persist-credentials: true"),
+        ("$safeReceipt | ConvertTo-Json", "$evidence | ConvertTo-Json"),
+        ("$_ -cnotin $allowedKeys", "$_ -cin $allowedKeys"),
         ("'--mode', 'plan'", "'--mode', 'plan', '--confirm', 'STAGE-NOTERI-WORKER-POOL'"),
     ],
 )

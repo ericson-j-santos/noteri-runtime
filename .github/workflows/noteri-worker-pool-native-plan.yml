@@ -94,8 +94,24 @@ jobs:
           $evidence = $envelope.stdout | ConvertFrom-Json
           if ($evidence.source_sha -ne $env:WORKER_POOL_SHA -or $evidence.activated -ne $false -or $evidence.secrets_read -ne $false -or $envelope.state_changed -ne $false -or $evidence.state_changed -ne $false) { throw 'STAGE_PLAN_EVIDENCE_INVALID' }
           if ($exitCode -ne 0 -or $evidence.result -ne 'STAGE_PLAN_READY') { throw 'STAGE_PLAN_BLOCKED' }
-          # Serialize only the sanitized six-field plan receipt; no artifact storage.
-          $json = [string]($evidence | ConvertTo-Json -Depth 6 -Compress)
+          # Validate and project only six public fields before leaving the Noteri host.
+          $allowedKeys = @('activated', 'file_count', 'result', 'secrets_read', 'source_sha', 'state_changed')
+          $observedKeys = @($evidence.PSObject.Properties.Name)
+          if ($observedKeys.Count -ne $allowedKeys.Count -or @($observedKeys | Where-Object { $_ -cnotin $allowedKeys }).Count -ne 0) {
+            throw 'STAGE_PLAN_EVIDENCE_SCHEMA_INVALID'
+          }
+          if ($evidence.file_count -isnot [int] -or $evidence.file_count -lt 1 -or $evidence.file_count -gt 800) {
+            throw 'STAGE_PLAN_FILE_COUNT_INVALID'
+          }
+          $safeReceipt = [ordered]@{
+            result = 'STAGE_PLAN_READY'
+            source_sha = $env:WORKER_POOL_SHA
+            file_count = [int]$evidence.file_count
+            state_changed = $false
+            activated = $false
+            secrets_read = $false
+          }
+          $json = [string]($safeReceipt | ConvertTo-Json -Depth 3 -Compress)
           $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
           if ($bytes.Length -lt 20 -or $bytes.Length -gt 4096) { throw 'STAGE_PLAN_OUTPUT_SIZE_INVALID' }
           $sha = [System.Security.Cryptography.SHA256]::Create()
