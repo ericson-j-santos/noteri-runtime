@@ -1,11 +1,9 @@
 name: Noteri Worker Pool Native Stage Plan
 
+# Only an explicitly authorized workflow_dispatch may reach the physical Noteri.
+# Merging code into main is not authorization to run on the host.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/noteri-worker-pool-native-plan.yml
 
 permissions:
   contents: read
