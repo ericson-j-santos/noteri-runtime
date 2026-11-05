@@ -42,7 +42,7 @@ def validate_artifact(path: Path, expected_source_sha: str) -> dict:
         raise ReadbackBlocked("artifact_json_invalid") from exc
     if not isinstance(payload, dict) or set(payload) != EXPECTED_KEYS:
         raise ReadbackBlocked("artifact_schema_invalid")
-    if payload["result"] != "STAGE_PLAN_READY":
+    if payload["result"] not in ("STAGE_PLAN_READY", "ALREADY_STAGED"):
         raise ReadbackBlocked("plan_result_invalid")
     if payload["source_sha"] != expected_source_sha:
         raise ReadbackBlocked("source_sha_mismatch")
@@ -53,6 +53,7 @@ def validate_artifact(path: Path, expected_source_sha: str) -> dict:
         raise ReadbackBlocked("read_only_invariant_failed")
     return {
         "result": "PLAN_READBACK_OK",
+        "source_result": payload["result"],
         "source_sha": expected_source_sha,
         "file_count": count,
         "state_changed": False,

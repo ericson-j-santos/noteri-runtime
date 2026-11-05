@@ -71,6 +71,32 @@ def test_staged_release_has_digest_manifest_and_idempotent_replay(tmp_path: Path
     assert list((tmp_path / "releases").iterdir()) == [target]
 
 
+
+def test_existing_release_readonly_plan_requires_intact_manifest_and_never_writes(tmp_path: Path) -> None:
+    repo = source_tree(tmp_path)
+    first = invoke(repo, tmp_path, dry_run=False)
+    assert first["result"] == "STAGED_ONLY"
+    releases = tmp_path / "releases"
+    before = {file.relative_to(releases).as_posix(): file.read_bytes()
+              for file in releases.rglob("*") if file.is_file()}
+    result = invoke(repo, tmp_path, dry_run=True)
+    assert result["result"] == "ALREADY_STAGED"
+    assert result["source_sha"] == SHA
+    assert result["state_changed"] is False
+    assert result["activated"] is False
+    assert result["secrets_read"] is False
+    after = {file.relative_to(releases).as_posix(): file.read_bytes()
+             for file in releases.rglob("*") if file.is_file()}
+    assert before == after
+    assert not (releases / ".stage.lock").exists()
+
+    tampered = releases / SHA / "app" / "main.py"
+    tampered.write_text("tampered", encoding="utf-8")
+    with pytest.raises(stage.StageBlocked, match="existing_release_integrity_mismatch"):
+        invoke(repo, tmp_path, dry_run=True)
+    assert tampered.read_text(encoding="utf-8") == "tampered"
+
+
 @pytest.mark.parametrize(
     "reason,override",
     [
