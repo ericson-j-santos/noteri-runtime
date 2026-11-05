@@ -14,8 +14,8 @@ def workflow() -> str:
 
 def assert_readonly_contract(text: str) -> None:
     assert "on:\n  workflow_dispatch:\n" in text
-    assert "\\n  push:" not in text
-    assert "\\n  pull_request:" not in text
+    assert "\n  push:" not in text
+    assert "\n  pull_request:" not in text
     assert "branches: [main]" not in text
     assert text.count("github.ref == 'refs/heads/main'") == 2
     assert "github.repository == 'ericson-j-santos/noteri-runtime'" in text
@@ -79,6 +79,8 @@ def test_stage_plan_workflow_is_bounded_and_read_only() -> None:
         ("persist-credentials: false", "persist-credentials: true"),
         ("  workflow_dispatch:\n", "  workflow_dispatch:\n  push:\n    branches: [main]\n"),
         ("  workflow_dispatch:\n", "  push:\n    branches: [main]\n"),
+        ("  workflow_dispatch:\n", "  workflow_dispatch:\n  push:\n"),
+        ("  workflow_dispatch:\n", "  workflow_dispatch:\n  pull_request:\n"),
         ("$safeReceipt | ConvertTo-Json", "$evidence | ConvertTo-Json"),
         ("$_ -cnotin $allowedKeys", "$_ -cin $allowedKeys"),
         ("'--mode', 'plan'", "'--mode', 'plan', '--confirm', 'STAGE-NOTERI-WORKER-POOL'"),
