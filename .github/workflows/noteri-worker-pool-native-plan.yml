@@ -1,11 +1,9 @@
 name: Noteri Worker Pool Native Stage Plan
 
+# Only an explicitly authorized workflow_dispatch may reach the physical Noteri.
+# Merging code into main is not authorization to run on the host.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/noteri-worker-pool-native-plan.yml
 
 permissions:
   contents: read
@@ -16,9 +14,8 @@ concurrency:
 
 env:
   WORKER_POOL_SHA: 21fd68dec6f0da92b3e7da201463401ac5429d64
-  RULES_SHA: 4e6091a133f8d7d157abe6f83c31ca597812e0a4
+  RULES_SHA: 11e2e86d0283e83247d8058d05bbabe3dd7cc2c2
   CORRELATION_ID: noteri-pool-plan-${{ github.run_id }}-${{ github.run_attempt }}
-  EVIDENCE_FILE: artifacts/noteri-pool-stage-plan/evidence.json
   PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
@@ -30,6 +27,9 @@ jobs:
     name: Plan immutable Worker Pool stage without host mutation
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 8
+    outputs:
+      receipt_b64: ${{ steps.plan.outputs.receipt_b64 }}
+      receipt_sha256: ${{ steps.plan.outputs.receipt_sha256 }}
     steps:
       - name: Checkout current trusted Noteri main
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -91,21 +91,37 @@ jobs:
           $envelope = @($raw)[-1] | ConvertFrom-Json
           $evidence = $envelope.stdout | ConvertFrom-Json
           if ($evidence.source_sha -ne $env:WORKER_POOL_SHA -or $evidence.activated -ne $false -or $evidence.secrets_read -ne $false -or $envelope.state_changed -ne $false -or $evidence.state_changed -ne $false) { throw 'STAGE_PLAN_EVIDENCE_INVALID' }
-          New-Item -ItemType Directory -Force (Split-Path $env:EVIDENCE_FILE) | Out-Null
-          $evidence | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $env:EVIDENCE_FILE -Encoding UTF8
           if ($exitCode -ne 0 -or $evidence.result -ne 'STAGE_PLAN_READY') { throw 'STAGE_PLAN_BLOCKED' }
-
-      - name: Upload sanitized read-only evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: noteri-worker-pool-plan-${{ github.run_id }}
-          path: artifacts/noteri-pool-stage-plan/evidence.json
-          if-no-files-found: warn
-          retention-days: 7
+          # Validate and project only six public fields before leaving the Noteri host.
+          $allowedKeys = @('activated', 'file_count', 'result', 'secrets_read', 'source_sha', 'state_changed')
+          $observedKeys = @($evidence.PSObject.Properties.Name)
+          if ($observedKeys.Count -ne $allowedKeys.Count -or @($observedKeys | Where-Object { $_ -cnotin $allowedKeys }).Count -ne 0) {
+            throw 'STAGE_PLAN_EVIDENCE_SCHEMA_INVALID'
+          }
+          if ($evidence.file_count -isnot [int] -or $evidence.file_count -lt 1 -or $evidence.file_count -gt 800) {
+            throw 'STAGE_PLAN_FILE_COUNT_INVALID'
+          }
+          $safeReceipt = [ordered]@{
+            result = 'STAGE_PLAN_READY'
+            source_sha = $env:WORKER_POOL_SHA
+            file_count = [int]$evidence.file_count
+            state_changed = $false
+            activated = $false
+            secrets_read = $false
+          }
+          $json = [string]($safeReceipt | ConvertTo-Json -Depth 3 -Compress)
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+          if ($bytes.Length -lt 20 -or $bytes.Length -gt 4096) { throw 'STAGE_PLAN_OUTPUT_SIZE_INVALID' }
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          try {
+            $digest = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+          } finally { $sha.Dispose() }
+          "receipt_b64=$([Convert]::ToBase64String($bytes))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          "receipt_sha256=$digest" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          Write-Output 'NOTERI_STAGE_PLAN_RECEIPT_OK'
 
   independent-readback:
-    name: Independently verify plan artifact bytes
+    name: Independently verify plan receipt bytes without artifact storage
     needs: native-plan
     if: >-
       needs.native-plan.result == 'success' &&
@@ -122,11 +138,29 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Download artifact from this run
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: noteri-worker-pool-plan-${{ github.run_id }}
-          path: .tmp/noteri-plan-readback
+      - name: Validate cross-job receipt digest and negative controls
+        env:
+          RECEIPT_B64: ${{ needs.native-plan.outputs.receipt_b64 }}
+          RECEIPT_SHA256: ${{ needs.native-plan.outputs.receipt_sha256 }}
+        run: |
+          set -euo pipefail
+          verify() {
+            local b64="$1" digest="$2" observed
+            test -n "$b64" || return 1
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+            observed="$(printf '%s' "$b64" | base64 --decode | sha256sum | cut -d' ' -f1)" || return 1
+            test "$observed" = "$digest"
+          }
+          verify "$RECEIPT_B64" "$RECEIPT_SHA256"
+          if verify "" "$RECEIPT_SHA256"; then echo 'MISSING_RECEIPT_FALSE_POSITIVE'; exit 2; fi
+          if verify "$RECEIPT_B64" '0000000000000000000000000000000000000000000000000000000000000000'; then echo 'TAMPERED_RECEIPT_FALSE_POSITIVE'; exit 3; fi
+          test "${#RECEIPT_B64}" -le 5500
+          mkdir -p .tmp/noteri-plan-readback
+          printf '%s' "$RECEIPT_B64" | base64 --decode > .tmp/noteri-plan-readback/evidence.json
+          test -s .tmp/noteri-plan-readback/evidence.json
+          test "$(wc -c < .tmp/noteri-plan-readback/evidence.json)" -le 4096
+          test "$(sha256sum .tmp/noteri-plan-readback/evidence.json | cut -d' ' -f1)" = "$RECEIPT_SHA256"
+          echo NOTERI_STAGE_PLAN_CROSS_JOB_SHA256_OK
       - name: Validate exact sanitized JSON and log receipt
         run: >-
           python3 -B scripts/validate_noteri_worker_pool_plan_artifact.py
