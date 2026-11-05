@@ -38,8 +38,9 @@ def _invoke(payload: dict, code: int = 0) -> subprocess.CompletedProcess[str]:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires hosted Windows PowerShell 5.1")
-def test_valid_plan_does_not_emit_failure() -> None:
-    done = _invoke({"result": "STAGE_PLAN_READY", "source_sha": "a" * 40})
+@pytest.mark.parametrize("source_result", ["STAGE_PLAN_READY", "ALREADY_STAGED"])
+def test_valid_plan_does_not_emit_failure(source_result: str) -> None:
+    done = _invoke({"result": source_result, "source_sha": "a" * 40})
     assert done.returncode == 0, done.stderr
     assert "SAFE_DIAG_CONTINUED" in done.stdout
 
@@ -47,7 +48,7 @@ def test_valid_plan_does_not_emit_failure() -> None:
 @pytest.mark.skipif(os.name != "nt", reason="requires hosted Windows PowerShell 5.1")
 @pytest.mark.parametrize(
     "receipt,exit_code,expected", [
-        ({"result": "ALREADY_STAGED"}, 0, "ALREADY_STAGED"),
+        ({"result": "ALREADY_STAGED"}, 2, "ALREADY_STAGED"),
         ({"result": "STAGE_BLOCKED", "reason": "profile_unavailable"}, 2, "profile_unavailable"),
         ({"result": "STAGE_BLOCKED", "reason": "profile_not_normal"}, 2, "profile_not_normal"),
         ({"result": "STAGE_BLOCKED", "reason": "source_identity_unverified"}, 2, "source_identity_unverified"),

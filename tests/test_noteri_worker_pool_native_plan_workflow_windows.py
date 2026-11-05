@@ -71,13 +71,15 @@ def _decoded_output(path: Path) -> tuple[dict, bytes, str]:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires hosted Windows PowerShell 5.1")
-def test_actual_worker_pool_projection_sends_only_allowlisted_fields(tmp_path: Path) -> None:
-    result, outfile = _execute(tmp_path, VALID)
+@pytest.mark.parametrize("source_result", ["STAGE_PLAN_READY", "ALREADY_STAGED"])
+def test_actual_worker_pool_projection_sends_only_allowlisted_fields(tmp_path: Path, source_result: str) -> None:
+    payload = {**VALID, "result": source_result}
+    result, outfile = _execute(tmp_path, payload)
     assert result.returncode == 0, result.stderr
     assert "NOTERI_STAGE_PLAN_RECEIPT_OK" in result.stdout
     receipt, _raw, _digest = _decoded_output(outfile)
     assert set(receipt) == FIELDS
-    assert receipt == VALID
+    assert receipt == payload
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires hosted Windows PowerShell 5.1")

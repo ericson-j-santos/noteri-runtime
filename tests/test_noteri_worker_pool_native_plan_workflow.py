@@ -33,6 +33,8 @@ def assert_readonly_contract(text: str) -> None:
     assert "'--risk', '1'" in text
     assert "noteri_worker_pool_native_stage.py" in text
     assert "'--mode', 'plan'" in text
+    assert "($evidence.result -cne \'STAGE_PLAN_READY\' -and $evidence.result -cne \'ALREADY_STAGED\')" in text
+    assert "result = [string]$evidence.result" in text
     assert "state_changed -ne $false" in text
     assert "activated -ne $false" in text
     assert "secrets_read -ne $false" in text
@@ -82,6 +84,8 @@ def test_stage_plan_workflow_is_bounded_and_read_only() -> None:
         ("  workflow_dispatch:\n", "  workflow_dispatch:\n  push:\n"),
         ("  workflow_dispatch:\n", "  workflow_dispatch:\n  pull_request:\n"),
         ("$safeReceipt | ConvertTo-Json", "$evidence | ConvertTo-Json"),
+        (" -and $evidence.result -cne \'ALREADY_STAGED\'", ""),
+        ("result = [string]$evidence.result", "result = \'STAGE_PLAN_READY\'"),
         ("$_ -cnotin $allowedKeys", "$_ -cin $allowedKeys"),
         ("'--mode', 'plan'", "'--mode', 'plan', '--confirm', 'STAGE-NOTERI-WORKER-POOL'"),
     ],

@@ -26,11 +26,13 @@ def evidence(**overrides: object) -> dict:
     return payload
 
 
-def test_independent_readback_accepts_powershell_utf8_bom(tmp_path: Path) -> None:
+@pytest.mark.parametrize("source_result", ["STAGE_PLAN_READY", "ALREADY_STAGED"])
+def test_independent_readback_accepts_powershell_utf8_bom(tmp_path: Path, source_result: str) -> None:
     path = tmp_path / "evidence.json"
-    path.write_bytes(b"\xef\xbb\xbf" + json.dumps(evidence()).encode("utf-8"))
+    path.write_bytes(b"\xef\xbb\xbf" + json.dumps(evidence(result=source_result)).encode("utf-8"))
     receipt = validate_artifact(path, SOURCE_SHA)
     assert receipt["result"] == "PLAN_READBACK_OK"
+    assert receipt["source_result"] == source_result
     assert receipt["file_count"] == 18
     assert len(receipt["evidence_sha256"]) == 64
 
@@ -39,6 +41,10 @@ def test_independent_readback_accepts_powershell_utf8_bom(tmp_path: Path) -> Non
     "change",
     [
         {"result": "STAGED_ONLY"},
+        {"result": "STAGE_BLOCKED"},
+        {"result": "ALREADY_STAGED", "state_changed": True},
+        {"result": "ALREADY_STAGED", "activated": True},
+        {"result": "ALREADY_STAGED", "source_sha": "0" * 40},
         {"source_sha": "0" * 40},
         {"file_count": 0},
         {"file_count": True},
