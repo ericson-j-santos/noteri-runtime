@@ -90,8 +90,25 @@ jobs:
           if (-not $raw) { throw 'STAGE_PLAN_GATEWAY_RECEIPT_MISSING' }
           $envelope = @($raw)[-1] | ConvertFrom-Json
           $evidence = $envelope.stdout | ConvertFrom-Json
+          # BEGIN bounded plan-failure classification (no raw Gateway evidence).
+          if ($exitCode -ne 0 -or $evidence.result -cne 'STAGE_PLAN_READY') {
+            $safeCode = 'UNCLASSIFIED'
+            $knownReasons = @('activation_not_supported', 'host_not_allowed', 'profile_not_normal', 'source_sha_invalid', 'source_identity_unverified', 'source_git_unavailable', 'source_invalid', 'source_tree_invalid', 'source_link_forbidden', 'source_unexpected_type', 'source_extension_unexpected', 'source_requirements_missing', 'source_contract_missing', 'source_too_many_files', 'source_file_too_large', 'source_too_large', 'existing_release_integrity_mismatch', 'release_link_forbidden', 'stage_lock_busy', 'stage_lock_unavailable', 'concurrent_release_present', 'stage_copy_integrity_failed', 'stage_manifest_invalid', 'trusted_execution_context_missing', 'stage_confirmation_missing', 'profile_unavailable', 'stage_io_unavailable')
+            if ($evidence.result -ceq 'ALREADY_STAGED') {
+              $safeCode = 'ALREADY_STAGED'
+            } elseif ($evidence.result -ceq 'STAGE_BLOCKED') {
+              if ($evidence.reason -is [string] -and $knownReasons -ccontains $evidence.reason) {
+                $safeCode = [string]$evidence.reason
+              } else {
+                $safeCode = 'STAGE_BLOCKED_UNKNOWN'
+              }
+            } elseif ($exitCode -ne 0) {
+              $safeCode = 'GATEWAY_NONZERO'
+            }
+            throw ('STAGE_PLAN_BLOCKED_' + $safeCode)
+          }
+          # END bounded plan-failure classification.
           if ($evidence.source_sha -ne $env:WORKER_POOL_SHA -or $evidence.activated -ne $false -or $evidence.secrets_read -ne $false -or $envelope.state_changed -ne $false -or $evidence.state_changed -ne $false) { throw 'STAGE_PLAN_EVIDENCE_INVALID' }
-          if ($exitCode -ne 0 -or $evidence.result -ne 'STAGE_PLAN_READY') { throw 'STAGE_PLAN_BLOCKED' }
           # Validate and project only six public fields before leaving the Noteri host.
           $allowedKeys = @('activated', 'file_count', 'result', 'secrets_read', 'source_sha', 'state_changed')
           $observedKeys = @($evidence.PSObject.Properties.Name)
