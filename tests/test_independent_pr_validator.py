@@ -1,6 +1,5 @@
 import copy
 import importlib.util
-import json
 from pathlib import Path
 
 import pytest
@@ -68,7 +67,8 @@ def test_workflow_is_read_only_sha_bound_and_has_independent_readback():
     assert "contents: read" in workflow
     assert "pull-requests: read" in workflow
     assert "independent_readback:" in workflow
-    assert "github.event.workflow_run.head_sha" in workflow
+    assert "head_sha:source.head_sha" in workflow
+    assert "EXPECTED_HEAD_SHA" in workflow
     assert "permissions: write" not in workflow
     assert "ref: ${{ github.event.workflow_run.head_sha }}" not in workflow
     assert "pull_request_target" not in workflow
