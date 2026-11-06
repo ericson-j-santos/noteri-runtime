@@ -12,7 +12,7 @@ concurrency:
 
 env:
   # Canonical operational rules main used for the physical qualification.
-  RULES_SHA: 6edb5990c777d487c41fb9ee48ccbf411b11d661
+  RULES_SHA: 86abe65b22781c2f608a7d7286ce3a28cd48aaaf
   PYTHONDONTWRITEBYTECODE: "1"
 
 jobs:
