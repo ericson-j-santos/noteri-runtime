@@ -596,3 +596,91 @@ def test_start_runner_uses_hidden_console_in_normal(monkeypatch, tmp_path: Path)
     assert observed["creationflags"] & 0x08000000
     assert observed["stdout"] is watchdog.subprocess.DEVNULL
     assert observed["stderr"] is watchdog.subprocess.DEVNULL
+
+
+def _version_launcher_module(monkeypatch: pytest.MonkeyPatch):
+    import importlib
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    return importlib.import_module("noteri_control_plane_watchdog_uac_launcher")
+
+
+def _installed_watchdog_fixture(tmp_path: Path):
+    import hashlib
+
+    root = tmp_path / "checkout"
+    source = root / "scripts" / "noteri_control_plane_watchdog.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"trusted-watchdog-v1")
+    version = "a" * 40
+    local = tmp_path / "local"
+    release = local / "releases" / version / "scripts" / source.name
+    release.parent.mkdir(parents=True)
+    release.write_bytes(source.read_bytes())
+    meta = {
+        "source_sha": version,
+        "release_script": str(release.resolve()),
+        "release_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "task": {"exists": True},
+    }
+    return root, source, local, release, version, meta
+
+
+def test_watchdog_installed_release_gate_accepts_matching_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    launcher = _version_launcher_module(monkeypatch)
+    _, source, local, _, version, meta = _installed_watchdog_fixture(tmp_path)
+    monkeypatch.setattr(launcher.watchdog, "runtime_root", lambda: local)
+    launcher.attest_installed_release(meta, version, source)
+
+
+@pytest.mark.parametrize("invalid", [
+    "stale_sha", "missing_path", "other_path", "missing_file", "tampered_file",
+    "metadata_digest", "unverified_task",
+])
+def test_watchdog_installed_release_gate_rejects_invalid_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, invalid: str,
+) -> None:
+    launcher = _version_launcher_module(monkeypatch)
+    _, source, local, release, version, meta = _installed_watchdog_fixture(tmp_path)
+    monkeypatch.setattr(launcher.watchdog, "runtime_root", lambda: local)
+    if invalid == "stale_sha":
+        meta["source_sha"] = "b" * 40
+    elif invalid == "missing_path":
+        meta.pop("release_script")
+    elif invalid == "other_path":
+        meta["release_script"] = str(source)
+    elif invalid == "missing_file":
+        release.unlink()
+    elif invalid == "tampered_file":
+        release.write_bytes(b"tampered")
+    elif invalid == "metadata_digest":
+        meta["release_sha256"] = "0" * 64
+    elif invalid == "unverified_task":
+        meta["task"] = {"exists": False}
+    with pytest.raises(launcher.LauncherError, match="WATCHDOG_INSTALLED_"):
+        launcher.attest_installed_release(meta, version, source)
+
+
+def test_ready_task_must_not_bypass_stale_sha_or_attempt_uac(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    launcher = _version_launcher_module(monkeypatch)
+    root, source, local, _, version, meta = _installed_watchdog_fixture(tmp_path)
+    meta["source_sha"] = "b" * 40
+    monkeypatch.setattr(launcher, "validate_launcher", lambda **_: None)
+    monkeypatch.setattr(launcher, "load_metadata", lambda _: meta)
+    monkeypatch.setattr(launcher.watchdog, "runtime_root", lambda: local)
+    monkeypatch.setattr(launcher, "task_status", lambda: {
+        "exists": True, "enabled": True, "trigger_at_startup": True,
+        "logon_type": "S4U",
+    })
+    monkeypatch.setattr(launcher, "finalize", lambda *args: pytest.fail("metadata_mutated"))
+    monkeypatch.setattr(launcher, "is_admin", lambda: pytest.fail("uac_attempted"))
+    with pytest.raises(launcher.LauncherError, match="WATCHDOG_INSTALLED_SHA_MISMATCH"):
+        launcher.launch(
+            repo_root=root, source_sha=version,
+            metadata_path=local / "metadata.json",
+            confirm=launcher.LAUNCH_CONFIRM, timeout_seconds=15,
+        )
+    assert source.is_file()
