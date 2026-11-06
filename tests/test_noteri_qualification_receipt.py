@@ -227,7 +227,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("actions: read",text)
         self.assertIn(q.STEP_NAME,text)
         self.assertIn("python3 -B",text)
-        self.assertIn("6edb5990c777d487c41fb9ee48ccbf411b11d661",text)
+        self.assertIn("86abe65b22781c2f608a7d7286ce3a28cd48aaaf",text)
         self.assertNotIn("515b52b2ec51aa60f02265bd5a1e6df057140ece",text)
 
     def test_launch_routes_both_processes_through_gateway(self):
