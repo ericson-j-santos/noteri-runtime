@@ -15,8 +15,20 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  not_applicable:
+    name: Non-PR source / not applicable
+    if: github.event.workflow_run.event != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record bounded non-PR outcome
+        run: >-
+          echo "INDEPENDENT_VALIDATOR_NOT_APPLICABLE
+          source_event=${{ github.event.workflow_run.event }}
+          source_run_id=${{ github.event.workflow_run.id }}"
+
   producer:
     name: SHA-bound evidence producer
+    if: github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       receipt_b64: ${{ steps.receipt.outputs.receipt_b64 }}
@@ -34,11 +46,22 @@ jobs:
             const fs = require('fs');
             const crypto = require('crypto');
             const source = context.payload.workflow_run;
-            if (!source || !Array.isArray(source.pull_requests) || source.pull_requests.length !== 1) {
-              core.setFailed('A execução de origem deve estar associada a exatamente uma PR.');
+            if (!source || source.event !== 'pull_request' || !source.head_sha) {
+              core.setFailed('A execução de origem deve ser uma CI de pull_request com HEAD identificável.');
               return;
             }
-            const prNumber = source.pull_requests[0].number;
+            const associatedPulls = await github.paginate(
+              github.rest.repos.listPullRequestsAssociatedWithCommit,
+              {...context.repo, commit_sha: source.head_sha, per_page: 100},
+            );
+            const candidates = associatedPulls.filter(pr =>
+              pr.state === 'open' && pr.base.ref === 'main' && pr.head.sha === source.head_sha
+            );
+            if (candidates.length !== 1) {
+              core.setFailed(`HEAD da CI deve corresponder a exatamente uma PR aberta para main; encontradas=${candidates.length}.`);
+              return;
+            }
+            const prNumber = candidates[0].number;
             const [{data: pr}, {data: branch}, jobs, files] = await Promise.all([
               github.rest.pulls.get({...context.repo, pull_number: prNumber}),
               github.rest.repos.getBranch({...context.repo, branch: 'main'}),
@@ -114,6 +137,7 @@ jobs:
   independent_readback:
     name: Independent readback / SHA-bound evidence
     needs: producer
+    if: github.event.workflow_run.event == 'pull_request' && needs.producer.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Re-read source and sealed receipt
