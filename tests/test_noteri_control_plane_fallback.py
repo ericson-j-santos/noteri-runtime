@@ -635,6 +635,27 @@ def test_watchdog_installed_release_gate_accepts_matching_bytes(
     launcher.attest_installed_release(meta, version, source)
 
 
+def test_watchdog_release_gate_detects_windows_reparse_attribute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    launcher = _version_launcher_module(monkeypatch)
+    reparse_flag = 0x400
+    monkeypatch.setattr(
+        launcher.stat, "FILE_ATTRIBUTE_REPARSE_POINT", reparse_flag, raising=False,
+    )
+
+    class WindowsJunction:
+        def lstat(self):
+            return SimpleNamespace(st_file_attributes=reparse_flag)
+
+        def is_symlink(self):
+            return False
+
+    assert launcher._path_is_redirect(WindowsJunction()) is True
+
+
 def test_watchdog_installed_release_gate_rejects_redirected_release_tree(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
