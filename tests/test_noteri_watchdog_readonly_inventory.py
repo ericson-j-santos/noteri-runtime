@@ -161,3 +161,21 @@ def test_wrong_checkout_rejected_before_reading_runtime(
     monkeypatch.setattr(module.watchdog, "metadata_path", lambda: pytest.fail("read_runtime"))
     with pytest.raises(module.InventoryError, match="SOURCE_SHA_MISMATCH"):
         module.inventory(SHA, CORR, module.CONFIRM)
+
+
+def test_corrupted_watchdog_metadata_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    path = _stub_inventory(monkeypatch, tmp_path)
+    before = path.read_bytes()
+    def malformed(*args):
+        raise AttributeError("untrusted_runtime_path")
+    monkeypatch.setattr(module.launcher, "attest_installed_release", malformed)
+    monkeypatch.setattr(module.launcher, "task_status", lambda: None)
+    receipt = module.inventory(SHA, CORR, module.CONFIRM)
+    assert receipt["installed_attested"] is False
+    assert "WATCHDOG_ATTESTATION_FAILED" in receipt["blocking_reasons"]
+    assert "TASK_S4U_NOT_VERIFIED" in receipt["blocking_reasons"]
+    assert "untrusted_runtime_path" not in json.dumps(receipt)
+    assert receipt["ready_for_builder"] is False
+    assert path.read_bytes() == before
