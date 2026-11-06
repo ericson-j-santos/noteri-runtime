@@ -67,6 +67,10 @@ def test_workflow_is_read_only_sha_bound_and_has_independent_readback():
     assert "contents: read" in workflow
     assert "pull-requests: read" in workflow
     assert "independent_readback:" in workflow
+    assert "not_applicable:" in workflow
+    assert "github.event.workflow_run.event != 'pull_request'" in workflow
+    assert "github.event.workflow_run.event == 'pull_request'" in workflow
+    assert "needs.producer.result == 'success'" in workflow
     assert "head_sha:source.head_sha" in workflow
     assert "EXPECTED_HEAD_SHA" in workflow
     assert "permissions: write" not in workflow
