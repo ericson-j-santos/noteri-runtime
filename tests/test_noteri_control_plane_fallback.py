@@ -635,6 +635,31 @@ def test_watchdog_installed_release_gate_accepts_matching_bytes(
     launcher.attest_installed_release(meta, version, source)
 
 
+def test_watchdog_installed_release_gate_rejects_redirected_release_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    launcher = _version_launcher_module(monkeypatch)
+    _, source, local, release, version, meta = _installed_watchdog_fixture(tmp_path)
+    external = tmp_path / "outside-approved-release"
+    external.mkdir()
+    (external / release.name).write_bytes(source.read_bytes())
+    release.unlink()
+    release.parent.rmdir()
+    try:
+        release.parent.symlink_to(external, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink fixture unavailable on this runner: {type(exc).__name__}")
+
+    # Keep the metadata on the approved lexical path. The previous resolve()-based
+    # comparison followed both paths to the same external bytes and falsely passed.
+    meta["release_script"] = str(release.absolute())
+    monkeypatch.setattr(launcher.watchdog, "runtime_root", lambda: local)
+    with pytest.raises(
+        launcher.LauncherError, match="WATCHDOG_INSTALLED_PATH_REDIRECTED",
+    ):
+        launcher.attest_installed_release(meta, version, source)
+
+
 @pytest.mark.parametrize("invalid", [
     "stale_sha", "missing_path", "other_path", "missing_file", "tampered_file",
     "metadata_digest", "unverified_task",
