@@ -621,6 +621,7 @@ def _installed_watchdog_fixture(tmp_path: Path):
         "release_script": str(release.resolve()),
         "release_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "task": {"exists": True},
+        "runner_home": str(tmp_path / "runner"),
     }
     return root, source, local, release, version, meta
 
