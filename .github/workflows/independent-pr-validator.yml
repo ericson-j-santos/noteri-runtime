@@ -38,6 +38,13 @@ jobs:
       pr_number: ${{ steps.evidence.outputs.pr_number }}
       source_run_id: ${{ steps.evidence.outputs.source_run_id }}
     steps:
+      - name: Checkout trusted validator from main
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          ref: main
+          persist-credentials: false
+          fetch-depth: 1
+
       - name: Collect sanitized GitHub evidence
         id: evidence
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd
@@ -101,13 +108,6 @@ jobs:
             core.setOutput('main_sha', branch.commit.sha);
             core.setOutput('pr_number', String(prNumber));
             core.setOutput('source_run_id', String(source.id));
-
-      - name: Checkout trusted validator from main
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
-        with:
-          ref: main
-          persist-credentials: false
-          fetch-depth: 1
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
