@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import os
 import socket
@@ -180,6 +181,31 @@ def build_install_args(
     return subprocess.list2cmdline(argv)
 
 
+def attest_installed_release(
+    metadata: dict[str, Any], expected_sha: str, source: Path,
+) -> None:
+    """Fail closed on a stale persistent watchdog, without modifying it."""
+    if metadata.get("source_sha") != expected_sha:
+        raise LauncherError("WATCHDOG_INSTALLED_SHA_MISMATCH")
+    release = (
+        watchdog.runtime_root() / "releases" / expected_sha / "scripts" / source.name
+    ).resolve()
+    recorded = metadata.get("release_script")
+    if not isinstance(recorded, str) or not recorded.strip():
+        raise LauncherError("WATCHDOG_INSTALLED_PATH_MISSING")
+    if Path(recorded).resolve() != release:
+        raise LauncherError("WATCHDOG_INSTALLED_PATH_MISMATCH")
+    if not source.is_file() or not release.is_file():
+        raise LauncherError("WATCHDOG_INSTALLED_RELEASE_MISSING")
+    expected_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    installed_digest = hashlib.sha256(release.read_bytes()).hexdigest()
+    if metadata.get("release_sha256") != expected_digest or installed_digest != expected_digest:
+        raise LauncherError("WATCHDOG_INSTALLED_DIGEST_MISMATCH")
+    if (metadata.get("task") or {}).get("exists") is not True:
+        raise LauncherError("WATCHDOG_INSTALLED_TASK_UNVERIFIED")
+
+
+
 def finalize(metadata_path: Path, task: dict[str, Any]) -> dict[str, Any]:
     metadata = load_metadata(metadata_path)
     metadata.update(
@@ -218,6 +244,7 @@ def launch(
 
     current = task_status()
     if task_headless_ready(current):
+        attest_installed_release(metadata, source_sha, watchdog_source)
         finalized = finalize(metadata_path, current)
         return {
             "ok": True,
@@ -308,6 +335,7 @@ def launch(
                 }
         last = task_status()
         if task_headless_ready(last):
+            attest_installed_release(load_metadata(metadata_path), source_sha, watchdog_source)
             finalized = finalize(metadata_path, last)
             return {
                 "ok": True,
