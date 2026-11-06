@@ -133,11 +133,14 @@ def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str,
         try:
             launcher.attest_installed_release(metadata, expected_sha, source)
             installed = True
-        except (launcher.LauncherError, OSError, ValueError) as exc:
-            code = str(exc)
+        except (launcher.LauncherError, OSError, ValueError, AttributeError, TypeError, KeyError) as exc:
+            code = str(exc) if isinstance(exc, launcher.LauncherError) else ""
             reasons.append(code if code.startswith("WATCHDOG_INSTALLED_") else "WATCHDOG_ATTESTATION_FAILED")
-    task = launcher.task_status()
-    task_ready = launcher.task_headless_ready(task)
+    try:
+        task = launcher.task_status()
+        task_ready = isinstance(task, dict) and launcher.task_headless_ready(task)
+    except (OSError, ValueError, AttributeError, TypeError, KeyError):
+        task_ready = False
     if not task_ready:
         reasons.append("TASK_S4U_NOT_VERIFIED")
     if profile != "NORMAL":
