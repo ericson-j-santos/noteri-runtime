@@ -32,6 +32,20 @@ class ReceiptTests(unittest.TestCase):
             "local_readback_at":self.stamp,"local_readback_sha256":"d"*64,
             "worktree_status_count":0,"hml_verified":False,
             "capabilities":{"platform":"Windows","native_inventory":"observed"},
+            "watchdog_inventory":{
+                "schema_version":1,"result":"NOTERI_WATCHDOG_READONLY_INVENTORY",
+                "correlation_id":"noteri-qualification-3-1",
+                "expected_sha":self.sha,"installed_source_sha":self.sha,
+                "source_sha_verified":True,"installed_attested":True,
+                "live_task_s4u":True,"profile":"NORMAL",
+                "model_name":"qwen2.5-coder:7b",
+                "model":{"status":"PRESENT","present":True,"digest":"e"*64},
+                "blocking_reasons":[],"installation_authorized":False,
+                "ready_for_builder":False,"session_gateway_readback_required":True,
+                "task_action_readback_required":True,"cost_zero_attestation_required":True,
+                "production_touched":False,"state_changed":False,
+                "inference_performed":False,"model_downloaded":False,
+            },"watchdog_inventory_verified":True,
             "observation":{"status":"observed","host":"Noteri","source_sha":self.sha,
                "correlation_id":"noteri-qualification-3-1","hml_verified":False,
                "mutations_executed":False,"secrets_read":False,"production_touched":False,"operating_profile":{"profile":"NORMAL","verified":True},
@@ -77,6 +91,36 @@ class ReceiptTests(unittest.TestCase):
         with self.assertRaises(q.Blocked):self.validate()
     def test_mutation_cannot_be_reported_as_readonly(self):
         self.receipt["observation"]["mutations_executed"]=True
+        with self.assertRaises(q.Blocked):self.validate()
+
+    def test_missing_watchdog_evidence_rejected(self):
+        self.receipt.pop("watchdog_inventory")
+        with self.assertRaises(q.Blocked):self.validate()
+    def test_obsolete_installed_sha_rejected(self):
+        self.receipt["watchdog_inventory"]["installed_source_sha"]="f"*40
+        with self.assertRaises(q.Blocked):self.validate()
+    def test_installation_bytes_not_attested_rejected(self):
+        self.receipt["watchdog_inventory"]["installed_attested"]=False
+        with self.assertRaises(q.Blocked):self.validate()
+    def test_task_s4u_missing_rejected(self):
+        self.receipt["watchdog_inventory"]["live_task_s4u"]=False
+        with self.assertRaises(q.Blocked):self.validate()
+    def test_qwen_absent_or_invalid_digest_rejected(self):
+        for change in ({"present":False}, {"digest":"invalid"}, {"status":"ABSENT"}):
+            model=self.receipt["watchdog_inventory"]["model"]
+            previous=dict(model)
+            model.update(change)
+            with self.assertRaises(q.Blocked):self.validate()
+            model.clear()
+            model.update(previous)
+    def test_unverified_watchdog_readback_rejected(self):
+        self.receipt["watchdog_inventory_verified"]=False
+        with self.assertRaises(q.Blocked):self.validate()
+    def test_claim_of_builder_readiness_rejected(self):
+        self.receipt["watchdog_inventory"]["ready_for_builder"]=True
+        with self.assertRaises(q.Blocked):self.validate()
+    def test_watchdog_status_drift_rejected(self):
+        self.receipt["watchdog_inventory"]["blocking_reasons"]=["WATCHDOG_INSTALLED_SHA_MISMATCH"]
         with self.assertRaises(q.Blocked):self.validate()
     def test_boolean_job_identifier_rejected(self):
         self.job["id"]=True
@@ -159,6 +203,8 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(5,proof["receipt"]["runner_id"])
             self.assertEqual(9,proof["receipt"]["job_id"])
             self.assertTrue(proof["receipt"]["independent_effect_verified"])
+            self.assertTrue(proof["receipt"]["watchdog_inventory_verified"])
+            self.assertTrue(proof["receipt"]["watchdog_inventory"]["installed_attested"])
             self.assertEqual(q.digest(data),proof["artifact_sha256"])
             self.assertEqual(self.rules,payload["required_rules_sha"])
             return {"ready":True,"selected_host":"Noteri","hml_verified":False,"decision_only":True}
@@ -198,7 +244,7 @@ class IntegrationTests(unittest.TestCase):
         session={"target_path":str(Path.cwd()),"session_id":"noteri-test","snapshot_sha256":"c"*64}
         cg=types.SimpleNamespace(load_policy=lambda _: {}, enforce_session=lambda *_:None,
             git_state=lambda *_:types.SimpleNamespace(head=self.sha,status_count=0))
-        with patch.object(q,"context",return_value=(self.sha,3,1,"noteri-qualification-3-1")),patch.object(q.native,"read_json",side_effect=[record,session]),patch.object(q,"rules_module",return_value=cg),patch.object(q.native,"collect",return_value=observed),patch.object(q,"write_atomic") as write:
+        with patch.object(q,"context",return_value=(self.sha,3,1,"noteri-qualification-3-1")),patch.object(q.native,"read_json",side_effect=[record,session]),patch.object(q,"rules_module",return_value=cg),patch.object(q.native,"collect",return_value=observed),patch.object(q,"current_watchdog_inventory",return_value=record["watchdog_inventory"]),patch.object(q,"write_atomic") as write:
             with self.assertRaises(q.Blocked):q.local_readback(Path("."),self.rules,Path("s"),Path("r"))
         write.assert_not_called()
 
@@ -211,10 +257,11 @@ class IntegrationTests(unittest.TestCase):
         session={"target_path":str(Path.cwd()),"session_id":"noteri-test","snapshot_sha256":"c"*64}
         cg=types.SimpleNamespace(load_policy=lambda _: {}, enforce_session=lambda *_:None,
             git_state=lambda *_:types.SimpleNamespace(head=self.sha,status_count=0))
-        with patch.object(q,"context",return_value=(self.sha,3,1,"noteri-qualification-3-1")),patch.object(q.native,"read_json",side_effect=[record,session]),patch.object(q,"rules_module",return_value=cg),patch.object(q.native,"collect",return_value=record["observation"]),patch.object(q,"write_atomic") as write:
+        with patch.object(q,"context",return_value=(self.sha,3,1,"noteri-qualification-3-1")),patch.object(q.native,"read_json",side_effect=[record,session]),patch.object(q,"rules_module",return_value=cg),patch.object(q.native,"collect",return_value=record["observation"]),patch.object(q,"current_watchdog_inventory",return_value=record["watchdog_inventory"]),patch.object(q,"write_atomic") as write:
             result=q.local_readback(Path("."),self.rules,Path("s"),Path("r"))
         self.assertTrue(result["local_readback_verified"])
         self.assertTrue(write.call_args.args[1]["independent_effect_verified"])
+        self.assertTrue(write.call_args.args[1]["watchdog_inventory_verified"])
 
     def test_workflow_is_manual_pinned_and_readback_is_hosted(self):
         text=(SCRIPTS.parent/".github/workflows/noteri-control-plane-probe.yml").read_text()

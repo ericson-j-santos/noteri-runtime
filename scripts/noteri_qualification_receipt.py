@@ -16,6 +16,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 import noteri_native_qualification as native
+import noteri_watchdog_readonly_inventory as watchdog_inventory
 
 REPO = native.REPOSITORY
 JOB_NAME = "Qualify Noteri through Command Gateway"
@@ -86,6 +87,50 @@ def rules_module(root: Path, expected_sha: str):
             "rules_module_origin")
     return module
 
+
+def current_watchdog_inventory(source_sha: str, correlation: str) -> dict:
+    """Obter evidencia Risk1 da copia persistente; nunca instalar ou inferir."""
+    try:
+        return watchdog_inventory.inventory(
+            source_sha, correlation, watchdog_inventory.CONFIRM)
+    except (watchdog_inventory.InventoryError, OSError) as exc:
+        raise Blocked("watchdog_inventory_unavailable") from exc
+
+
+def require_watchdog_qualified(report: dict, source_sha: str, correlation: str) -> None:
+    """Falhar fechado antes de selecionar transporte para desenvolvimento."""
+    require(isinstance(report, dict)
+            and report.get("schema_version") == 1
+            and report.get("result") == "NOTERI_WATCHDOG_READONLY_INVENTORY"
+            and report.get("expected_sha") == source_sha
+            and report.get("correlation_id") == correlation
+            and report.get("source_sha_verified") is True,
+            "watchdog_inventory_identity_invalid")
+    require(report.get("state_changed") is False
+            and report.get("production_touched") is False
+            and report.get("inference_performed") is False
+            and report.get("model_downloaded") is False
+            and report.get("installation_authorized") is False
+            and report.get("ready_for_builder") is False
+            and report.get("session_gateway_readback_required") is True
+            and report.get("task_action_readback_required") is True
+            and report.get("cost_zero_attestation_required") is True,
+            "watchdog_inventory_safety_invalid")
+    require(report.get("installed_source_sha") == source_sha
+            and report.get("installed_attested") is True
+            and report.get("live_task_s4u") is True
+            and report.get("profile") == "NORMAL"
+            and report.get("blocking_reasons") == [],
+            "watchdog_installed_or_profile_unqualified")
+    model = report.get("model")
+    require(report.get("model_name") == watchdog_inventory.MODEL_NAME
+            and isinstance(model, dict)
+            and model.get("status") == "PRESENT"
+            and model.get("present") is True
+            and isinstance(model.get("digest"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", model["digest"]) is not None,
+            "qwen7b_not_attested")
+
 def produce(rules_root: Path, rules_sha: str, session_file: Path, output: Path) -> dict:
     sha, run, attempt, correlation = context()
     session = native.read_json(session_file)
@@ -108,6 +153,14 @@ def produce(rules_root: Path, rules_sha: str, session_file: Path, output: Path) 
         write_atomic(output, {"status": "blocked", "code": "profile_unqualified",
                               "observation": observation, "hml_verified": False})
         raise Blocked("profile_unqualified")
+    watchdog_report = current_watchdog_inventory(sha, correlation)
+    try:
+        require_watchdog_qualified(watchdog_report, sha, correlation)
+    except Blocked as exc:
+        write_atomic(output, {
+            "status": "blocked", "code": str(exc), "hml_verified": False,
+            "ready_for_builder": False, "watchdog_inventory": watchdog_report})
+        raise
     record = {
         "schema_version": "1", "host": native.HOST, "repository": REPO,
         "source_sha": sha, "rules_sha": rules_sha, "run_id": run, "run_attempt": attempt,
@@ -118,6 +171,7 @@ def produce(rules_root: Path, rules_sha: str, session_file: Path, output: Path) 
         "gateway_ok": True, "auth_valid": True, "independent_effect_verified": False,
         "capabilities": {"platform": "Windows", "native_inventory": "observed"},
         "observation": observation, "hml_verified": False,
+        "watchdog_inventory": watchdog_report, "watchdog_inventory_verified": False,
         "worktree_status_count": state.status_count,
     }
     require(bool(record["runner_name"]), "runner_name_missing")
@@ -150,6 +204,10 @@ def local_readback(rules_root: Path, rules_sha: str, session_file: Path, output:
     current.pop("generated_at", None)
     require(prior == current and observed["operating_profile"].get("profile") == "NORMAL"
             and observed["operating_profile"].get("verified") is True, "local_readback_changed")
+    watchdog_current = current_watchdog_inventory(sha, correlation)
+    require_watchdog_qualified(watchdog_current, sha, correlation)
+    require(receipt.get("watchdog_inventory") == watchdog_current, "watchdog_readback_changed")
+    receipt["watchdog_inventory_verified"] = True
     receipt["independent_effect_verified"] = True
     receipt["local_readback_sha256"] = digest(json.dumps(observed, sort_keys=True).encode())
     receipt["local_readback_at"] = observed["generated_at"]
@@ -248,6 +306,10 @@ def validate_bundle(job: dict, artifact: dict, archive: bytes, sha: str,
             and observation["operating_profile"].get("profile") == "NORMAL",
             "profile_not_verified")
     require(observation.get("rollback", {}).get("state_verified") is not False, "runtime_unreconciled")
+    require(receipt.get("watchdog_inventory_verified") is True,
+            "watchdog_local_readback_missing")
+    require_watchdog_qualified(receipt.get("watchdog_inventory"), sha,
+                               binding["correlation_id"])
     receipt = dict(receipt)
     receipt.update(job_id=job["id"], runner_id=job["runner_id"], independent_effect_verified=True)
     return receipt
@@ -294,6 +356,9 @@ def verify(rules_root: Path, rules_sha: str, output: Path) -> dict:
             "hosts": [candidate, {"name": "DESKTOP-PDQK954", "controller_online": False}]})
         require(result.get("selected_host") == native.HOST and result.get("ready") is True,
                 "selector_rejected")
+        # Transporte qualificado nao equivale a Builder/custo/UAC autorizado.
+        result["ready_for_builder"] = False
+        result["host_runtime_upgrade_authorized"] = False
         write_atomic(output, result)
         return result
     except Exception as exc:

@@ -74,6 +74,7 @@ def test_workflow_is_read_only_sha_bound_and_has_independent_readback():
     assert "pr.state === 'open'" in workflow
     assert "pr.base.ref === 'main'" in workflow
     assert "pr.head.sha === source.head_sha" in workflow
+    assert workflow.index("Checkout trusted validator from main") < workflow.index("Collect sanitized GitHub evidence")
     assert "needs.producer.result == 'success'" in workflow
     assert "head_sha:source.head_sha" in workflow
     assert "EXPECTED_HEAD_SHA" in workflow
