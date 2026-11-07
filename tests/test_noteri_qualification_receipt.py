@@ -37,7 +37,7 @@ class ReceiptTests(unittest.TestCase):
                 "correlation_id":"noteri-qualification-3-1",
                 "expected_sha":self.sha,"installed_source_sha":self.sha,
                 "source_sha_verified":True,"installed_attested":True,
-                "live_task_s4u":True,"profile":"NORMAL",
+                "live_task_s4u":True,"live_task_action_attested":True,"profile":"NORMAL",
                 "model_name":"qwen2.5-coder:7b",
                 "model":{"status":"PRESENT","present":True,"digest":"e"*64},
                 "blocking_reasons":[],"installation_authorized":False,
@@ -101,6 +101,9 @@ class ReceiptTests(unittest.TestCase):
         with self.assertRaises(q.Blocked):self.validate()
     def test_installation_bytes_not_attested_rejected(self):
         self.receipt["watchdog_inventory"]["installed_attested"]=False
+        with self.assertRaises(q.Blocked):self.validate()
+    def test_task_action_not_attested_is_rejected(self):
+        self.receipt["watchdog_inventory"]["live_task_action_attested"]=False
         with self.assertRaises(q.Blocked):self.validate()
     def test_task_s4u_missing_rejected(self):
         self.receipt["watchdog_inventory"]["live_task_s4u"]=False

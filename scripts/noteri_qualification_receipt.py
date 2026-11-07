@@ -119,6 +119,7 @@ def require_watchdog_qualified(report: dict, source_sha: str, correlation: str) 
     require(report.get("installed_source_sha") == source_sha
             and report.get("installed_attested") is True
             and report.get("live_task_s4u") is True
+            and report.get("live_task_action_attested") is True
             and report.get("profile") == "NORMAL"
             and report.get("blocking_reasons") == [],
             "watchdog_installed_or_profile_unqualified")

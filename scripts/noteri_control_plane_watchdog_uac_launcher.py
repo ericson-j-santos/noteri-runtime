@@ -78,12 +78,32 @@ def task_status() -> dict[str, Any]:
         enabled_text = (root.findtext("./t:Settings/t:Enabled", default="true", namespaces=ns) or "true").strip()
         logon_type = (root.findtext("./t:Principals/t:Principal/t:LogonType", default="", namespaces=ns) or "").strip()
         boot = root.find("./t:Triggers/t:BootTrigger", ns) is not None
+        # A prova S4U sozinha nao informa qual executavel a tarefa inicia.
+        actions = root.findall("./t:Actions/*", ns)
+        exec_actions = root.findall("./t:Actions/t:Exec", ns)
+        action_python_observed = False
+        action_arguments_sha256 = None
+        if len(actions) == 1 and len(exec_actions) == 1:
+            command = (exec_actions[0].findtext("t:Command", default="", namespaces=ns) or "").strip()
+            arguments = exec_actions[0].findtext("t:Arguments", default="", namespaces=ns) or ""
+            executable = Path(command)
+            # Somente binario Python existente e caminho sem junction/symlink.
+            if (executable.is_absolute()
+                    and executable.name.casefold() in ("python.exe", "pythonw.exe", "python3.exe")
+                    and executable.is_file()
+                    and not any(_path_is_redirect(part) for part in
+                                (executable, *executable.parents))):
+                action_python_observed = True
+                action_arguments_sha256 = hashlib.sha256(arguments.encode("utf-8")).hexdigest()
         return {
             "exists": True,
             "enabled": enabled_text.casefold() == "true",
             "trigger_at_startup": boot,
             "logon_type": logon_type,
             "validator": "schtasks_xml",
+            "action_count": len(actions),
+            "action_python_observed": action_python_observed,
+            "action_arguments_sha256": action_arguments_sha256,
         }
     except Exception as exc:
         return {"exists": False, "error": type(exc).__name__}

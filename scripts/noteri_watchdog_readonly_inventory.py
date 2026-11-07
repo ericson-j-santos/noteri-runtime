@@ -104,6 +104,27 @@ def read_model_tags() -> dict[str, Any]:
     return {"status": "ABSENT", "present": False, "digest": None}
 
 
+
+def task_action_attested(metadata: dict[str, Any], task: dict[str, Any]) -> bool:
+    """Confronta a acao S4U efetiva com o release/runner versionados, sem divulgar caminhos."""
+    if not isinstance(metadata, dict) or not isinstance(task, dict):
+        return False
+    if (task.get("action_count") != 1
+            or task.get("action_python_observed") is not True):
+        return False
+    release = metadata.get("release_script")
+    runner = metadata.get("runner_home")
+    if (not isinstance(release, str) or not isinstance(runner, str)
+            or not release or not runner or not Path(release).is_absolute()
+            or not Path(runner).is_absolute()):
+        return False
+    expected_args = subprocess.list2cmdline(
+        [release, "watch", "--runner-home", runner]
+    )
+    expected_hash = hashlib.sha256(expected_args.encode("utf-8")).hexdigest()
+    return task.get("action_arguments_sha256") == expected_hash
+
+
 def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str, Any]:
     if confirm != CONFIRM:
         raise InventoryError("CONFIRMATION_INVALID")
@@ -139,10 +160,14 @@ def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str,
     try:
         task = launcher.task_status()
         task_ready = isinstance(task, dict) and launcher.task_headless_ready(task)
+        action_ready = task_ready and task_action_attested(metadata, task)
     except (OSError, ValueError, AttributeError, TypeError, KeyError):
         task_ready = False
+        action_ready = False
     if not task_ready:
         reasons.append("TASK_S4U_NOT_VERIFIED")
+    if not action_ready:
+        reasons.append("TASK_ACTION_NOT_VERIFIED")
     if profile != "NORMAL":
         reasons.append("PROFILE_NOT_NORMAL")
     model = read_model_tags()
@@ -156,6 +181,7 @@ def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str,
         "installed_source_sha": stored_sha,
         "installed_attested": installed,
         "live_task_s4u": task_ready,
+        "live_task_action_attested": action_ready,
         "profile": profile,
         "model_name": MODEL_NAME,
         "model": model,

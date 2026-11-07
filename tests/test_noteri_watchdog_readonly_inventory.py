@@ -98,10 +98,19 @@ def _stub_inventory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(module, "checkout_sha", lambda _: SHA)
     monkeypatch.setattr(module.watchdog, "runtime_profile", lambda: "NORMAL")
     meta_path = tmp_path / "metadata.json"
-    meta_path.write_text(json.dumps({"source_sha": SHA, "task": {"exists": True}}), encoding="utf-8")
+    release = str(tmp_path / "releases" / SHA / "scripts" / "noteri_control_plane_watchdog.py")
+    runner = str(tmp_path / "runner")
+    meta_path.write_text(json.dumps({
+        "source_sha": SHA, "task": {"exists": True},
+        "release_script": release, "runner_home": runner
+    }), encoding="utf-8")
     monkeypatch.setattr(module.watchdog, "metadata_path", lambda: meta_path)
+    args = module.subprocess.list2cmdline([release, "watch", "--runner-home", runner])
+    digest = module.hashlib.sha256(args.encode("utf-8")).hexdigest()
     monkeypatch.setattr(module.launcher, "task_status", lambda: {
         "exists": True, "enabled": True, "trigger_at_startup": True, "logon_type": "S4U",
+        "action_count": 1, "action_python_observed": True,
+        "action_arguments_sha256": digest,
     })
     monkeypatch.setattr(module.launcher, "attest_installed_release", lambda *args: None)
     monkeypatch.setattr(module, "read_model_tags", lambda: {
@@ -117,6 +126,7 @@ def test_inventory_reports_readonly_without_promoting_e2e(
     receipt = module.inventory(SHA, CORR, module.CONFIRM)
     assert receipt["installed_attested"] is True
     assert receipt["live_task_s4u"] is True
+    assert receipt["live_task_action_attested"] is True
     assert receipt["profile"] == "NORMAL"
     assert receipt["model"]["present"] is True
     assert receipt["blocking_reasons"] == []
@@ -127,6 +137,58 @@ def test_inventory_reports_readonly_without_promoting_e2e(
     assert receipt["task_action_readback_required"] is True
     assert receipt["cost_zero_attestation_required"] is True
 
+
+
+def test_task_action_uses_exact_release_and_runner_without_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    meta = _stub_inventory(monkeypatch, tmp_path)
+    base = json.loads(meta.read_text(encoding="utf-8"))
+    action = module.launcher.task_status()
+    assert module.task_action_attested(base, action)
+    # Um S4U saudavel com acao antiga ou comando divergente nao autoriza o host.
+    for value in (
+        {"action_arguments_sha256": "f" * 64},
+        {"action_count": 2},
+        {"action_python_observed": False},
+        {"action_arguments_sha256": None},
+    ):
+        altered = dict(action, **value)
+        assert not module.task_action_attested(base, altered)
+        monkeypatch.setattr(module.launcher, "task_status", lambda report=altered: report)
+        receipt = module.inventory(SHA, CORR, module.CONFIRM)
+        assert receipt["live_task_s4u"] is True
+        assert receipt["live_task_action_attested"] is False
+        assert "TASK_ACTION_NOT_VERIFIED" in receipt["blocking_reasons"]
+    assert json.loads(meta.read_text(encoding="utf-8")) == base
+
+
+def test_task_status_action_xml_is_bound_and_rejects_extra_action(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    executable = tmp_path / "python.exe"
+    executable.write_bytes(b"fixture-python")
+    arguments = str(tmp_path / "watchdog.py") + " watch --runner-home runner"
+    from xml.sax.saxutils import escape
+    def observe(extra: str = ""):
+        xml = ("<Task xmlns='http://schemas.microsoft.com/windows/2004/02/mit/task'>"
+               "<Settings><Enabled>true</Enabled></Settings>"
+               "<Principals><Principal><LogonType>S4U</LogonType></Principal></Principals>"
+               "<Triggers><BootTrigger /></Triggers>"
+               f"<Actions><Exec><Command>{escape(str(executable))}</Command>"
+               f"<Arguments>{escape(arguments)}</Arguments></Exec>{extra}</Actions></Task>").encode()
+        monkeypatch.setattr(module.launcher.subprocess, "run",
+                            lambda *a, **k: SimpleNamespace(returncode=0, stdout=xml))
+        return module.launcher.task_status()
+    current = observe()
+    assert current["action_python_observed"] is True
+    assert current["action_count"] == 1
+    assert current["action_arguments_sha256"] == module.hashlib.sha256(arguments.encode()).hexdigest()
+    extra = "<ComHandler><ClassId>not-approved</ClassId></ComHandler>"
+    assert observe(extra)["action_python_observed"] is False
+    monkeypatch.setattr(module.launcher, "_path_is_redirect",
+                        lambda path: path == executable)
+    assert observe()["action_python_observed"] is False
 
 def test_stale_release_blocks_without_writes(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
