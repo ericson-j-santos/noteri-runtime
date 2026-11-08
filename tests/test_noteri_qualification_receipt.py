@@ -236,6 +236,51 @@ class IntegrationTests(unittest.TestCase):
         self.assertTrue(writes[0]["ready"])
         self.assertFalse(writes[-1]["ready"])
 
+    def test_native_inventory_refusal_persists_bounded_diagnostic(self):
+        import types
+        cg = types.SimpleNamespace(
+            load_policy=lambda _: {"rules_version": "1.6.20"},
+            enforce_session=lambda *_: None,
+            git_state=lambda *_: types.SimpleNamespace(
+                head=self.sha, status_count=0,
+            ),
+        )
+        session = {
+            "result": "SESSION_LAUNCH_OK",
+            "state_validated": True,
+            "head": self.sha,
+            "host": q.native.HOST,
+            "correlation_id": "noteri-qualification-3-1",
+            "rules_version": "1.6.20",
+            "target_path": str(Path.cwd()),
+            "session_id": "noteri-qualification-3-1",
+            "timestamp": self.stamp,
+        }
+        for original, expected in (
+            ("source_sha_mismatch", "source_sha_mismatch"),
+            ("token-private-123", "native_inventory_unclassified"),
+        ):
+            with self.subTest(original=original):
+                with tempfile.TemporaryDirectory() as directory:
+                    output = Path(directory) / "qualification" / "receipt.json"
+                    with patch.object(q, "context", return_value=(
+                        self.sha, 3, 1, "noteri-qualification-3-1",
+                    )), patch.object(q.native, "read_json", return_value=session), \
+                         patch.object(q, "fresh", return_value=True), \
+                         patch.object(q, "rules_module", return_value=cg), \
+                         patch.object(q.native, "collect", side_effect=q.native.Blocked(original)):
+                        with self.assertRaisesRegex(q.Blocked, "^" + expected + "$"):
+                            q.produce(Path("."), self.rules, Path("session.json"), output)
+                    result = json.loads(output.read_text(encoding="utf-8"))
+                    self.assertEqual(result["status"], "blocked")
+                    self.assertEqual(result["code"], expected)
+                    self.assertFalse(result["ready"])
+                    self.assertFalse(result["ready_for_builder"])
+                    self.assertFalse(result["hml_verified"])
+                    self.assertTrue(result["diagnostic_only"])
+                    self.assertEqual(result["source_sha"], self.sha)
+                    self.assertNotIn("token-private-123", output.read_text())
+
     def test_second_native_reader_rejects_service_drift(self):
         import copy
         import types
