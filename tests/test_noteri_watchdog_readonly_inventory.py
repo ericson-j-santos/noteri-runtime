@@ -116,6 +116,14 @@ def _stub_inventory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(module, "read_model_tags", lambda: {
         "status": "PRESENT", "present": True, "digest": "c" * 64,
     })
+    monkeypatch.setattr(module, "worker_pool_readonly_probe", lambda *_: {
+        "schema_version": 1, "token_reference_state": "PRESENT_ACL_UNVERIFIED",
+        "loopback_8097_state": "TCP_CONNECTED_UNAUTHENTICATED",
+        "token_bytes_read": False, "token_acl_verified": False,
+        "contract_authenticated": False, "health_verified": False,
+        "cost_zero_confirmed": False, "ready_for_work": False,
+        "state_changed": False,
+    })
     return meta_path
 
 
@@ -136,6 +144,9 @@ def test_inventory_reports_readonly_without_promoting_e2e(
     assert receipt["session_gateway_readback_required"] is True
     assert receipt["task_action_readback_required"] is True
     assert receipt["cost_zero_attestation_required"] is True
+    assert receipt["worker_pool_readonly"]["ready_for_work"] is False
+    assert receipt["worker_pool_readonly"]["contract_authenticated"] is False
+    assert receipt["worker_pool_readonly"]["token_bytes_read"] is False
 
 
 
@@ -241,3 +252,61 @@ def test_corrupted_watchdog_metadata_fails_closed(
     assert "untrusted_runtime_path" not in json.dumps(receipt)
     assert receipt["ready_for_builder"] is False
     assert path.read_bytes() == before
+
+
+def test_worker_pool_token_reference_shape_is_readonly(tmp_path: Path) -> None:
+    path = tmp_path / "ReqSys" / "NoteriWorkerPool" / "credentials" / "api-token.txt"
+    assert module.worker_token_reference_shape(None) == "HOST_CONTEXT_UNAVAILABLE"
+    assert module.worker_token_reference_shape("relative") == "HOST_CONTEXT_INVALID"
+    assert module.worker_token_reference_shape(str(tmp_path)) == "REFERENCE_MISSING"
+    path.parent.mkdir(parents=True)
+    path.mkdir()
+    assert module.worker_token_reference_shape(str(tmp_path)) == "REFERENCE_NOT_REGULAR"
+    path.rmdir()
+    path.write_text("test fixture only", encoding="utf-8")
+    assert module.worker_token_reference_shape(str(tmp_path)) == "PRESENT_ACL_UNVERIFIED"
+    # No token bytes are read by this function, even when a regular file exists.
+    assert path.read_text(encoding="utf-8") == "test fixture only"
+
+
+def test_worker_pool_reference_symlink_and_missing_parent_block(tmp_path: Path) -> None:
+    base = tmp_path / "ReqSys"
+    external = tmp_path / "untrusted"
+    external.mkdir()
+    try:
+        base.symlink_to(external, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    assert module.worker_token_reference_shape(str(tmp_path)) == "REFERENCE_REDIRECTED"
+
+
+def test_worker_pool_loopback_only_fixed_tcp_no_auth() -> None:
+    seen = []
+    class Connection:
+        def close(self):
+            seen.append("closed")
+        def send(self, *_):
+            raise AssertionError("Network bytes must never be sent")
+    def connected(address, timeout):
+        seen.append((address, timeout))
+        return Connection()
+    receipt = module.worker_pool_readonly_probe("not-absolute", connect=connected)
+    assert seen == [(("127.0.0.1", 8097), 0.25), "closed"]
+    assert receipt["loopback_8097_state"] == "TCP_CONNECTED_UNAUTHENTICATED"
+    assert receipt["token_reference_state"] == "HOST_CONTEXT_INVALID"
+    for key in ("contract_authenticated", "health_verified", "cost_zero_confirmed",
+                "ready_for_work", "token_bytes_read", "token_acl_verified",
+                "state_changed"):
+        assert receipt[key] is False
+
+
+def test_worker_pool_tcp_failure_and_replay_are_nonpromoting(tmp_path: Path) -> None:
+    def refused(address, timeout):
+        assert address == ("127.0.0.1", 8097)
+        raise ConnectionRefusedError("fixture")
+    first = module.worker_pool_readonly_probe(str(tmp_path), connect=refused)
+    second = module.worker_pool_readonly_probe(str(tmp_path), connect=refused)
+    assert first == second
+    assert first["token_reference_state"] == "REFERENCE_MISSING"
+    assert first["loopback_8097_state"] == "TCP_NOT_REACHABLE"
+    assert first["ready_for_work"] is False

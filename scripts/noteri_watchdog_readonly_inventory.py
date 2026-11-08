@@ -12,6 +12,7 @@ import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import urllib.error
 import urllib.request
@@ -28,6 +29,9 @@ DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 CORRELATION_RE = re.compile(r"^[A-Za-z0-9._:-]{12,128}$")
 MAX_METADATA_BYTES = 32 * 1024
 MAX_MODEL_RESPONSE_BYTES = 256 * 1024
+WORKER_TOKEN_RELATIVE = (Path('ReqSys') / 'NoteriWorkerPool' /
+                         'credentials' / 'api-token.txt')
+POOL_LOOPBACK = ('127.0.0.1', 8097)
 
 
 class InventoryError(RuntimeError):
@@ -125,6 +129,65 @@ def task_action_attested(metadata: dict[str, Any], task: dict[str, Any]) -> bool
     return task.get("action_arguments_sha256") == expected_hash
 
 
+
+def worker_token_reference_shape(localappdata: str | None) -> str:
+    """Observe path/regularity only: never open token or claim NTFS ACL verified."""
+    if not isinstance(localappdata, str) or not localappdata:
+        return "HOST_CONTEXT_UNAVAILABLE"
+    root = Path(localappdata)
+    if not root.is_absolute():
+        return "HOST_CONTEXT_INVALID"
+    cursor = root
+    try:
+        for segment in (None, *WORKER_TOKEN_RELATIVE.parts):
+            if segment is not None:
+                cursor = cursor / segment
+            info = cursor.lstat()
+            if stat.S_ISLNK(info.st_mode) or (
+                getattr(info, "st_file_attributes", 0) & 0x400
+            ):
+                return "REFERENCE_REDIRECTED"
+            if segment is not None and cursor != root / WORKER_TOKEN_RELATIVE:
+                if not stat.S_ISDIR(info.st_mode):
+                    return "REFERENCE_NOT_REGULAR"
+        if not stat.S_ISREG(info.st_mode):
+            return "REFERENCE_NOT_REGULAR"
+        return "PRESENT_ACL_UNVERIFIED"
+    except FileNotFoundError:
+        return "REFERENCE_MISSING"
+    except (OSError, ValueError):
+        return "REFERENCE_UNVERIFIED"
+
+
+def worker_pool_loopback_status(connect=None) -> str:
+    """One bounded connect to fixed loopback, never send credentials or HTTP."""
+    dial = socket.create_connection if connect is None else connect
+    try:
+        connection = dial(POOL_LOOPBACK, timeout=0.25)
+        try:
+            return "TCP_CONNECTED_UNAUTHENTICATED"
+        finally:
+            connection.close()
+    except (OSError, TimeoutError, ValueError):
+        return "TCP_NOT_REACHABLE"
+
+
+def worker_pool_readonly_probe(localappdata: str | None, connect=None) -> dict[str, Any]:
+    """Non-promoting supplemental observation for the existing Risk1 inventory."""
+    return {
+        "schema_version": 1,
+        "token_reference_state": worker_token_reference_shape(localappdata),
+        "loopback_8097_state": worker_pool_loopback_status(connect),
+        "token_bytes_read": False,
+        "token_acl_verified": False,
+        "contract_authenticated": False,
+        "health_verified": False,
+        "cost_zero_confirmed": False,
+        "ready_for_work": False,
+        "state_changed": False,
+    }
+
+
 def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str, Any]:
     if confirm != CONFIRM:
         raise InventoryError("CONFIRMATION_INVALID")
@@ -171,6 +234,7 @@ def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str,
     if profile != "NORMAL":
         reasons.append("PROFILE_NOT_NORMAL")
     model = read_model_tags()
+    pool_readonly = worker_pool_readonly_probe(os.environ.get("LOCALAPPDATA"))
     if not model["present"]:
         reasons.append("QWEN7B_NOT_ATTESTED")
     return {
@@ -185,6 +249,7 @@ def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str,
         "profile": profile,
         "model_name": MODEL_NAME,
         "model": model,
+        "worker_pool_readonly": pool_readonly,
         "blocking_reasons": sorted(set(reasons)),
         "source_sha_verified": True,
         "installation_authorized": False,
