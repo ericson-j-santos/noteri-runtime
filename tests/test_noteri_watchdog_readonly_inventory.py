@@ -116,7 +116,7 @@ def _stub_inventory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(module, "read_model_tags", lambda: {
         "status": "PRESENT", "present": True, "digest": "c" * 64,
     })
-    monkeypatch.setattr(module, "worker_pool_readonly_probe", lambda *_: {
+    monkeypatch.setattr(module, "worker_pool_readonly_probe", lambda *_, **__: {
         "schema_version": 1, "token_reference_state": "PRESENT_ACL_UNVERIFIED",
         "loopback_8097_state": "TCP_CONNECTED_UNAUTHENTICATED",
         "token_bytes_read": False, "token_acl_verified": False,
