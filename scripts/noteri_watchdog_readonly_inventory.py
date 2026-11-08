@@ -139,6 +139,12 @@ def worker_token_reference_shape(localappdata: str | None) -> str:
         return "HOST_CONTEXT_INVALID"
     cursor = root
     try:
+        # A redirected ancestor above LOCALAPPDATA is also an untrusted route.
+        for ancestor in reversed(root.parents):
+            parent_info = ancestor.lstat()
+            if (stat.S_ISLNK(parent_info.st_mode) or
+                    getattr(parent_info, "st_file_attributes", 0) & 0x400):
+                return "REFERENCE_REDIRECTED"
         for segment in (None, *WORKER_TOKEN_RELATIVE.parts):
             if segment is not None:
                 cursor = cursor / segment
@@ -172,12 +178,20 @@ def worker_pool_loopback_status(connect=None) -> str:
         return "TCP_NOT_REACHABLE"
 
 
-def worker_pool_readonly_probe(localappdata: str | None, connect=None) -> dict[str, Any]:
-    """Non-promoting supplemental observation for the existing Risk1 inventory."""
+def worker_pool_readonly_probe(
+    localappdata: str | None, connect=None, *, eligible_profile: bool = True,
+) -> dict[str, Any]:
+    """Non-promoting supplement; no token/TCP inspection in ESTUDO mode."""
+    if eligible_profile is True:
+        token_state = worker_token_reference_shape(localappdata)
+        tcp_state = worker_pool_loopback_status(connect)
+    else:
+        token_state = "NOT_PROBED_PROFILE"
+        tcp_state = "NOT_PROBED_PROFILE"
     return {
         "schema_version": 1,
-        "token_reference_state": worker_token_reference_shape(localappdata),
-        "loopback_8097_state": worker_pool_loopback_status(connect),
+        "token_reference_state": token_state,
+        "loopback_8097_state": tcp_state,
         "token_bytes_read": False,
         "token_acl_verified": False,
         "contract_authenticated": False,
@@ -234,7 +248,9 @@ def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str,
     if profile != "NORMAL":
         reasons.append("PROFILE_NOT_NORMAL")
     model = read_model_tags()
-    pool_readonly = worker_pool_readonly_probe(os.environ.get("LOCALAPPDATA"))
+    pool_readonly = worker_pool_readonly_probe(
+        os.environ.get("LOCALAPPDATA"), eligible_profile=profile == "NORMAL",
+    )
     if not model["present"]:
         reasons.append("QWEN7B_NOT_ATTESTED")
     return {

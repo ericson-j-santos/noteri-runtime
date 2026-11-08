@@ -310,3 +310,27 @@ def test_worker_pool_tcp_failure_and_replay_are_nonpromoting(tmp_path: Path) -> 
     assert first["token_reference_state"] == "REFERENCE_MISSING"
     assert first["loopback_8097_state"] == "TCP_NOT_REACHABLE"
     assert first["ready_for_work"] is False
+
+
+def test_worker_pool_refused_ancestor_redirect(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    (real / "local").mkdir(parents=True)
+    redirected = tmp_path / "redirected"
+    try:
+        redirected.symlink_to(real, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    assert module.worker_token_reference_shape(str(redirected / "local")) == "REFERENCE_REDIRECTED"
+
+
+def test_worker_pool_estudo_never_looks_at_token_or_connects(monkeypatch, tmp_path: Path):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("No token or TCP observation permitted in ESTUDO")
+    monkeypatch.setattr(module, "worker_token_reference_shape", forbidden)
+    receipt = module.worker_pool_readonly_probe(
+        str(tmp_path), connect=forbidden, eligible_profile=False,
+    )
+    assert receipt["token_reference_state"] == "NOT_PROBED_PROFILE"
+    assert receipt["loopback_8097_state"] == "NOT_PROBED_PROFILE"
+    assert receipt["ready_for_work"] is False
+    assert receipt["state_changed"] is False
