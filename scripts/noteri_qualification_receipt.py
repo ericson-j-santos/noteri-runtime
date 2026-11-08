@@ -26,6 +26,8 @@ LIMIT = 1024 * 1024
 class Blocked(ValueError):
     pass
 
+NATIVE_BLOCK_REASONS = frozenset(['reparse_path','file_shape_or_limit','file_changed','json_object_required','rollback_location_invalid','rollback_manifest_invalid','rollback_entry_invalid','service_manager_read_denied','service_read_denied','service_status_unavailable','sql_instance_limit','sql_registry_value_invalid','localappdata_missing','profile_identity_invalid','source_sha_invalid','source_sha_mismatch','noteri_windows_required','correlation_invalid'])
+
 def require(condition: bool, code: str) -> None:
     if not condition:
         raise Blocked(code)
@@ -147,7 +149,21 @@ def produce(rules_root: Path, rules_sha: str, session_file: Path, output: Path) 
     cg.enforce_session(policy, session.get("session_id"), cwd, 1)
     state = cg.git_state(cwd, True, policy)
     require(state is not None and state.head == sha and state.status_count == 0, "worktree_not_clean")
-    observation = native.collect(sha, correlation)
+    try:
+        observation = native.collect(sha, correlation)
+    except native.Blocked as exc:
+        # Native qualification uses a separate Blocked class. Preserve only its
+        # enumerated, non-sensitive refusal codes; never log exception payloads.
+        reason = str(exc)
+        if reason not in NATIVE_BLOCK_REASONS:
+            reason = "native_inventory_unclassified"
+        write_atomic(output, {
+            "status": "blocked", "code": reason,
+            "source_sha": sha, "correlation_id": correlation,
+            "ready": False, "ready_for_builder": False,
+            "hml_verified": False, "diagnostic_only": True,
+        })
+        raise Blocked(reason) from None
     require(observation.get("rollback", {}).get("state_verified") is not False, "runtime_state_unreconciled")
     profile = observation["operating_profile"]
     if profile.get("verified") is not True or profile.get("profile") != "NORMAL":
