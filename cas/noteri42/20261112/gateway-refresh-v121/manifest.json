@@ -1,0 +1,81 @@
+{
+  "schema_version": "noteri42-gateway-refresh-cas-v1",
+  "purpose": "Pre-PR repair candidate preservation, not an authenticated Builder/Validator result",
+  "owner_issue": "ericson-j-santos/noteri-runtime#42",
+  "todo_id": "TODO-54",
+  "source_repository": "ericson-j-santos/noteri-runtime",
+  "source_mode": "assisted",
+  "model_calls": 0,
+  "model_run_id": null,
+  "model_digest": null,
+  "base_sha": "e10b3a00a9b3ec803ed4a4cc8f4f8c62b06c8928",
+  "produced_sha": "4c0ea7cd4794b22fd0da5902a35eaa4a0dedc23f",
+  "rules_repository": "ericson-j-santos/chatgpt-operational-rules",
+  "rules_sha": "58dcd4200f412a866278027ba9e433439a03f3b3",
+  "rules_version": "1.6.21",
+  "parent_relation": "single candidate commit with base_sha parent",
+  "changed_paths": [
+    ".github/workflows/noteri-command-gateway-refresh.yml",
+    "scripts/noteri_gateway_refresh.py",
+    "tests/test_noteri_gateway_refresh.py"
+  ],
+  "files": [
+    {
+      "path": ".github/workflows/noteri-command-gateway-refresh.yml",
+      "snapshot_path": "cas/noteri42/20261112/gateway-refresh-v121/snapshots/noteri-command-gateway-refresh.yml",
+      "before": {
+        "blob_git_sha": "afa75c21d3605e9e8833b41dec851bf4b42f8914",
+        "sha256": "8df31423c34ffb5956b7d373556edb6f977da7b35a874d69844e54024f08fb9e",
+        "bytes": 27102
+      },
+      "after": {
+        "blob_git_sha": "ae82833f9d31a0f3b6785c28b6b525f22319ae39",
+        "sha256": "c691beb42fcf82d3eacbfbd983a77267b437d130494133cb167f37aa3a5a8c83",
+        "bytes": 27102
+      }
+    },
+    {
+      "path": "scripts/noteri_gateway_refresh.py",
+      "snapshot_path": "cas/noteri42/20261112/gateway-refresh-v121/snapshots/noteri_gateway_refresh.py",
+      "before": {
+        "blob_git_sha": "f42d907896553f2ea1baaf0ae10c4a246296cf9e",
+        "sha256": "48b46b297d8902df940ab7c51f6e60edb45ca84a2a2a263b383453fbf6e10525",
+        "bytes": 31950
+      },
+      "after": {
+        "blob_git_sha": "71ce7f30c553b903eea33ed963f095603da89f1b",
+        "sha256": "060b43b15fdbafb2b96c760c1827d7442519689c66f9e171cdc7f0e6a4a8b327",
+        "bytes": 31950
+      }
+    },
+    {
+      "path": "tests/test_noteri_gateway_refresh.py",
+      "snapshot_path": "cas/noteri42/20261112/gateway-refresh-v121/snapshots/test_noteri_gateway_refresh.py",
+      "before": {
+        "blob_git_sha": "df5ffb8dfb6c1429252011dfbbda832ca7fcf166",
+        "sha256": "ef6453e8a77955bbdfe212f98cd18f7bd3e069c6b02a0eb5f486598f84e03aeb",
+        "bytes": 30339
+      },
+      "after": {
+        "blob_git_sha": "fdadef0c234451d0e224bcc9dd575f62881a7b65",
+        "sha256": "c7a5d13a4265a43d20ac69467604183127ae8f7b49291d5820d5d305f80d3a19",
+        "bytes": 30339
+      }
+    }
+  ],
+  "checked": [
+    "candidate one commit ahead base, zero behind, three allowed paths only",
+    "three blob SHAs before and after matched source GitHub",
+    "workflow push branches main and fix/**; this cas/* branch does not trigger push CI",
+    "canonical installer, updater and rebaseline script hashes unchanged between rules 1.6.19 and 1.6.21"
+  ],
+  "builder_verified": false,
+  "independent_validator_verified": false,
+  "full_tests_executed": false,
+  "ready_for_pr": false,
+  "physical_deploy": false,
+  "observed_incremental_spend_brl": "0.00 via GitHub API only",
+  "correlation_id": "noteri42-gateway-refresh-cas-v121-20261112",
+  "idempotency_key": "noteri42:gateway-refresh-cas:e10b3a00a9b3:4c0ea7cd4794:v1",
+  "checkpoint_issue": "https://github.com/ericson-j-santos/noteri-runtime/issues/42#issuecomment-6839084812"
+}
