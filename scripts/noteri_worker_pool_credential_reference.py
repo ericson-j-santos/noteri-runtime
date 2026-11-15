@@ -7,6 +7,7 @@ file handle and NTFS ACL under the same identity that runs this probe.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -40,13 +41,18 @@ def _load_secure_file(release: Path, manifest: dict):
     relative = "app/secure_file.py"
     expected = manifest.get("files", {}).get(relative)
     path = release / relative
-    if not isinstance(expected, str) or stage.file_sha256(path) != expected:
+    # Read the exact verified bytes once, then compile in memory. Loading the
+    # source via exec_module writes __pycache__ into the immutable release on
+    # Python processes that do not set -B, invalidating later stage readbacks.
+    stage.ensure_no_link_components(path)
+    source = path.read_bytes()
+    if not isinstance(expected, str) or hashlib.sha256(source).hexdigest() != expected:
         raise stage.StageBlocked("release_secure_file_invalid")
     spec = importlib.util.spec_from_file_location("noteri_staged_secure_file", path)
     if spec is None or spec.loader is None:
         raise stage.StageBlocked("release_secure_file_unavailable")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    exec(compile(source, str(path), "exec", dont_inherit=True), module.__dict__)
     return module
 
 
