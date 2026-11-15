@@ -109,6 +109,12 @@ def probe_health() -> dict[str, Any]:
         "service": data["service"], "api_status": data["status"],
         "auth_configured": data["auth_configured"],
         "rules_pin_configured": data["expected_rules_sha_configured"],
+        "authority_id_present": (
+            isinstance(data.get("authority_id"), str)
+            and len(data["authority_id"]) > 0),
+        "fenced_cutover_enabled": (
+            data["fenced_cutover_enabled"]
+            if type(data.get("fenced_cutover_enabled")) is bool else None),
         "storage_backend": data.get("storage_backend")
         if data.get("storage_backend") in ("sqlite", "postgres") else "UNKNOWN",
         "contract_version": str(data.get("contract_version", ""))[:50],
