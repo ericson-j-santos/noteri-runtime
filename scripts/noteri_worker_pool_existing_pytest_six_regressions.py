@@ -90,6 +90,38 @@ def _collection_diagnostics(output: str) -> dict:
     }
 
 
+SAFE_FAILURE_TYPES = frozenset((
+    "AssertionError", "ValueError", "TypeError", "AttributeError",
+    "RuntimeError", "PermissionError", "FileNotFoundError",
+    "ModuleNotFoundError", "ImportError", "TimeoutError", "KeyError",
+))
+
+
+def _failed_test_cases(output: str) -> list[dict[str, str]]:
+    """Only file/test IDs from the six fixed suites; no assertion text."""
+    allowed = set(FILES)
+    result = []
+    expression = re.compile(
+        r"^FAILED (tests[/\\][A-Za-z0-9_.-]+\.py)::"
+        r"([A-Za-z0-9_.\[\]-]+(?:::[A-Za-z0-9_.\[\]-]+)?)"
+        r"\s+-\s+([A-Za-z]+Error|[A-Za-z]+Exception)?",
+        re.MULTILINE,
+    )
+    for match in expression.finditer(output[-60000:]):
+        path = match.group(1).replace("\\", "/")
+        if path not in allowed:
+            continue
+        short = match.group(2)[:120]
+        failure = match.group(3)
+        result.append({
+            "file": path,
+            "case": short,
+            "failure_class": failure if failure in SAFE_FAILURE_TYPES
+            else "UNCLASSIFIED_FAILURE",
+        })
+    return result[:60]
+
+
 def _fixed_test_paths(root: Path) -> tuple[str, ...]:
     base = root.resolve()
     paths: list[str] = []
@@ -150,6 +182,7 @@ def run(root: Path, *, local: Path, roaming: Path) -> dict:
         "python_version": "3.11", "test_files": len(files),
         "tests": summary, "process_exit_code": test.returncode,
         "collection_diagnostics": _collection_diagnostics(raw),
+        "failed_cases": _failed_test_cases(raw),
         "output_sha256": hashlib.sha256(raw.encode()).hexdigest(),
         "state_changed": False, "packages_installed": False,
         "network_accessed": False, "credentials_read": False,
