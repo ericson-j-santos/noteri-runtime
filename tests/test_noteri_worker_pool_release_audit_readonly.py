@@ -87,6 +87,15 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(observed["extra_categories"], ["PYTHON_BYTECODE_CACHE"])
         self.assertEqual(observed["extra_count"], 1)
 
+    def test_identifies_only_manifest_allowlisted_bytecode_source(self):
+        directory, _ = self.valid()
+        extra = directory / "app" / "__pycache__" / "main.cpython-314.pyc"
+        extra.parent.mkdir(parents=True, exist_ok=True)
+        extra.write_bytes(b"bytecode")
+        observed = audit_one(self.releases, OLD_SHA)
+        self.assertEqual(observed["result"], "RELEASE_EXTRA_FILES_VERIFIED_PAYLOAD")
+        self.assertEqual(observed["extra_bytecode_source_modules"], ["app/main.py"])
+
     def test_tampered_with_extra_still_fails_hash_integrity(self):
         directory, _ = self.valid()
         (directory / "extra.py").write_bytes(b"noise")
