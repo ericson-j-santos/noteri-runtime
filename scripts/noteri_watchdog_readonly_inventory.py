@@ -132,20 +132,25 @@ def ollama_process_state() -> str:
         return "UNKNOWN"
 
 
-def ollama_port_state() -> str:
-    """Sonda somente TCP loopback 127.0.0.1:11434, sem payload."""
+def ollama_port_state(*, detail: dict[str, int | None] | None = None) -> str:
+    """Sonda somente TCP loopback, com código WinSock sanitizado."""
     import errno
 
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.settimeout(2.0)
             code = probe.connect_ex(("127.0.0.1", 11434))
+        if detail is not None:
+            detail["connect_code"] = code if type(code) is int and 0 <= code <= 65535 else None
         if code == 0:
             return "OPEN"
         if code in (errno.ECONNREFUSED, 10061):
             return "CLOSED"
         return "UNKNOWN"
-    except OSError:
+    except OSError as exc:
+        if detail is not None:
+            code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+            detail["socket_error_code"] = code if type(code) is int and 0 <= code <= 65535 else None
         return "UNKNOWN"
 
 
@@ -191,7 +196,8 @@ def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str,
     if profile != "NORMAL":
         reasons.append("PROFILE_NOT_NORMAL")
     model = read_model_tags()
-    transport = {"process": ollama_process_state(), "port": ollama_port_state()}
+    transport = {"process": ollama_process_state()}
+    transport["port"] = ollama_port_state(detail=transport)
     if not model["present"]:
         reasons.append("QWEN7B_NOT_ATTESTED")
     return {
