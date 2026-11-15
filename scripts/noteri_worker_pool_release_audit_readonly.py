@@ -48,6 +48,24 @@ def _safe_relative(path: str) -> bool:
             and path not in ("manifest.json",))
 
 
+def _extra_category(name: str) -> str:
+    # The unknown filename itself may be sensitive. Classify only; do not
+    # emit absolute paths, names, file content or hidden file metadata.
+    path = PurePosixPath(name)
+    if "__pycache__" in path.parts or name.casefold().endswith(".pyc"):
+        return "PYTHON_BYTECODE_CACHE"
+    suffix = path.suffix.casefold()
+    if suffix in (".lock", ".lck"):
+        return "LOCK_FILE"
+    if suffix in (".tmp", ".temp"):
+        return "TEMPORARY_FILE"
+    if suffix in (".log", ".out"):
+        return "LOG_FILE"
+    if suffix in (".py", ".sql", ".json", ".md"):
+        return "UNMANIFESTED_SOURCE_OR_METADATA"
+    return "UNKNOWN_EXTRA_FILE"
+
+
 def audit_one(releases: Path, release_sha: str) -> dict[str, Any]:
     if release_sha not in (OLD_SHA, CANDIDATE_SHA):
         raise Blocked("RELEASE_SHA_NOT_ALLOWED")
@@ -98,7 +116,7 @@ def audit_one(releases: Path, release_sha: str) -> dict[str, Any]:
         observed.discard("manifest.json")
         missing = set(files).difference(observed)
         extra = observed.difference(files)
-        if missing or extra:
+        if missing:
             return {
                 "result": "RELEASE_FILES_MISSING_OR_EXTRA",
                 "missing_count": len(missing),
@@ -122,6 +140,14 @@ def audit_one(releases: Path, release_sha: str) -> dict[str, Any]:
                 return {"result": "RELEASE_BYTES_MISMATCH",
                         "files_verified_before_mismatch": matches}
             matches += 1
+        if extra:
+            return {
+                "result": "RELEASE_EXTRA_FILES_VERIFIED_PAYLOAD",
+                "missing_count": 0, "extra_count": len(extra),
+                "extra_categories": sorted({_extra_category(path) for path in extra}),
+                "manifest_files_sha256_verified": matches,
+                "manifest_total_bytes_verified": size,
+            }
         if not stage.validate_staged(release, manifest):
             return {"result": "RELEASE_REVALIDATION_FAILED"}
         return {"result": "RELEASE_VERIFIED", "files_verified": matches,
