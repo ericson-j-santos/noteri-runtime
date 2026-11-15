@@ -209,3 +209,28 @@ def test_no_arbitrary_user_paths_or_mutating_surface():
     assert ".unlink(" not in src
     assert "os.remove(" not in src
     assert "token_file" not in src
+
+
+def test_known_python_bytecode_cache_is_named_without_reading_bytes(tmp_path, monkeypatch):
+    """The observed Noteri fingerprint maps to a safe, exact relative name."""
+    source, release = prepare(tmp_path)
+    entry = release / "app" / "__pycache__" / "secure_file.cpython-314.pyc"
+    entry.parent.mkdir()
+    entry.write_bytes(b"synthetic bytecode fixture; not an executable module")
+    assert hashlib.sha256(entry.relative_to(release).as_posix().encode()).hexdigest()[:16] == (
+        "2795a17de0a305f8")
+    original = Path.read_bytes
+
+    def no_cache_reads(path):
+        if str(path) == str(entry):
+            raise AssertionError("Audit must not open an unknown cache file")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", no_cache_reads)
+    result = check(source, release)
+    assert result["result"] == "RELEASE_MISMATCH"
+    assert result["extra"] == ["app/__pycache__/secure_file.cpython-314.pyc"]
+    assert result["counts"]["extra"] == 1
+    assert result["counts"]["hash_mismatch"] == 0
+    assert result["state_changed"] is False
+    assert result["secrets_read"] is False
