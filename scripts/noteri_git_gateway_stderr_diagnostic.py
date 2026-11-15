@@ -60,6 +60,53 @@ def classify_stderr(stderr: str) -> str:
     return "stderr_other"
 
 
+def error_details(stderr: str) -> dict:
+    """Classify known Git warnings; never disclose user-controlled error text."""
+    lower = stderr.casefold()
+    patterns = (
+        ("unreadable_directory", "could not open directory"),
+        ("excluded_directory", "unable to access"),
+        ("unreadable_file", "failed to read"),
+        ("permission", "permission denied"),
+        ("not_found", "no such file or directory"),
+        ("short_filename", "filename too long"),
+    )
+    return {
+        "message_code": next((key for key, needle in patterns if needle in lower),
+                             "UNCLASSIFIED"),
+        "permission_denied": "permission denied" in lower
+                             or "access is denied" in lower,
+        "has_quoted_target": bool(re.search(r"['\"][^'\"]+['\"]", stderr)),
+        "has_warning_prefix": lower.lstrip().startswith("warning:"),
+    }
+
+
+def isolate_untracked_warning(root: Path) -> list[dict]:
+    """Retest with *fixed* tracked top-level pathspecs for location classification."""
+    result = []
+    for name in (".github", ".sdd", "docs", "scripts", "tests"):
+        cmd = ("git", "ls-files", "--others", "--exclude-standard",
+               "-z", "--", name)
+        try:
+            check = subprocess.run(
+                cmd, cwd=root, text=True, capture_output=True,
+                encoding="utf-8", errors="replace", timeout=20,
+                check=False, shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            result.append({"area": name, "result": "EXECUTION_ERROR"})
+            continue
+        result.append({
+            "area": name,
+            "returncode": check.returncode,
+            "stderr_type": classify_stderr(check.stderr or ""),
+            "stderr_code": error_details(check.stderr or "")["message_code"],
+            "stderr_sha256": hashlib.sha256(check.stderr.encode()).hexdigest()
+                             if check.stderr else None,
+        })
+    return result
+
+
 def probe(root: Path, expected_head: str) -> dict:
     """Read command results without exposing stdout or stderr contents."""
     if not SHA.fullmatch(expected_head):
@@ -92,6 +139,7 @@ def probe(root: Path, expected_head: str) -> dict:
             detail["identity"] = "ROOT_MISMATCH"
         if name == "revparse_head" and done.stdout.strip().lower() != expected_head:
             detail["identity"] = "HEAD_MISMATCH"
+        detail.update(error_details(stderr))
         steps.append(detail)
         if done.returncode != 0 or stderr.strip() or detail.get("identity"):
             break
@@ -99,6 +147,7 @@ def probe(root: Path, expected_head: str) -> dict:
         "status": "GIT_STATE_COMMANDS_CLEAN" if len(steps) == len(COMMANDS)
                   and not steps[-1].get("identity") else "GIT_STATE_COMMAND_BLOCKED",
         "steps": steps,
+        "untracked_areas": isolate_untracked_warning(root) if steps[-1]["step"] == "untracked" and (steps[-1].get("stderr_type") != "none" or steps[-1].get("returncode") != 0) else [],
         "first_blocked": next((s["step"] for s in steps if
                                s.get("returncode") != 0
                                or s.get("stderr_type") not in (None, "none")
