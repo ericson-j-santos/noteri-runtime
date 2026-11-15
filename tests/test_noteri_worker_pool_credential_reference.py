@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from scripts import noteri_worker_pool_native_stage as stage
 from scripts import noteri_worker_pool_credential_reference as probe
@@ -58,6 +60,17 @@ class CredentialReferenceTests(unittest.TestCase):
         }
         options.update(overrides)
         return probe.qualify(**options)
+
+    def test_secure_dynamic_import_never_generates_cache_in_staged_release(self):
+        release = self.release()
+        manifest = json.loads((release / "manifest.json").read_text("utf-8"))
+        # The real scheduled jobs use -B, but the loader itself must be safe
+        # even if called by a Python process that permits .pyc creation.
+        with patch.object(sys, "dont_write_bytecode", False):
+            module = probe._load_secure_file(release, manifest)
+        self.assertEqual(module.VALUE, 1)
+        self.assertEqual(list(release.rglob("*.pyc")), [],
+                         "credential reference loader mutated the immutable release")
 
     def test_missing_reference_blocks_without_reading_token(self) -> None:
         self.release()
