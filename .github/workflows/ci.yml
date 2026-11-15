@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     # Permite a validação independente antes de abrir uma PR, sem execução física.
-    branches: [main, 'fix/**']
+    branches: [main, 'fix/**', 'feat/issue42-release-integrity-audit-20261115']
   pull_request:
 
 permissions:
