@@ -57,7 +57,14 @@ def validate(*, root: Path, executable: Path, hostname: str, platform: str) -> t
     if spec is None or spec.loader is None:
         raise RuntimeError("blocked_token_reference")
     secure = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(secure)
+    # The installed release is immutable: an import must never materialize
+    # app/__pycache__/secure_file.*.pyc, even if a caller omitted python -B.
+    before = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(secure)
+    finally:
+        sys.dont_write_bytecode = before
     fd = secure.open_private_read(token)
     try:
         secure.validate_private_fd(fd)
