@@ -105,6 +105,7 @@ def replace_transaction(manifest: Path, backup: Path, lock: Path,
     write_exclusive(lock, b"QWEN7B-MANIFEST-RECONCILE-DEV\n")
     stage = manifest.with_name("7b.reqsys-reconcile-stage")
     replaced = False
+    stage_created = False
     try:
         require(not stage.exists() and not stage.is_symlink(), "STAGE_CONFLICT")
         if backup.exists() or backup.is_symlink():
@@ -119,6 +120,7 @@ def replace_transaction(manifest: Path, backup: Path, lock: Path,
                 and inspect_windows_listener() == "ABSENT",
                 "OLLAMA_NOT_QUIESCENT")
         write_exclusive(stage, official)
+        stage_created = True
         os.replace(stage, manifest)
         replaced = True
         require(sha(manifest.read_bytes()) == EXPECTED_OFFICIAL_SHA256,
@@ -148,7 +150,7 @@ def replace_transaction(manifest: Path, backup: Path, lock: Path,
                     backup.is_file() and sha(backup.read_bytes()) == EXPECTED_LOCAL_SHA)}
     finally:
         try:
-            if stage.exists():
+            if stage_created and stage.is_file() and not stage.is_symlink():
                 stage.unlink()
             lock.unlink()
         except OSError:
