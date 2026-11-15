@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import socket
 import subprocess
+import unicodedata
 
 EXPECTED_HEAD = "9840ec316ba5d76f17cd1cf113d208ed649daf7d"
 ROOT = Path(r"C:\dev\chatgpt-workers")
@@ -113,6 +114,7 @@ def raw_directory_identity(root: Path) -> dict:
     except OSError:
         return {"status": "PARENT_UNREADABLE"}
     matches = []
+    nonascii_entries = [name for name in entries if not name.isascii()]
     for encoding in ("utf-8", "cp1252", "cp850", "cp437"):
         try:
             decoded = raw.decode(encoding, errors="strict")
@@ -132,13 +134,31 @@ def raw_directory_identity(root: Path) -> dict:
             "exists": candidate.exists(),
             "is_dir": candidate.is_dir(),
             "is_symlink": candidate.is_symlink(),
+            "normalized_nfc_match": any(
+                unicodedata.normalize("NFC", n) == unicodedata.normalize("NFC", value)
+                for n in nonascii_entries
+            ),
+            "normalized_nfkc_match": any(
+                unicodedata.normalize("NFKC", n) == unicodedata.normalize("NFKC", value)
+                for n in nonascii_entries
+            ),
+            "char_categories": [
+                unicodedata.category(char) for char in value[:12]
+            ],
+            "replacement_character_count": value.count("\ufffd"),
         })
     return {
         "status": "DIRECTORY_WARNING_CROSSCHECKED",
         "raw_name_byte_count": len(raw),
         "raw_name_ascii": raw.isascii(),
         "root_entry_count": len(entries),
-        "nonascii_root_entry_count": sum(not n.isascii() for n in entries),
+        "nonascii_root_entry_count": len(nonascii_entries),
+        "nonascii_entry_kinds": [
+            {"chars": len(name), "is_dir": (root / name).is_dir(),
+             "symlink": (root / name).is_symlink(),
+             "categories": [unicodedata.category(ch) for ch in name[:12]]}
+            for name in nonascii_entries[:5]
+        ],
         "candidate_decodings": matches,
         "raw_name_sha256": hashlib.sha256(raw).hexdigest(),
         "stderr_raw_sha256": hashlib.sha256(stderr).hexdigest(),
