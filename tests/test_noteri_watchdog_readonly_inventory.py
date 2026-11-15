@@ -273,3 +273,18 @@ def test_original_windows_utf16_xml_is_not_reencoded(
     assert result["installed_release_sha256"] == digest
     assert result["task_definition_sha256"] == hashlib.sha256(xml).hexdigest()
     assert release.read_bytes() == b"installed-signed-watchdog"
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-16-be", "utf-8"])
+def test_task_xml_decoder_accepts_windows_encodings(encoding: str) -> None:
+    declaration = '<?xml version="1.0" encoding="UTF-16"?>'
+    xml = declaration + '<Task><Actions/></Task>'
+    expected = module.decode_task_xml_strict(xml.encode(encoding))
+    assert expected == xml
+
+
+def test_task_xml_decoder_rejects_invalid_or_oversized_bytes() -> None:
+    with pytest.raises(module.InventoryError, match="INSTALLED_TASK_XML_ENCODING_INVALID"):
+        module.decode_task_xml_strict(b"\\xff")
+    with pytest.raises(module.InventoryError, match="INSTALLED_TASK_XML_ENCODING_INVALID"):
+        module.decode_task_xml_strict(b"x" * (module.MAX_TASK_XML_BYTES + 1))

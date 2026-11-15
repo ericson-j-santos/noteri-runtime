@@ -107,6 +107,29 @@ def read_model_tags() -> dict[str, Any]:
 
 
 
+
+def decode_task_xml_strict(raw: bytes) -> str:
+    """Decodifica Task Scheduler mantendo a declaracao XML sem reescrever bytes.
+
+    Windows pode devolver UTF-16 com/sem BOM ou UTF-8 cuja declaracao XML
+    ainda diga UTF-16. XML do runtime nunca e publicado no recibo.
+    """
+    if not raw or len(raw) > MAX_TASK_XML_BYTES:
+        raise InventoryError("INSTALLED_TASK_XML_ENCODING_INVALID")
+    try:
+        if raw.startswith((b"\\xff\\xfe", b"\\xfe\\xff")):
+            return raw.decode("utf-16")
+        if raw.startswith(b"\\xef\\xbb\\xbf"):
+            return raw.decode("utf-8-sig")
+        if raw[:2] == b"<\\x00":
+            return raw.decode("utf-16-le")
+        if raw[:2] == b"\\x00<":
+            return raw.decode("utf-16-be")
+        return raw.decode("utf-8")
+    except UnicodeError as exc:
+        raise InventoryError("INSTALLED_TASK_XML_ENCODING_INVALID") from exc
+
+
 def read_installed_release_receipt(metadata: dict[str, Any]) -> dict[str, Any]:
     """Le SHA-256 real e vinculo da acao agendada, sem alterar o Windows.
 
@@ -142,7 +165,7 @@ def read_installed_release_receipt(metadata: dict[str, Any]) -> dict[str, Any]:
         raise InventoryError("INSTALLED_TASK_XML_UNAVAILABLE")
     from noteri_watchdog_transactional_upgrade import UpgradeBlocked, _task_contract
     try:
-        _task_contract(query.stdout,
+        _task_contract(decode_task_xml_strict(query.stdout),
                        release, runner_home)
     except UpgradeBlocked as exc:
         code = str(exc)
@@ -210,6 +233,7 @@ def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str,
                 "INSTALLED_RELEASE_CHANGED_DURING_READ",
                 "INSTALLED_RELEASE_DIGEST_MISMATCH",
                 "INSTALLED_TASK_XML_UNAVAILABLE",
+                "INSTALLED_TASK_XML_ENCODING_INVALID",
                 "INSTALLED_TASK_ACTION_NOT_BOUND",
                 "INSTALLED_TASK_ACTION_UNEXPECTED",
                 "INSTALLED_TASK_ACTION_PATH_MISMATCH",

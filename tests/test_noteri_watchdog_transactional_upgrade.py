@@ -151,3 +151,20 @@ def test_rollback_failure_preserves_lock_for_manual_recovery(tmp_path):
     assert (tmp_path/"upgrade.lock").read_text().startswith("LOCKED_UPGRADE")
     with pytest.raises(FileExistsError):
         m.transact(a,req(),tmp_path,authorized=True,confirm=m.CONFIRM)
+
+
+def test_task_contract_accepts_unicode_xml_with_utf16_declaration(tmp_path):
+    import subprocess
+    release = tmp_path / "watchdog.py"
+    runner = tmp_path / "runner"
+    arguments = subprocess.list2cmdline([str(release), "watch", "--runner-home", str(runner)])
+    text = (
+        '<?xml version="1.0" encoding="UTF-16"?>'
+        '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+        '<Principals><Principal><LogonType>S4U</LogonType></Principal></Principals>'
+        '<Triggers><BootTrigger/></Triggers><Settings><Enabled>true</Enabled></Settings>'
+        '<Actions><Exec><Arguments>' + arguments + '</Arguments></Exec></Actions></Task>'
+    )
+    m._task_contract(text, release, runner)
+    with pytest.raises(m.UpgradeBlocked, match="TASK_XML_INVALID"):
+        m._task_contract(text.encode("utf-8"), release, runner)

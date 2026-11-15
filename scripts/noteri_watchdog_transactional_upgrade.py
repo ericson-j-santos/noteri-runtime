@@ -187,7 +187,7 @@ def transact(adapter: Adapter, req: Request, backup_root: Path, *,
         return _transact_core(adapter, req, backup_root, authorized=True, confirm=confirm)
 
 
-def _task_contract(xml: bytes, release: Path, runner: Path) -> None:
+def _task_contract(xml: bytes | str, release: Path, runner: Path) -> None:
     # Validar o Task Scheduler como fonte separada do metadata, antes da troca.
     ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
     try:
@@ -245,8 +245,11 @@ class WindowsAdapter:
         digest = _hash(data)
         if digest != meta["release_sha256"]:
             raise UpgradeBlocked("METADATA_DIGEST_MISMATCH")
-        task_xml = self._task().Xml.encode("utf-8")
-        _task_contract(task_xml, release, runner)
+        task_xml_text = self._task().Xml
+        task_xml = task_xml_text.encode("utf-8")
+        # COM entrega texto Unicode; nao reparsear como bytes UTF-8
+        # enquanto a declaracao da Task diz UTF-16.
+        _task_contract(task_xml_text, release, runner)
         return Snapshot(old_sha, digest, raw, task_xml, data)
 
     def verify_source(self, req: Request) -> None:
