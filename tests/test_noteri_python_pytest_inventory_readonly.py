@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -19,6 +21,20 @@ class ProbeTests(unittest.TestCase):
         self.addCleanup(t.cleanup)
         self.python = Path(t.name) / "python.exe"
         self.python.write_bytes(b"fixture-only-not-an-executable")
+
+    def test_direct_cli_help_imports_without_pythonpath(self):
+        script = (Path(__file__).resolve().parents[1] / "scripts"
+                  / "noteri_python_pytest_inventory_readonly.py")
+        environment = dict(os.environ)
+        environment.pop("PYTHONPATH", None)
+        completed = subprocess.run(
+            [sys.executable, "-B", str(script), "--help"],
+            cwd=script.parents[1], env=environment,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=12, check=False,
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("--expected-head", completed.stdout)
 
     def test_fixed_probe_is_valid_python_and_does_not_import_pytest(self):
         compile(probe.PROBE_CODE, "fixed_pytest_metadata_probe", "exec")
