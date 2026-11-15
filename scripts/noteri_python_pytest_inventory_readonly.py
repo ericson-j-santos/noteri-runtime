@@ -27,10 +27,10 @@ CONFIRM = "INVENTORY-NOTERI-PYTEST-READONLY"
 CORRELATION = re.compile(r"[A-Za-z0-9._:-]{12,128}\Z")
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 PROBE_CODE = (
-    "import importlib.metadata as im,json,sys;"
-    "\ntry: pytest=im.version('pytest')"
-    "\nexcept im.PackageNotFoundError: pytest=None"
-    "\nprint(json.dumps({'python':'.'.join(map(str,sys.version_info[:2])),"
+    "import importlib.metadata as im,json,sys\n"
+    "try:\n pytest=im.version('pytest')\n"
+    "except im.PackageNotFoundError:\n pytest=None\n"
+    "print(json.dumps({'python':'.'.join(map(str,sys.version_info[:2])),"
     "'pytest':pytest},sort_keys=True))"
 )
 
