@@ -166,6 +166,15 @@ def run(root: Path, *, local: Path, roaming: Path) -> dict:
         "PYTHONNOUSERSITE": "1",
         "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
     }
+    # These fixed Windows tests invoke PowerShell 5.1 by its executable name.
+    # The intentionally isolated environment has no ambient PATH. Give it
+    # only the verified Windows PowerShell directory, never the host PATH.
+    if os.name == "nt":
+        powershell = (Path(env["SYSTEMROOT"]) / "System32" /
+                      "WindowsPowerShell" / "v1.0" / "powershell.exe")
+        if not powershell.is_file() or powershell.is_symlink():
+            raise Blocked("WINDOWS_POWERSHELL_UNAVAILABLE")
+        env["PATH"] = str(powershell.parent)
     command = [
         str(python), "-B", "-I", "-c", PYTEST_BRIDGE,
         "-q", "--disable-warnings", "-p", "no:cacheprovider",
