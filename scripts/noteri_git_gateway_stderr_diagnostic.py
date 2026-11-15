@@ -146,6 +146,17 @@ def raw_directory_identity(root: Path) -> dict:
                 unicodedata.category(char) for char in value[:12]
             ],
             "replacement_character_count": value.count("\ufffd"),
+            "surrogate_replacement_match_count": sum(
+                "".join("\ufffd" if unicodedata.category(ch) == "Cs" else ch
+                        for ch in n) == value
+                for n in nonascii_entries
+            ),
+            "matching_surrogate_directory_empty": [
+                not any((root / n).iterdir()) for n in nonascii_entries
+                if "".join("\ufffd" if unicodedata.category(ch) == "Cs" else ch
+                           for ch in n) == value
+                and (root / n).is_dir() and not (root / n).is_symlink()
+            ][:3],
         })
     return {
         "status": "DIRECTORY_WARNING_CROSSCHECKED",
