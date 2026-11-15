@@ -57,7 +57,10 @@ class SixSuitesTests(unittest.TestCase):
         self.assertEqual(result["result"],"PYTEST_SIX_SUITES_PASSED")
         self.assertEqual(result["test_files"],6)
         argv=executed.call_args.args[0]
-        self.assertEqual(argv[1:4],["-B","-I","-m"])
+        self.assertEqual(argv[1:4],["-B","-I","-c"])
+        self.assertEqual(argv[4], m.PYTEST_BRIDGE)
+        self.assertIn("sys.path.insert(0,str(root))", argv[4])
+        compile(argv[4], "fixed_isolated_pytest_bridge", "exec")
         self.assertEqual(argv[-6:],list(m.FILES))
         self.assertNotIn("pip",argv)
         self.assertEqual(executed.call_args.kwargs["env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"],"1")
