@@ -21,6 +21,7 @@ from noteri_watchdog_readonly_inventory import (
     ollama_port_state, ollama_process_state, read_model_tags,
 )
 import noteri_control_plane_watchdog as watchdog
+from noteri_ollama_tcp_table_probe import inspect_windows_listener
 
 CONFIRM = "PLAN-NOTERI-OLLAMA-RECOVERY-READONLY"
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
@@ -134,6 +135,7 @@ def plan(*, expected_sha: str, correlation_id: str, confirm: str,
     detail: dict[str, Any] = {}
     process = ollama_process_state()
     port = ollama_port_state(detail=detail)
+    windows_listener = inspect_windows_listener()
     api = read_model_tags() if port == "OPEN" else {
         "status": "NOT_QUERIED", "present": False, "digest": None,
     }
@@ -141,7 +143,8 @@ def plan(*, expected_sha: str, correlation_id: str, confirm: str,
     existing = [item for item in binaries if item["status"] == "PRESENT"]
     # An unknown port is NOT evidence of absence. Never start automatically.
     status = ("PREFLIGHT_CANDIDATE" if
-              process == "ABSENT" and port == "CLOSED" and len(existing) == 1
+              process == "ABSENT" and windows_listener == "ABSENT"
+              and port in {"CLOSED", "UNKNOWN"} and len(existing) == 1
               else "BLOCKED_OR_INCONCLUSIVE")
     return {
         "result": "NOTERI_OLLAMA_RECOVERY_PLAN_READONLY",
@@ -152,6 +155,7 @@ def plan(*, expected_sha: str, correlation_id: str, confirm: str,
         "binaries": binaries,
         "process": process,
         "port": port,
+        "windows_tcp_listener": windows_listener,
         "socket_error_code": detail.get("socket_error_code"),
         "api": api,
         "status": status,
