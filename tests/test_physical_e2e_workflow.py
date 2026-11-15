@@ -7,7 +7,14 @@ def test_physical_e2e_is_manual_exact_sha_and_noteri_only() -> None:
     raw = WORKFLOW.read_text(encoding="utf-8")
     assert "workflow_dispatch:" in raw
     assert "pull_request:" not in raw
-    assert "push:" not in raw
+    # O E2E mutavel continua exclusivamente manual. Somente o inventario Risk1
+    # da branch exata pode ser disparado uma vez por marcador do proprietario.
+    assert "push:\\n    branches: [fix/noteri-watchdog-transactional-upgrade-20261115]" in raw
+    assert "if: github.event_name == 'workflow_dispatch' && inputs.mode == 'e2e'" in raw
+    assert "github.actor == 'ericson-j-santos'" in raw
+    assert "contains(github.event.head_commit.message, '[risk1-inventory-once]')" in raw
+    assert "'--risk', '1'" in raw
+    assert "installation_authorized -ne $false" in raw
     assert "runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]" in raw
     assert "ref: ${{ github.sha }}" in raw
     assert "persist-credentials: false" in raw

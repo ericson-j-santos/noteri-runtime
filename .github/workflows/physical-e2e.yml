@@ -226,4 +226,13 @@ jobs:
               (.task_action_verified == true and
                (.installed_release_sha256 | test("^[0-9a-f]{64}$")) and
                (.task_definition_sha256 | test("^[0-9a-f]{64}$"))))' >/dev/null
+          # Projecao sanitizada para fixar o SHA antigo antes do upgrade.
+          # Nunca publicar metadata, XML, caminhos privados ou credenciais.
+          printf '%s' "$RECEIPT_B64" | base64 --decode | jq -c '{
+            result, correlation_id, expected_sha, installed_source_sha,
+            installed_release_sha256, task_definition_sha256, task_action_verified,
+            installed_attested, live_task_s4u, profile, blocking_reasons,
+            state_changed, production_touched, installation_authorized,
+            ready_for_builder
+          }'
           echo 'NOTERI_WATCHDOG_INVENTORY_INDEPENDENT_READBACK_OK_NO_INSTALL'

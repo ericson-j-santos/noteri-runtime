@@ -51,3 +51,6 @@ def test_separate_readback_never_promotes_host():
     assert "sha256sum" in step and "jq -e" in step
     assert ".installation_authorized == false" in step
     assert ".ready_for_builder == false" in step
+    assert "installed_release_sha256, task_definition_sha256, task_action_verified" in step
+    assert "jq -c" in step
+    assert "metadata.json" not in step and "task.xml" not in step
