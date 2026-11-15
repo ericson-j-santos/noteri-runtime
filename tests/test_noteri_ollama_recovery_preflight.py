@@ -21,13 +21,13 @@ SHA = "e" * 40
 
 class PlanTests(unittest.TestCase):
     def invoke(self, *, host="Noteri", platform="nt", profile="NORMAL",
-               process="ABSENT", port="CLOSED", candidate_count=1):
+               process="ABSENT", port="CLOSED", candidate_count=1, listener="ABSENT"):
         found = [
             {"candidate": "a", "status": "PRESENT" if i < candidate_count else "MISSING",
              "sha256": "a"*64, "bytes": 42}
             for i in range(3)
         ]
-        with patch.object(m, "inspect_windows_listener", return_value="ABSENT"), \
+        with patch.object(m, "inspect_windows_listener", return_value=listener), \
              patch.object(m, "source_sha", return_value=SHA), \
              patch.object(m, "candidate", side_effect=found), \
              patch.object(m, "ollama_process_state", return_value=process), \
@@ -52,8 +52,7 @@ class PlanTests(unittest.TestCase):
         self.assertFalse(value["recovery_authorized"])
 
     def test_unknown_os_listener_does_not_admit(self):
-        with patch.object(m, "inspect_windows_listener", return_value="UNKNOWN"):
-            self.assertEqual(self.invoke(port="UNKNOWN")["status"], "PREFLIGHT_CANDIDATE")
+        self.assertEqual(self.invoke(port="UNKNOWN", listener="UNKNOWN")["status"], "BLOCKED_OR_INCONCLUSIVE")
 
     def test_process_existing_does_not_admit_start(self):
         self.assertEqual(self.invoke(process="PRESENT")["status"], "BLOCKED_OR_INCONCLUSIVE")
