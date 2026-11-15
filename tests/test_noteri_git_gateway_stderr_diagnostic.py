@@ -136,6 +136,23 @@ class GitStateDiagnosticTests(unittest.TestCase):
             self.assertIs(git.call_args.kwargs["text"], False)
             self.assertIs(git.call_args.kwargs["shell"], False)
 
+    def test_unicode_normalization_matches_without_escaping_name(self):
+        import unicodedata
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            folded_name = unicodedata.normalize("NFD", "café")
+            (root / folded_name).mkdir()
+            raw = "warning: could not open directory 'café/': No such file or directory".encode("utf-8")
+            with patch.object(
+                probe.subprocess, "run",
+                return_value=SimpleNamespace(returncode=0, stdout=b"", stderr=raw),
+            ):
+                data = probe.raw_directory_identity(root)
+            utf8 = [x for x in data["candidate_decodings"] if x["encoding"] == "utf-8"][0]
+            self.assertTrue(utf8["normalized_nfc_match"])
+            self.assertNotIn("café", str(data))
+            self.assertEqual(utf8["replacement_character_count"], 0)
+
     def test_raw_git_warning_absent_is_not_reported_as_fixed(self):
         with tempfile.TemporaryDirectory() as t:
             with patch.object(
