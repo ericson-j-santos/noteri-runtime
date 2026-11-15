@@ -109,6 +109,22 @@ class GitStateDiagnosticTests(unittest.TestCase):
             ])
             self.assertTrue(all(call.kwargs["shell"] is False for call in called.call_args_list))
 
+    def test_git_option_profiles_are_fixed_and_do_not_leak_error(self):
+        with tempfile.TemporaryDirectory() as t:
+            raw = "warning: could not open directory 'private/': No such file or directory"
+            fake = SimpleNamespace(returncode=0, stdout="", stderr=raw)
+            with patch.object(probe.subprocess, "run", return_value=fake) as called:
+                rows = probe.compare_readonly_git_options(Path(t))
+            self.assertEqual(len(rows), 3)
+            self.assertTrue(all(r["stderr_code"] == "unreadable_directory" for r in rows))
+            self.assertNotIn("private", str(rows))
+            self.assertEqual(called.call_count, 3)
+            for call in called.call_args_list:
+                self.assertEqual(call.args[0][0], "git")
+                self.assertEqual(call.args[0][-5:],
+                                 ("ls-files", "--others", "--exclude-standard", "-z", "--", ".")[-5:])
+                self.assertFalse(call.kwargs["shell"])
+
     def test_clean_git_state_requires_all_seven_checks(self):
         with tempfile.TemporaryDirectory() as t:
             root = Path(t)
