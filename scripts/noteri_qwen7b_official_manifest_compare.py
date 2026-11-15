@@ -23,6 +23,7 @@ from noteri_ollama_recovery_preflight import path_safe, source_sha
 
 URL = "https://registry.ollama.ai/v2/library/qwen2.5-coder/manifests/7b"
 EXPECTED_PREFIX = "dae161e27b0e"
+EXPECTED_OFFICIAL_SHA256 = "dae161e27b0e90dd1856c8bb3209201fd6736d8eb66298e75ed87571486f4364"
 EXPECTED_LOCAL_SHA = "4aaba1ee422af93aad53ecbdfc8a159770cf254a9950b7a4304cf9ee3555ef31"
 CONFIRM = "COMPARE-NOTERI-QWEN7B-OFFICIAL-MANIFEST-READONLY"
 MAX_MANIFEST_BYTES = 128 * 1024
@@ -69,7 +70,7 @@ def fetch_official_manifest() -> bytes:
     if not 0 < len(data) <= MAX_MANIFEST_BYTES:
         raise CompareBlocked("OFFICIAL_BODY_INVALID")
     digest = hashlib.sha256(data).hexdigest()
-    if not digest.startswith(EXPECTED_PREFIX):
+    if digest != EXPECTED_OFFICIAL_SHA256:
         raise CompareBlocked("OFFICIAL_DIGEST_NOT_PINNED")
     if header and header != "sha256:" + digest:
         raise CompareBlocked("OFFICIAL_DIGEST_HEADER_MISMATCH")
@@ -108,7 +109,8 @@ def parse_descriptors(raw: bytes) -> tuple[dict[str, Any], list[tuple[str, int]]
     return obj, parsed
 
 
-def compare(local: bytes, official: bytes, store: Path) -> dict[str, Any]:
+def compare(local: bytes, official: bytes, store: Path, *,
+            verify_blob_sha256: bool = False) -> dict[str, Any]:
     """Compare semantic JSON + all blob references, never claim readiness."""
     local_obj, local_refs = parse_descriptors(local)
     official_obj, official_refs = parse_descriptors(official)
@@ -120,6 +122,9 @@ def compare(local: bytes, official: bytes, store: Path) -> dict[str, Any]:
     reusable_bytes = 0
     missing_bytes = 0
     missing_count = 0
+    hash_verified = 0
+    hash_verified_bytes = 0
+    hash_bad = 0
     for digest, size in official_refs:
         blob = store / "blobs" / digest.replace(":", "-")
         if not path_safe(blob, store):
@@ -132,13 +137,39 @@ def compare(local: bytes, official: bytes, store: Path) -> dict[str, Any]:
         if usable:
             reusable += 1
             reusable_bytes += size
+            if verify_blob_sha256:
+                before = blob.stat()
+                sha = hashlib.sha256()
+                counted = 0
+                with blob.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        sha.update(chunk)
+                        counted += len(chunk)
+                after = blob.stat()
+                if (counted == size and sha.hexdigest() == digest[7:]
+                        and before.st_mtime_ns == after.st_mtime_ns
+                        and before.st_size == after.st_size):
+                    hash_verified += 1
+                    hash_verified_bytes += counted
+                else:
+                    hash_bad += 1
         else:
             missing_count += 1
             missing_bytes += size
+    extra_local_refs = local_blob_set - official_blob_set
+    extra_local_size = sum(size for _, size in extra_local_refs)
+    extra_local_types = sorted({
+        item.get("mediaType", "UNSPECIFIED")
+        for item in [local_obj["config"], *local_obj["layers"]]
+        if type(item.get("mediaType", "UNSPECIFIED")) is str
+        and (item.get("digest"), item.get("size")) in extra_local_refs
+    })
     raw_equal = local == official
     json_equal = local_obj == official_obj
     references_equal = local_refs == official_refs
-    if raw_equal:
+    if hash_bad:
+        classification = "OFFICIAL_BLOB_SHA256_MISMATCH"
+    elif raw_equal:
         classification = "ALREADY_OFFICIAL"
     elif json_equal:
         classification = "SAME_JSON_DIFFERENT_ENCODING"
@@ -165,7 +196,16 @@ def compare(local: bytes, official: bytes, store: Path) -> dict[str, Any]:
         "official_blobs_size_missing": missing_count,
         "official_blob_bytes_size_present": reusable_bytes,
         "official_blob_bytes_missing": missing_bytes,
-        "verified_official_blobs_by_hash": 0,
+        "verified_official_blobs_by_hash": hash_verified,
+        "verified_official_bytes_by_hash": hash_verified_bytes,
+        "failed_official_blobs_by_hash": hash_bad,
+        "full_official_blob_hash_verified": (
+            verify_blob_sha256 and hash_verified == len(official_refs)
+            and hash_bad == 0 and missing_count == 0
+        ),
+        "extra_local_descriptor_count": len(extra_local_refs),
+        "extra_local_descriptor_bytes": extra_local_size,
+        "extra_local_descriptor_media_types": extra_local_types,
         "model_ready": False, "manifest_replaced": False,
         "model_downloaded": False, "state_changed": False,
         "repair_authorized": False,
@@ -201,7 +241,9 @@ def main() -> int:
         if hashlib.sha256(local).hexdigest() != EXPECTED_LOCAL_SHA:
             raise CompareBlocked("LOCAL_MANIFEST_DRIFT")
         official = fetch_official_manifest()
-        result = compare(local, official, models)
+        result = compare(local, official, models, verify_blob_sha256=True)
+        if not result["full_official_blob_hash_verified"]:
+            raise CompareBlocked("OFFICIAL_BLOB_INTEGRITY_NOT_VERIFIED")
         result.update(
             correlation_id=args.correlation_id, source_sha=args.expected_sha,
             registry="registry.ollama.ai", model="qwen2.5-coder:7b",
