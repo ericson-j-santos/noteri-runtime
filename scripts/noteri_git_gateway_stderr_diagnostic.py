@@ -298,6 +298,79 @@ def isolate_untracked_warning(root: Path) -> list[dict]:
     return result
 
 
+
+def _stable_json_record(path: Path) -> dict | None:
+    """Read an existing control-plane record twice; never disclose its fields."""
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
+        return None
+    try:
+        before = path.read_bytes()
+        after = path.read_bytes()
+        if before != after or len(before) > 65536:
+            return None
+        obj = json.loads(before.decode("utf-8"))
+        return obj if isinstance(obj, dict) else None
+    except (OSError, UnicodeError, ValueError):
+        return None
+
+
+def _snapshot_digest(payload: dict) -> str:
+    body = {key: value for key, value in payload.items()
+            if key != "snapshot_sha256"}
+    raw = json.dumps(body, ensure_ascii=False, sort_keys=True,
+                     separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def reservation_attestation(root: Path, state_dir: Path,
+                            expected_head: str = EXPECTED_HEAD) -> dict:
+    """Read-only admission evidence for the two exact, previously reserved sessions.
+
+    A valid reservation and snapshot do NOT grant a new session control of the
+    old worktree. No code here acquires, releases or forges an exclusive lease.
+    """
+    if root.name not in TARGETS or not SHA.fullmatch(expected_head):
+        return {"state": "TARGET_DENIED", "exclusive_lease_proven": False}
+    sid = root.name.removeprefix("wt-chat-")
+    if not sid or root.is_symlink():
+        return {"state": "TARGET_DENIED", "exclusive_lease_proven": False}
+    if state_dir.is_symlink() or any(
+        (state_dir / part).is_symlink() for part in ("sessions", "snapshots", "locks")
+    ):
+        return {"state": "STATE_LINK_DENIED", "exclusive_lease_proven": False}
+    reservation = _stable_json_record(state_dir / "sessions" / (sid + ".json"))
+    snapshot = _stable_json_record(state_dir / "snapshots" / (sid + ".json"))
+    if reservation is None or snapshot is None:
+        return {"state": "RECORD_MISSING_OR_UNSTABLE",
+                "exclusive_lease_proven": False}
+    expected_path = os.path.normcase(os.path.abspath(str(root)))
+    reserved_path = os.path.normcase(
+        os.path.abspath(str(reservation.get("reserved_worktree", ""))))
+    snap_path = os.path.normcase(
+        os.path.abspath(str(snapshot.get("reserved_worktree", ""))))
+    conditions = {
+        "reservation_session_matches": reservation.get("session_id") == sid,
+        "reservation_materialized": reservation.get("status") == "materialized",
+        "reservation_host_matches": str(reservation.get("host", "")).casefold() == "noteri",
+        "reservation_sha_matches": reservation.get("base_head") == expected_head,
+        "reservation_worktree_matches": expected_path == reserved_path,
+        "snapshot_session_matches": snapshot.get("session_id") == sid,
+        "snapshot_result_valid": snapshot.get("result") == "BOOTSTRAP_OK",
+        "snapshot_sha_integrity": snapshot.get("snapshot_sha256") == _snapshot_digest(snapshot),
+        "snapshot_worktree_matches": expected_path == snap_path,
+        "snapshot_status_matches": snapshot.get("reservation_status")
+                                    == reservation.get("status"),
+    }
+    return {
+        "state": "RESERVATION_ATTESTED_READONLY" if all(conditions.values())
+                 else "RESERVATION_MISMATCH",
+        "checks": conditions,
+        # A read-only record is not an exclusive lease. Never claim ownership.
+        "exclusive_lease_proven": False,
+        "apply_authorized": False,
+    }
+
+
 def probe(root: Path, expected_head: str) -> dict:
     """Read command results without exposing stdout or stderr contents."""
     if not SHA.fullmatch(expected_head):
@@ -371,7 +444,12 @@ def main() -> int:
             if root.resolve(strict=True).parent != ROOT.resolve(strict=True):
                 raise Blocked("OUTSIDE_FIXED_ROOT")
             current = probe(root, EXPECTED_HEAD)
-            result.append({"target": name, **current})
+            local = os.environ.get("LOCALAPPDATA", "")
+            control = (reservation_attestation(
+                root, Path(local) / "ReqSys" / "CommandGateway",
+            ) if local else {"state": "STATE_DIRECTORY_UNAVAILABLE",
+                            "exclusive_lease_proven": False})
+            result.append({"target": name, "reservation": control, **current})
         except (Blocked, OSError):
             result.append({"target": name, "status": "TARGET_UNAVAILABLE"})
     report = {
