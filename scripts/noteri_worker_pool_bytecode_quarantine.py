@@ -150,6 +150,19 @@ def quarantine(releases: Path) -> dict:
         releases_lock.unlink(missing_ok=True)
 
 
+def require_worker_api_idle() -> None:
+    """Never mutate a release while its local Worker Pool API might be serving."""
+    try:
+        with socket.create_connection(("127.0.0.1", 8097), timeout=1):
+            raise Blocked("WORKER_API_PORT_ACTIVE")
+    except ConnectionRefusedError:
+        return
+    except Blocked:
+        raise
+    except OSError:
+        raise Blocked("WORKER_API_PORT_STATUS_UNVERIFIED") from None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("plan", "apply"), required=True)
@@ -173,6 +186,8 @@ def main() -> int:
         if not local or not Path(local).is_absolute():
             raise Blocked("LOCALAPPDATA_UNAVAILABLE")
         releases = Path(local) / "ReqSys" / "NoteriWorkerPool" / "releases"
+        if a.mode == "apply":
+            require_worker_api_idle()
         result = assess(releases) if a.mode == "plan" else quarantine(releases)
         result.update({
             "host": "Noteri", "profile": "NORMAL",
