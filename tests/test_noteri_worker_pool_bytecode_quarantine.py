@@ -31,8 +31,8 @@ class QuarantineTests(unittest.TestCase):
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_bytes(data)
             manifest["files"][path] = hashlib.sha256(data).hexdigest()
-        # Real release has 38 entries; use 34 additional declared source files.
-        for i in range(34):
+        # Real release has 38 entries; use 33 additional declared source files.
+        for i in range(33):
             name = f"app/fixture_{i:02d}.py"
             file = self.release / name
             file.write_bytes(f"# fixture {i}\n".encode())
@@ -56,7 +56,7 @@ class QuarantineTests(unittest.TestCase):
         result = quarantine(self.releases)
         self.assertEqual(result["result"], "CACHE_QUARANTINED_WITH_READBACK")
         self.assertEqual(result["cache_sha256"], self.fingerprint)
-        self.assertEqual(result["manifest_files_sha256_verified"], 39)
+        self.assertEqual(result["manifest_files_sha256_verified"], 38)
         backup = self.releases / ".quarantine" / OLD_SHA / self.cache.name
         self.assertTrue(backup.exists())
         self.assertEqual(backup.read_bytes(), b"safe-cache")
