@@ -2,6 +2,13 @@ name: Noteri Physical E2E
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Executar E2E ou inventario fisico governado somente leitura
+        required: true
+        default: e2e
+        type: choice
+        options: [e2e, inventory]
 
 permissions:
   contents: read
@@ -13,6 +20,7 @@ concurrency:
 jobs:
   e2e:
     name: Validate exact noteri-runtime SHA on Noteri
+    if: inputs.mode == 'e2e'
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 8
     env:
@@ -67,3 +75,153 @@ jobs:
           path: artifacts/noteri-runtime/evidence.json
           if-no-files-found: error
           retention-days: 30
+
+  inventory:
+    name: Governed Noteri watchdog physical inventory (read only)
+    if: github.actor == 'ericson-j-santos' && inputs.mode == 'inventory'
+    runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
+    timeout-minutes: 7
+    outputs:
+      receipt_b64: ${{ steps.inventory.outputs.receipt_b64 }}
+      receipt_sha256: ${{ steps.inventory.outputs.receipt_sha256 }}
+    env:
+      RULES_SHA: 58dcd4200f412a866278027ba9e433439a03f3b3
+      CORRELATION_ID: noteri-watchdog-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout immutable candidate source SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout canonical rules at pinned current SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: 58dcd4200f412a866278027ba9e433439a03f3b3
+          path: _rules
+          persist-credentials: false
+      - name: Validate host, SHA and governed session
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:COMPUTERNAME -ine 'Noteri' -or
+              -not $env:RUNNER_NAME.ToLowerInvariant().StartsWith('noteri') -or
+              (git rev-parse HEAD).Trim() -ne $env:GITHUB_SHA -or
+              (git -C _rules rev-parse HEAD).Trim() -ne $env:RULES_SHA) {
+            throw 'NOTERI_WATCHDOG_INVENTORY_IDENTITY_BLOCKED'
+          }
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $args = @('--policy', (Join-Path $rules 'config/command-gateway.policy.json'),
+            '--repo', $env:GITHUB_WORKSPACE, '--session-prefix', 'noteri-watchdog-inventory',
+            '--correlation-id', $env:CORRELATION_ID,
+            '--expected-head', $env:GITHUB_SHA,
+            '--sync-ref', 'origin/fix/noteri-watchdog-transactional-upgrade-20261115',
+            '--require-runner-version-preflight')
+          $raw = @(& python3 -B (Join-Path $rules 'scripts/session_launcher.py') @args)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'NOTERI_WATCHDOG_SESSION_BLOCKED' }
+          $session = @($raw)[-1] | ConvertFrom-Json
+          if ($session.result -ne 'SESSION_LAUNCH_OK' -or
+              $session.state_validated -ne $true -or
+              $session.head -ne $env:GITHUB_SHA -or
+              $session.runner_version_preflight.ok -ne $true) {
+            throw 'NOTERI_WATCHDOG_SESSION_INVALID'
+          }
+          "target=$($session.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session=$($session.session_id)" | Add-Content $env:GITHUB_OUTPUT
+      - name: Inspect installed release and scheduled task by Risk1 Gateway
+        id: inventory
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $args = @('--policy', (Join-Path $rules 'config/command-gateway.policy.json'),
+            '--correlation-id', $env:CORRELATION_ID,
+            'run', '--cwd', $env:TARGET_PATH,
+            '--session-id', $env:SESSION_ID, '--risk', '1', '--timeout', '45',
+            '--expected-head', $env:GITHUB_SHA, '--',
+            'python3', '-B', (Join-Path $env:TARGET_PATH 'scripts/noteri_watchdog_readonly_inventory.py'),
+            '--expected-sha', $env:GITHUB_SHA,
+            '--correlation-id', $env:CORRELATION_ID,
+            '--confirm', 'INVENTORY-NOTERI-WATCHDOG-READONLY')
+          $raw = @(& python3 -B (Join-Path $rules 'scripts/command_gateway.py') @args)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'NOTERI_WATCHDOG_RISK1_GATEWAY_BLOCKED' }
+          $envelope = @($raw)[-1] | ConvertFrom-Json
+          if ($envelope.result -ne 'ok' -or $envelope.gateway_exit_code -ne 0 -or
+              $envelope.command_exit_code -ne 0 -or $envelope.state_changed -ne $false) {
+            throw 'NOTERI_WATCHDOG_RISK1_GATEWAY_INVALID'
+          }
+          $report = $envelope.stdout | ConvertFrom-Json
+          if ($report.result -ne 'NOTERI_WATCHDOG_READONLY_INVENTORY' -or
+              $report.expected_sha -ne $env:GITHUB_SHA -or
+              $report.correlatION_id -ne $env:CORRELATION_ID -or
+              $report.source_sha_verified -ne $true -or
+              $report.state_changed -ne $false -or
+              $report.production_touched -ne $false -or
+              $report.installation_authorized -ne $false -or
+              $report.ready_for_builder -ne $false -or
+              ($report.task_action_verified -eq $true -and
+                ($report.installed_release_sha256 -notmatch '^[0-9a-f]{64}$' -or
+                 $report.task_definition_sha256 -notmatch '^[0-9a-f]{64}$'))) {
+            throw 'NOTERI_WATCHDOG_INVENTORY_RECEIPT_INVALID'
+          }
+          $report | Add-Member -NotePropertyName source_workflow_sha -NotePropertyValue $env:GITHUB_SHA
+          $report | Add-Member -NotePropertyName rules_sha -NotePropertyValue $env:RULES_SHA
+          $report | Add-Member -NotePropertyName run_id -NotePropertyValue $env:GITHUB_RUN_ID
+          $report | Add-Member -NotePropertyName run_attempt -NotePropertyValue $env:GITHUB_RUN_ATTEMPT
+          $json = [string]($report | ConvertTo-Json -Depth 7 -Compress)
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+          if ($bytes.Length -gt 8192 -or $bytes.Length -lt 120) {
+            throw 'NOTERI_WATCHDOG_INVENTORY_SIZE_INVALID'
+          }
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          try {
+            $digest = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+          } finally { $sha.Dispose() }
+          "receipt_b64=$([System.Convert]::ToBase64String($bytes))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          "receipt_sha256=$digest" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          Write-Output 'NOTERI_WATCHDOG_RISK1_INVENTORY_COMPLETE_NON_PROMOTING'
+
+  inventory_readback:
+    name: Independent GitHub-hosted inventory receipt readback
+    needs: inventory
+    if: inputs.mode == 'inventory' && needs.inventory.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    env:
+      RECEIPT_B64: ${{ needs.inventory.outputs.receipt_b64 }}
+      RECEIPT_SHA256: ${{ needs.inventory.outputs.receipt_sha256 }}
+      EXPECTED_RULES_SHA: 58dcd4200f412a866278027ba9e433439a03f3b3
+    steps:
+      - name: Validate digest, source identity and non-promoting receipt
+        run: |
+          set -euo pipefail
+          test -n "$RECEIPT_B64"
+          [[ "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "${#RECEIPT_B64}" -le 12000
+          observed="$(printf '%s' "$RECEIPT_B64" | base64 --decode | sha256sum | cut -d' ' -f1)"
+          test "$observed" = "$RECEIPT_SHA256"
+          if test "$observed" = "$(printf '%s' tampered | sha256sum | cut -d' ' -f1)"; then
+            echo 'TAMPERED_INVENTORY_RECEIPT_ACCEPTED'
+            exit 2
+          fi
+          printf '%s' "$RECEIPT_B64" | base64 --decode | jq -e \
+            --arg source "$GITHUB_SHA" --arg rules "$EXPECTED_RULES_SHA" '
+            .result == "NOTERI_WATCHDOG_READONLY_INVENTORY" and
+            .source_workflow_sha == $source and .expected_sha == $source and
+            .rules_sha == $rules and .source_sha_verified == true and
+            .state_changed == false and .production_touched == false and
+            .installation_authorized == false and .ready_for_builder == false and
+            (.task_action_verified == false or
+              (.task_action_verified == true and
+               (.installed_release_sha256 | test("^[0-9a-f]{64}$")) and
+               (.task_definition_sha256 | test("^[0-9a-f]{64}$"))))' >/dev/null
+          echo 'NOTERI_WATCHDOG_INVENTORY_INDEPENDENT_READBACK_OK_NO_INSTALL'

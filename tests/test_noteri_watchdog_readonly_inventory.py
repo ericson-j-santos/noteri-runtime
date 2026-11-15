@@ -104,6 +104,11 @@ def _stub_inventory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         "exists": True, "enabled": True, "trigger_at_startup": True, "logon_type": "S4U",
     })
     monkeypatch.setattr(module.launcher, "attest_installed_release", lambda *args: None)
+    monkeypatch.setattr(module, "read_installed_release_receipt", lambda _: {
+        "installed_release_sha256": "d" * 64,
+        "task_definition_sha256": "e" * 64,
+        "task_action_verified": True,
+    })
     monkeypatch.setattr(module, "read_model_tags", lambda: {
         "status": "PRESENT", "present": True, "digest": "c" * 64,
     })
@@ -116,6 +121,9 @@ def test_inventory_reports_readonly_without_promoting_e2e(
     _stub_inventory(monkeypatch, tmp_path)
     receipt = module.inventory(SHA, CORR, module.CONFIRM)
     assert receipt["installed_attested"] is True
+    assert receipt["task_action_verified"] is True
+    assert receipt["installed_release_sha256"] == "d" * 64
+    assert receipt["task_definition_sha256"] == "e" * 64
     assert receipt["live_task_s4u"] is True
     assert receipt["profile"] == "NORMAL"
     assert receipt["model"]["present"] is True
@@ -179,3 +187,55 @@ def test_corrupted_watchdog_metadata_fails_closed(
     assert "untrusted_runtime_path" not in json.dumps(receipt)
     assert receipt["ready_for_builder"] is False
     assert path.read_bytes() == before
+
+
+def test_task_action_failure_does_not_promote_readback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    meta = _stub_inventory(monkeypatch, tmp_path)
+    before = meta.read_bytes()
+    def blocked(_):
+        raise module.InventoryError("INSTALLED_TASK_ACTION_NOT_BOUND")
+    monkeypatch.setattr(module, "read_installed_release_receipt", blocked)
+    result = module.inventory(SHA, CORR, module.CONFIRM)
+    assert result["task_action_verified"] is False
+    assert result["installed_release_sha256"] is None
+    assert "INSTALLED_RELEASE_READBACK_BLOCKED" in result["blocking_reasons"]
+    assert result["ready_for_builder"] is False
+    assert result["state_changed"] is False
+    assert meta.read_bytes() == before
+
+
+def test_installed_sha_invalid_before_runtime_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(module.watchdog, "runtime_root", lambda: pytest.fail("runtime_read"))
+    with pytest.raises(module.InventoryError, match="INSTALLED_SHA_INVALID"):
+        module.read_installed_release_receipt({"source_sha": "../bad"})
+
+
+def test_readonly_receipt_checks_real_release_and_task_action(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    import hashlib
+    from types import SimpleNamespace
+    runtime = tmp_path / "runtime"
+    release = runtime / "releases" / SHA / "scripts" / "noteri_control_plane_watchdog.py"
+    release.parent.mkdir(parents=True)
+    release.write_bytes(b"installed-binary")
+    digest = hashlib.sha256(b"installed-binary").hexdigest()
+    monkeypatch.setattr(module.watchdog, "runtime_root", lambda: runtime)
+    monkeypatch.setattr(module.watchdog, "validate_runner_home", lambda _: tmp_path / "runner")
+    monkeypatch.setattr(module.watchdog, "schtasks_path", lambda: Path("schtasks.exe"))
+    meta = {
+        "source_sha": SHA, "release_script": str(release),
+        "release_sha256": digest, "runner_home": str(tmp_path / "runner"),
+    }
+    xml = b"<Task xmlns='http://schemas.microsoft.com/windows/2004/02/mit/task'><Principals><Principal><LogonType>S4U</LogonType></Principal></Principals><Triggers><BootTrigger/></Triggers><Actions><Exec><Arguments>ignored</Arguments></Exec></Actions></Task>"
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=xml))
+    # The task contract belongs to the already-tested upgrade module; it must
+    # reject arbitrary actions. No fake successful binding is accepted here.
+    with pytest.raises(module.InventoryError, match="INSTALLED_TASK_ACTION_NOT_BOUND"):
+        module.read_installed_release_receipt(meta)
+    assert release.read_bytes() == b"installed-binary"
+

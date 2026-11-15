@@ -28,6 +28,8 @@ DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 CORRELATION_RE = re.compile(r"^[A-Za-z0-9._:-]{12,128}$")
 MAX_METADATA_BYTES = 32 * 1024
 MAX_MODEL_RESPONSE_BYTES = 256 * 1024
+MAX_RELEASE_BYTES = 1024 * 1024
+MAX_TASK_XML_BYTES = 128 * 1024
 
 
 class InventoryError(RuntimeError):
@@ -104,6 +106,53 @@ def read_model_tags() -> dict[str, Any]:
     return {"status": "ABSENT", "present": False, "digest": None}
 
 
+
+def read_installed_release_receipt(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Le SHA-256 real e vinculo da acao agendada, sem alterar o Windows.
+
+    Nao confunde metadata ou Task S4U existente com a versao em execucao.
+    Falha fechado ao detectar redirect, divergencia de bytes ou acao inesperada.
+    """
+    sha = metadata.get("source_sha")
+    if not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
+        raise InventoryError("INSTALLED_SHA_INVALID")
+    runtime = watchdog.runtime_root()
+    release = runtime / "releases" / sha / "scripts" / "noteri_control_plane_watchdog.py"
+    launcher._guard_release_location(runtime, release)
+    recorded = metadata.get("release_script")
+    if (not isinstance(recorded, str) or not Path(recorded).is_absolute()
+            or os.path.normcase(os.path.abspath(recorded)) !=
+               os.path.normcase(os.path.abspath(release))):
+        raise InventoryError("INSTALLED_RELEASE_PATH_INVALID")
+    if not release.is_file() or release.stat().st_size > MAX_RELEASE_BYTES:
+        raise InventoryError("INSTALLED_RELEASE_UNAVAILABLE")
+    first = release.read_bytes()
+    if not first or first != release.read_bytes():
+        raise InventoryError("INSTALLED_RELEASE_CHANGED_DURING_READ")
+    digest = hashlib.sha256(first).hexdigest()
+    if metadata.get("release_sha256") != digest:
+        raise InventoryError("INSTALLED_RELEASE_DIGEST_MISMATCH")
+    runner_home = watchdog.validate_runner_home(Path(str(metadata.get("runner_home") or "")))
+    query = subprocess.run(
+        [str(watchdog.schtasks_path()), "/Query", "/TN", watchdog.TASK_NAME, "/XML"],
+        capture_output=True, check=False, timeout=20,
+    )
+    if (query.returncode != 0 or not query.stdout
+            or len(query.stdout) > MAX_TASK_XML_BYTES):
+        raise InventoryError("INSTALLED_TASK_XML_UNAVAILABLE")
+    from noteri_watchdog_transactional_upgrade import UpgradeBlocked, _task_contract
+    try:
+        _task_contract(launcher._decode_xml(query.stdout).encode("utf-8"),
+                       release, runner_home)
+    except (UpgradeBlocked, ValueError, UnicodeError) as exc:
+        raise InventoryError("INSTALLED_TASK_ACTION_NOT_BOUND") from exc
+    return {
+        "installed_release_sha256": digest,
+        "task_definition_sha256": hashlib.sha256(query.stdout).hexdigest(),
+        "task_action_verified": True,
+    }
+
+
 def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str, Any]:
     if confirm != CONFIRM:
         raise InventoryError("CONFIRMATION_INVALID")
@@ -136,6 +185,17 @@ def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str,
         except (launcher.LauncherError, OSError, ValueError, AttributeError, TypeError, KeyError) as exc:
             code = str(exc) if isinstance(exc, launcher.LauncherError) else ""
             reasons.append(code if code.startswith("WATCHDOG_INSTALLED_") else "WATCHDOG_ATTESTATION_FAILED")
+    observed_release = {
+        "installed_release_sha256": None,
+        "task_definition_sha256": None,
+        "task_action_verified": False,
+    }
+    if metadata:
+        try:
+            observed_release = read_installed_release_receipt(metadata)
+        except (InventoryError, OSError, ValueError, RuntimeError,
+                subprocess.SubprocessError, AttributeError, TypeError):
+            reasons.append("INSTALLED_RELEASE_READBACK_BLOCKED")
     try:
         task = launcher.task_status()
         task_ready = isinstance(task, dict) and launcher.task_headless_ready(task)
@@ -154,6 +214,7 @@ def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str,
         "correlation_id": correlation_id,
         "expected_sha": expected_sha,
         "installed_source_sha": stored_sha,
+        **observed_release,
         "installed_attested": installed,
         "live_task_s4u": task_ready,
         "profile": profile,
