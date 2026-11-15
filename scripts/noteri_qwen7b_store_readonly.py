@@ -22,7 +22,8 @@ BLOB_SHA = re.compile(r"sha256:([0-9a-f]{64})\Z")
 
 def assess_model_store(home: Path, custom_location: bool) -> dict[str, object]:
     result: dict[str, object] = {
-        "manifest": "UNKNOWN", "digest_prefix_match": False,
+        "manifest": "UNKNOWN", "manifest_sha256": None,
+        "digest_prefix_match": False,
         "blobs_checked": 0, "blobs_missing_or_untrusted": 0,
         "model_ready": False,
     }
@@ -44,6 +45,7 @@ def assess_model_store(home: Path, custom_location: bool) -> dict[str, object]:
             return result
         payload = manifest.read_bytes()
         digest = hashlib.sha256(payload).hexdigest()
+        result["manifest_sha256"] = digest
         result["digest_prefix_match"] = digest.startswith(DIGEST_PREFIX)
         obj = json.loads(payload.decode("utf-8"))
         if type(obj) is not dict or type(obj.get("layers")) is not list:
@@ -71,10 +73,10 @@ def assess_model_store(home: Path, custom_location: bool) -> dict[str, object]:
                     int(result["blobs_missing_or_untrusted"]) + 1
                 )
         result["manifest"] = "PRESENT"
-        result["model_ready"] = (
-            result["digest_prefix_match"]
-            and result["blobs_missing_or_untrusted"] == 0
-        )
+        # Size-only blob inspection never proves executable model integrity.
+        # Full digest/readback from an independently attested model is required.
+        result["blobs_size_matched"] = result["blobs_missing_or_untrusted"] == 0
+        result["model_ready"] = False
     except (OSError, ValueError, UnicodeError, TypeError):
         result["manifest"] = "UNAVAILABLE_OR_INVALID"
     return result
