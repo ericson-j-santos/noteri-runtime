@@ -17,6 +17,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Running as `python -B scripts/...py` normally puts only scripts/ on
+# sys.path, while the existing native-venv module imports `scripts.*`.
+# Add solely this checked-out repository root; never import external code.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import noteri_control_plane_watchdog as watchdog
 import noteri_worker_pool_native_stage as stage
 import noteri_worker_pool_native_venv as venv
