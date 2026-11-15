@@ -142,7 +142,7 @@ def read_installed_release_receipt(metadata: dict[str, Any]) -> dict[str, Any]:
         raise InventoryError("INSTALLED_TASK_XML_UNAVAILABLE")
     from noteri_watchdog_transactional_upgrade import UpgradeBlocked, _task_contract
     try:
-        _task_contract(launcher._decode_xml(query.stdout).encode("utf-8"),
+        _task_contract(query.stdout,
                        release, runner_home)
     except UpgradeBlocked as exc:
         code = str(exc)

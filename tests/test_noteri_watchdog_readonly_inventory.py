@@ -235,7 +235,41 @@ def test_readonly_receipt_checks_real_release_and_task_action(
     monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=xml))
     # The task contract belongs to the already-tested upgrade module; it must
     # reject arbitrary actions. No fake successful binding is accepted here.
-    with pytest.raises(module.InventoryError, match="INSTALLED_TASK_ACTION_NOT_BOUND"):
+    with pytest.raises(module.InventoryError, match="INSTALLED_TASK_ACTION_PATH_MISMATCH"):
         module.read_installed_release_receipt(meta)
     assert release.read_bytes() == b"installed-binary"
 
+
+
+def test_original_windows_utf16_xml_is_not_reencoded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    import hashlib
+    import subprocess
+    from types import SimpleNamespace
+    runtime = tmp_path / "runtime"
+    release = runtime / "releases" / SHA / "scripts" / "noteri_control_plane_watchdog.py"
+    release.parent.mkdir(parents=True)
+    release.write_bytes(b"installed-signed-watchdog")
+    digest = hashlib.sha256(release.read_bytes()).hexdigest()
+    runner = tmp_path / "runner"
+    meta = {"source_sha": SHA, "release_script": str(release),
+            "release_sha256": digest, "runner_home": str(runner)}
+    monkeypatch.setattr(module.watchdog, "runtime_root", lambda: runtime)
+    monkeypatch.setattr(module.watchdog, "validate_runner_home", lambda _: runner)
+    monkeypatch.setattr(module.watchdog, "schtasks_path", lambda: Path("schtasks.exe"))
+    args = subprocess.list2cmdline([str(release), "watch", "--runner-home", str(runner)])
+    xml = (
+        '<?xml version="1.0" encoding="UTF-16"?>'
+        '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+        '<Principals><Principal><LogonType>S4U</LogonType></Principal></Principals>'
+        '<Triggers><BootTrigger/></Triggers><Settings><Enabled>true</Enabled></Settings>'
+        '<Actions><Exec><Arguments>' + args + '</Arguments></Exec></Actions></Task>'
+    ).encode("utf-16")
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **k:
+                        SimpleNamespace(returncode=0, stdout=xml))
+    result = module.read_installed_release_receipt(meta)
+    assert result["task_action_verified"] is True
+    assert result["installed_release_sha256"] == digest
+    assert result["task_definition_sha256"] == hashlib.sha256(xml).hexdigest()
+    assert release.read_bytes() == b"installed-signed-watchdog"
