@@ -140,6 +140,7 @@ def _transact_core(adapter: Adapter, req: Request, backup_root: Path, *,
             if (restored.source_sha != before.source_sha or
                     restored.release_digest != before.release_digest or
                     restored.metadata != before.metadata or
+                    restored.task_xml != before.task_xml or
                     _hash(restored.installed_release) != req.old_digest):
                 raise UpgradeBlocked("ROLLBACK_READBACK_MISMATCH")
         except Exception as rollback_exc:
@@ -293,7 +294,7 @@ class WindowsAdapter:
             tmp = self.metadata_path.with_name(self.metadata_path.name + ".rollback")
             _write_exclusive(tmp, saved.metadata)
             os.replace(tmp, self.metadata_path)
-        _task_contract(self._task().Xml.encode("utf-8"),
+        _task_contract(self._task().Xml,
                        self.root / "releases" / saved.source_sha / "scripts" / self.source.name,
                        Path(json.loads(saved.metadata)["runner_home"]))
 

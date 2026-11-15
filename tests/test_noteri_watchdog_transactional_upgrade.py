@@ -168,3 +168,55 @@ def test_task_contract_accepts_unicode_xml_with_utf16_declaration(tmp_path):
     m._task_contract(text, release, runner)
     with pytest.raises(m.UpgradeBlocked, match="TASK_XML_INVALID"):
         m._task_contract(text.encode("utf-8"), release, runner)
+
+def test_rollback_detects_altered_task_configuration(tmp_path):
+    adapter=Fake(fail=True)
+    true_restore=adapter.restore
+    def restore_but_change_task(snapshot):
+        true_restore(snapshot)
+        adapter.snap=m.Snapshot(snapshot.source_sha,snapshot.release_digest,
+            snapshot.metadata,b"<Task>different</Task>",snapshot.installed_release)
+    adapter.restore=restore_but_change_task
+    with pytest.raises(m.UpgradeBlocked,match="ROLLBACK_FAILED_MANUAL_RECOVERY_REQUIRED"):
+        m.transact(adapter,req(),tmp_path,authorized=True,confirm=m.CONFIRM)
+    assert (tmp_path/"backups"/"upgrade-noteri-transaction-20261115"/"task.xml").is_file()
+    assert (tmp_path/"upgrade.lock").exists()
+
+
+def test_restore_validates_real_unicode_task_definition(monkeypatch,tmp_path):
+    import json
+    import subprocess
+    from types import SimpleNamespace
+    root=tmp_path/"runtime"
+    runner=tmp_path/"runner"
+    release=root/"releases"/OLD/"scripts"/"noteri_control_plane_watchdog.py"
+    args=subprocess.list2cmdline([str(release),"watch","--runner-home",str(runner)])
+    xml=('<?xml version="1.0" encoding="UTF-16"?>'
+         '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+         '<Principals><Principal><LogonType>S4U</LogonType></Principal></Principals>'
+         '<Triggers><BootTrigger/></Triggers><Settings><Enabled>true</Enabled></Settings>'
+         '<Actions><Exec><Arguments>'+args+'</Arguments></Exec></Actions></Task>')
+    root.mkdir(parents=True)
+    metadata=root/"metadata.json"
+    metadata.write_bytes(b'{"new":true}')
+    old_metadata=json.dumps({"runner_home":str(runner)}).encode("utf-8")
+    calls=[]
+    class Folder:
+        def RegisterTask(self,*args): calls.append(args)
+    class Service:
+        def GetFolder(self,folder): return Folder()
+    adapter=object.__new__(m.WindowsAdapter)
+    adapter.root=root
+    adapter.metadata_path=metadata
+    adapter.source=tmp_path/"noteri_control_plane_watchdog.py"
+    adapter.watchdog=SimpleNamespace(_scheduler=lambda:Service(),
+        TASK_FOLDER="Automation",TASK_LEAF_NAME="ReqSysNoteriControlPlaneWatchdog",
+        TASK_CREATE_OR_UPDATE=6,TASK_LOGON_S4U=2)
+    adapter._task=lambda:SimpleNamespace(Xml=xml)
+    snap=m.Snapshot(OLD,hash_old,old_metadata,xml.encode("utf-8"),old)
+    adapter.restore(snap)
+    assert len(calls)==1
+    assert calls[0][1]==xml
+    assert calls[0][-1]==2
+    assert metadata.read_bytes()==old_metadata
+
