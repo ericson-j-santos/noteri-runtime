@@ -66,6 +66,8 @@ jobs:
           python -m pytest -q tests/test_noteri_sql_admin_bundle_gate.py tests/test_noteri_sql_admin_errorlog_read.py tests/test_noteri_sql_certificate_errorlog.py
       - name: Testar supressão do CMD e perfil ESTUDO no Windows hospedado
         run: python -m pytest -q tests/test_noteri_control_plane_fallback.py
+      - name: Testar upgrade transacional do watchdog e rollback no Windows hospedado
+        run: python -m pytest -q tests/test_noteri_watchdog_transactional_upgrade.py
       - name: Validate eventlog parser in Windows PowerShell 5.1
         run: python -m pytest -q tests/test_noteri_sql_application_eventlog_workflow_powershell.py -k windows_powershell_51
       - name: Test real forensic receipt encoding in hosted Windows PowerShell 5.1
