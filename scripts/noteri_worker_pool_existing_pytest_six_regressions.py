@@ -106,7 +106,7 @@ def _failed_test_cases(output: str) -> list[dict[str, str]]:
     allowed = set(FILES)
     result: list[dict[str, str]] = []
     expression = re.compile(
-        r"^FAILED (tests[/\\][A-Za-z0-9_.-]+\\.py)::([^\\r\\n]+?)(?:\\s+-\\s+([^\\r\\n]*))?$",
+        r"^FAILED (tests[/\\][A-Za-z0-9_.-]+\.py)::([^\r\n]+?)(?:\s+-\s+([^\r\n]*))?$",
         re.MULTILINE,
     )
     for match in expression.finditer(output[-60000:]):
@@ -121,7 +121,7 @@ def _failed_test_cases(output: str) -> list[dict[str, str]]:
         if "[" in node or "::" in node:
             short += "-" + hashlib.sha256(node.encode()).hexdigest()[:16]
         detail = match.group(3) or ""
-        failure = re.match(r"([A-Za-z]+(?:Error|Exception))\\b", detail)
+        failure = re.match(r"([A-Za-z]+(?:Error|Exception))\b", detail)
         failure_class = failure.group(1) if failure else None
         result.append({
             "file": path,
