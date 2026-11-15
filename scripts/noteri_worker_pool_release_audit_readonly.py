@@ -66,6 +66,18 @@ def _extra_category(name: str) -> str:
     return "UNKNOWN_EXTRA_FILE"
 
 
+def _bytecode_source(name: str, expected: set[str]) -> str | None:
+    """Return only an existing allowlisted source name, not arbitrary paths."""
+    path = PurePosixPath(name)
+    if (len(path.parts) < 3 or path.parts[-2] != "__pycache__"
+            or re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*\.cpython-[0-9]{2,3}\.pyc",
+                            path.name) is None):
+        return None
+    module = path.name.split(".cpython-", 1)[0] + ".py"
+    source = PurePosixPath(*path.parts[:-2], module).as_posix()
+    return source if source in expected else None
+
+
 def audit_one(releases: Path, release_sha: str) -> dict[str, Any]:
     if release_sha not in (OLD_SHA, CANDIDATE_SHA):
         raise Blocked("RELEASE_SHA_NOT_ALLOWED")
@@ -145,6 +157,10 @@ def audit_one(releases: Path, release_sha: str) -> dict[str, Any]:
                 "result": "RELEASE_EXTRA_FILES_VERIFIED_PAYLOAD",
                 "missing_count": 0, "extra_count": len(extra),
                 "extra_categories": sorted({_extra_category(path) for path in extra}),
+                "extra_bytecode_source_modules": sorted(
+                    source for path in extra
+                    if (source := _bytecode_source(path, set(files))) is not None
+                ),
                 "manifest_files_sha256_verified": matches,
                 "manifest_total_bytes_verified": size,
             }
