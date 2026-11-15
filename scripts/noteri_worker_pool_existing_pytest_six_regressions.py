@@ -114,7 +114,7 @@ def _failed_test_cases(output: str) -> list[dict[str, str]]:
         if path not in allowed:
             continue
         node = match.group(2)
-        base = node.rsplit("::", 1)[-1].split("[", 1)[0]
+        base = node.split("[", 1)[0].rsplit("::", 1)[-1]
         if not re.fullmatch(r"test_[A-Za-z0-9_]{1,96}", base):
             continue
         short = base
