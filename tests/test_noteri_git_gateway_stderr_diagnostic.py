@@ -125,6 +125,23 @@ class GitStateDiagnosticTests(unittest.TestCase):
                                  ("ls-files", "--others", "--exclude-standard", "-z", "--", ".")[-5:])
                 self.assertFalse(call.kwargs["shell"])
 
+    def test_last_git_step_warning_is_not_reported_as_clean(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            checks = [
+                SimpleNamespace(returncode=0, stdout=str(root), stderr=""),
+                SimpleNamespace(returncode=0, stdout=probe.EXPECTED_HEAD, stderr=""),
+            ] + [SimpleNamespace(returncode=0, stdout="", stderr="")
+                 for _ in range(4)]
+            checks.append(SimpleNamespace(returncode=0, stdout="",
+                                          stderr="warning: private path unavailable"))
+            with patch.object(probe.subprocess, "run", side_effect=checks):
+                result = probe.probe(root, probe.EXPECTED_HEAD)
+            self.assertEqual(len(result["steps"]), 7)
+            self.assertEqual(result["status"], "GIT_STATE_COMMAND_BLOCKED")
+            self.assertEqual(result["first_blocked"], "modified")
+            self.assertNotIn("private", str(result))
+
     def test_clean_git_state_requires_all_seven_checks(self):
         with tempfile.TemporaryDirectory() as t:
             root = Path(t)
