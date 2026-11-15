@@ -52,30 +52,38 @@ class TestOllamaReadonlyTransport(unittest.TestCase):
         ):
             self.assertEqual(module.ollama_process_state(), "UNKNOWN")
 
-    def tcp(self, code: int) -> str:
-        fake = MagicMock()
-        fake.__enter__.return_value.connect_ex.return_value = code
-        with patch.object(module.socket, "socket", return_value=fake) as ctor:
-            result = module.ollama_port_state()
-        ctor.assert_called_once_with(module.socket.AF_INET, module.socket.SOCK_STREAM)
-        fake.__enter__.return_value.connect_ex.assert_called_once_with(("127.0.0.1", 11434))
-        return result
+    def tcp(self, error: OSError | None) -> tuple[str, dict]:
+        detail = {}
+        connection = MagicMock()
+        with patch.object(
+            module.socket, "create_connection",
+            return_value=connection if error is None else None,
+            side_effect=error,
+        ) as create:
+            result = module.ollama_port_state(detail=detail)
+        create.assert_called_once_with(("127.0.0.1", 11434), timeout=2.0)
+        return result, detail
 
     def test_fixed_loopback_open_and_closed(self):
-        self.assertEqual(self.tcp(0), "OPEN")
-        self.assertEqual(self.tcp(errno.ECONNREFUSED), "CLOSED")
-        self.assertEqual(self.tcp(10061), "CLOSED")
+        self.assertEqual(self.tcp(None), ("OPEN", {"connect_code": 0}))
+        result, detail = self.tcp(ConnectionRefusedError(errno.ECONNREFUSED, "refused"))
+        self.assertEqual(result, "CLOSED")
+        self.assertEqual(detail["socket_error_code"], errno.ECONNREFUSED)
+        result, detail = self.tcp(OSError(10061, "win_refused"))
+        self.assertEqual(result, "CLOSED")
+        self.assertEqual(detail["socket_error_code"], 10061)
 
     def test_unknown_network_error_fails_closed(self):
-        self.assertEqual(self.tcp(10013), "UNKNOWN")
-        detail = {}
-        fake = MagicMock()
-        fake.__enter__.return_value.connect_ex.return_value = 10013
-        with patch.object(module.socket, "socket", return_value=fake):
-            self.assertEqual(module.ollama_port_state(detail=detail), "UNKNOWN")
-        self.assertEqual(detail["connect_code"], 10013)
-        with patch.object(module.socket, "socket", side_effect=OSError("blocked")):
-            self.assertEqual(module.ollama_port_state(), "UNKNOWN")
+        result, detail = self.tcp(OSError(10013, "access_denied"))
+        self.assertEqual(result, "UNKNOWN")
+        self.assertEqual(detail["socket_error_code"], 10013)
+        result, detail = self.tcp(TimeoutError("timed out"))
+        self.assertEqual(result, "UNKNOWN")
+        self.assertIsNone(detail["socket_error_code"])
+
+    def test_no_early_nonblocking_connect_classification(self):
+        self.assertIn("socket.create_connection", SOURCE.read_text(encoding="utf-8"))
+        self.assertNotIn("connect_ex(", SOURCE.read_text(encoding="utf-8"))
 
     def test_result_contains_separate_transport_evidence(self):
         source = SOURCE.read_text(encoding="utf-8")
