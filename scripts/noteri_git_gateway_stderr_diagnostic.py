@@ -105,11 +105,27 @@ def directory_warning_details(stderr: str, root: Path) -> dict:
                    else "OTHER"),
     }
     target = root / parts
+    # Safe shape and parent metadata: no private path or entry name emitted.
+    result["path_segments"] = len(parts.parts)
+    result["target_length"] = len(value)
+    result["target_ascii"] = value.isascii()
+    result["name_length"] = len(parts.name)
+    result["windows_reserved_name"] = parts.name.split(".")[0].casefold() in {
+        "con", "prn", "aux", "nul", *("com" + str(n) for n in range(1, 10)),
+        *("lpt" + str(n) for n in range(1, 10)),
+    }
     try:
+        result["parent_present"] = target.parent.is_dir()
         result["directory_present"] = target.exists()
         result["directory_symlink"] = target.is_symlink()
+        result["parent_is_symlink"] = target.parent.is_symlink()
+        with os.scandir(target.parent) as entries:
+            result["parent_has_exact_entry"] = any(
+                item.name == target.name for item in entries
+            )
     except OSError:
-        result["directory_present"] = None
+        result["parent_present"] = None
+        result["parent_has_exact_entry"] = None
     return result
 
 
