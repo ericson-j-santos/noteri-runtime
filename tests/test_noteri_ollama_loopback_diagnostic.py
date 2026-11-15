@@ -68,6 +68,12 @@ class TestOllamaReadonlyTransport(unittest.TestCase):
 
     def test_unknown_network_error_fails_closed(self):
         self.assertEqual(self.tcp(10013), "UNKNOWN")
+        detail = {}
+        fake = MagicMock()
+        fake.__enter__.return_value.connect_ex.return_value = 10013
+        with patch.object(module.socket, "socket", return_value=fake):
+            self.assertEqual(module.ollama_port_state(detail=detail), "UNKNOWN")
+        self.assertEqual(detail["connect_code"], 10013)
         with patch.object(module.socket, "socket", side_effect=OSError("blocked")):
             self.assertEqual(module.ollama_port_state(), "UNKNOWN")
 
