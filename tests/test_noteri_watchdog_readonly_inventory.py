@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import json
 import sys
 from pathlib import Path
@@ -179,3 +180,33 @@ def test_corrupted_watchdog_metadata_fails_closed(
     assert "untrusted_runtime_path" not in json.dumps(receipt)
     assert receipt["ready_for_builder"] is False
     assert path.read_bytes() == before
+
+def test_isolated_portable_python_imports_siblings_before_any_host_operation(
+    tmp_path: Path,
+) -> None:
+    """Reproduz o Python portatil (-I -S) usado pelo Gateway fisico no Noteri."""
+    scripts = tmp_path / "checkout" / "scripts"
+    scripts.mkdir(parents=True)
+    entry = scripts / SOURCE.name
+    entry.write_bytes(SOURCE.read_bytes())
+    # Somente fixtures sem efeito: a confirmacao invalida tem de bloquear antes do host.
+    (scripts / "noteri_control_plane_watchdog.py").write_text(
+        'EXPECTED_HOST = "Noteri"\n', encoding="utf-8"
+    )
+    (scripts / "noteri_control_plane_watchdog_uac_launcher.py").write_text(
+        'class LauncherError(Exception): pass\n', encoding="utf-8"
+    )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-B", str(entry),
+         "--expected-sha", SHA, "--correlation-id", CORR,
+         "--confirm", "INVALID"],
+        cwd=outside, capture_output=True, text=True, check=False, timeout=15,
+    )
+    assert result.returncode == 2, result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["result"] == "NOTERI_WATCHDOG_INVENTORY_BLOCKED"
+    assert receipt["reason"] == "CONFIRMATION_INVALID"
+    assert receipt["ready_for_builder"] is False
+    assert receipt["state_changed"] is False

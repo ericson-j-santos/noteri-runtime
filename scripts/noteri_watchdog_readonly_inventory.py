@@ -13,10 +13,16 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+# Python portatil pode omitir o diretorio do script no caminho de importacao.
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
 
 import noteri_control_plane_watchdog as watchdog
 import noteri_control_plane_watchdog_uac_launcher as launcher
