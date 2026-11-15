@@ -70,6 +70,28 @@ class GitStateDiagnosticTests(unittest.TestCase):
         self.assertNotIn("private", str(details))
         self.assertEqual(probe.error_details("")["message_code"], "UNCLASSIFIED")
 
+    def test_directory_warning_names_are_bounded(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            for value, expected, reason in (
+                ("tmp/", "tmp", "NOT_FOUND"),
+                ("private_project/", "OTHER_RELATIVE", "ACCESS_DENIED"),
+            ):
+                suffix = ("No such file or directory" if reason == "NOT_FOUND"
+                          else "Permission denied")
+                warning = f"warning: could not open directory '{value}': {suffix}"
+                detail = probe.directory_warning_details(warning, root)
+                self.assertEqual(detail["directory_class"], expected)
+                self.assertEqual(detail["reason"], reason)
+                self.assertNotIn("private_project", str(detail))
+                self.assertFalse(detail["directory_present"])
+            self.assertEqual(
+                probe.directory_warning_details(
+                    "warning: could not open directory '../secret': inaccessible", root
+                )["directory_class"],
+                "REDACTED",
+            )
+
     def test_fixed_areas_do_not_emit_raw_git_stderr(self):
         with tempfile.TemporaryDirectory() as t:
             secret = "warning: could not open directory 'C:/private': Permission denied"
