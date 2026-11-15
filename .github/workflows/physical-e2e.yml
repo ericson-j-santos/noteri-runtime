@@ -1,6 +1,8 @@
 name: Noteri Physical E2E
 
 on:
+  push:
+    branches: [fix/noteri-watchdog-transactional-upgrade-20261115]
   workflow_dispatch:
     inputs:
       mode:
@@ -20,7 +22,7 @@ concurrency:
 jobs:
   e2e:
     name: Validate exact noteri-runtime SHA on Noteri
-    if: inputs.mode == 'e2e'
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'e2e'
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 8
     env:
@@ -78,7 +80,7 @@ jobs:
 
   inventory:
     name: Governed Noteri watchdog physical inventory (read only)
-    if: github.actor == 'ericson-j-santos' && inputs.mode == 'inventory'
+    if: github.actor == 'ericson-j-santos' && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'inventory') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[risk1-inventory-once]')))
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 7
     outputs:
@@ -191,7 +193,7 @@ jobs:
   inventory_readback:
     name: Independent GitHub-hosted inventory receipt readback
     needs: inventory
-    if: inputs.mode == 'inventory' && needs.inventory.result == 'success'
+    if: needs.inventory.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
