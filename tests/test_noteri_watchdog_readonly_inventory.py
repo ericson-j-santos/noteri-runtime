@@ -285,6 +285,6 @@ def test_task_xml_decoder_accepts_windows_encodings(encoding: str) -> None:
 
 def test_task_xml_decoder_rejects_invalid_or_oversized_bytes() -> None:
     with pytest.raises(module.InventoryError, match="INSTALLED_TASK_XML_ENCODING_INVALID"):
-        module.decode_task_xml_strict(b"\\xff")
+        module.decode_task_xml_strict(bytes.fromhex("ff"))
     with pytest.raises(module.InventoryError, match="INSTALLED_TASK_XML_ENCODING_INVALID"):
         module.decode_task_xml_strict(b"x" * (module.MAX_TASK_XML_BYTES + 1))

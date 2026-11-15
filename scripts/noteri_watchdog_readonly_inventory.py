@@ -117,13 +117,13 @@ def decode_task_xml_strict(raw: bytes) -> str:
     if not raw or len(raw) > MAX_TASK_XML_BYTES:
         raise InventoryError("INSTALLED_TASK_XML_ENCODING_INVALID")
     try:
-        if raw.startswith((b"\\xff\\xfe", b"\\xfe\\xff")):
+        if raw.startswith((bytes.fromhex("fffe"), bytes.fromhex("feff"))):
             return raw.decode("utf-16")
-        if raw.startswith(b"\\xef\\xbb\\xbf"):
+        if raw.startswith(bytes.fromhex("efbbbf")):
             return raw.decode("utf-8-sig")
-        if raw[:2] == b"<\\x00":
+        if raw[:2] == bytes.fromhex("3c00"):
             return raw.decode("utf-16-le")
-        if raw[:2] == b"\\x00<":
+        if raw[:2] == bytes.fromhex("003c"):
             return raw.decode("utf-16-be")
         return raw.decode("utf-8")
     except UnicodeError as exc:
