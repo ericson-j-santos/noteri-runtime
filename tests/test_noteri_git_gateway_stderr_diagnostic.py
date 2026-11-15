@@ -180,6 +180,56 @@ class GitStateDiagnosticTests(unittest.TestCase):
                 result = probe.raw_directory_identity(Path(t))
             self.assertEqual(result["status"], "NO_DIRECTORY_WARNING")
 
+    def test_reservation_attestation_valid_is_still_not_a_lease(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            worktree = base / probe.TARGETS[0]
+            worktree.mkdir()
+            state = base / "control"
+            (state / "sessions").mkdir(parents=True)
+            (state / "snapshots").mkdir()
+            sid = worktree.name.removeprefix("wt-chat-")
+            reservation = {
+                "session_id": sid, "status": "materialized", "host": "Noteri",
+                "base_head": probe.EXPECTED_HEAD,
+                "reserved_worktree": str(worktree),
+            }
+            snapshot = {
+                "session_id": sid, "result": "BOOTSTRAP_OK",
+                "reservation_status": "materialized",
+                "reserved_worktree": str(worktree),
+            }
+            snapshot["snapshot_sha256"] = probe._snapshot_digest(snapshot)
+            (state / "sessions" / (sid + ".json")).write_text(
+                __import__("json").dumps(reservation), encoding="utf-8")
+            snapfile = state / "snapshots" / (sid + ".json")
+            snapfile.write_text(__import__("json").dumps(snapshot), encoding="utf-8")
+            result = probe.reservation_attestation(worktree, state)
+            self.assertEqual(result["state"], "RESERVATION_ATTESTED_READONLY")
+            self.assertTrue(all(result["checks"].values()))
+            self.assertFalse(result["exclusive_lease_proven"])
+            self.assertFalse(result["apply_authorized"])
+            snapshot["snapshot_sha256"] = "0" * 64
+            snapfile.write_text(__import__("json").dumps(snapshot), encoding="utf-8")
+            rejected = probe.reservation_attestation(worktree, state)
+            self.assertEqual(rejected["state"], "RESERVATION_MISMATCH")
+            self.assertFalse(rejected["checks"]["snapshot_sha_integrity"])
+            self.assertFalse(rejected["exclusive_lease_proven"])
+
+    def test_reservation_attestation_rejects_unknown_and_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            state = base / "control"
+            wrong = base / "wt-chat-arbitrary-other"
+            wrong.mkdir()
+            self.assertEqual(probe.reservation_attestation(wrong, state)["state"],
+                             "TARGET_DENIED")
+            allowed = base / probe.TARGETS[1]
+            allowed.mkdir()
+            evidence = probe.reservation_attestation(allowed, state)
+            self.assertEqual(evidence["state"], "RECORD_MISSING_OR_UNSTABLE")
+            self.assertFalse(evidence["exclusive_lease_proven"])
+
     def test_fixed_areas_do_not_emit_raw_git_stderr(self):
         with tempfile.TemporaryDirectory() as t:
             secret = "warning: could not open directory 'C:/private': Permission denied"
