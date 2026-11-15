@@ -214,7 +214,10 @@ def probe(root: Path, expected_head: str) -> dict:
             break
     return {
         "status": "GIT_STATE_COMMANDS_CLEAN" if len(steps) == len(COMMANDS)
-                  and not steps[-1].get("identity") else "GIT_STATE_COMMAND_BLOCKED",
+                  and all(step.get("returncode") == 0
+                          and step.get("stderr_type") == "none"
+                          and not step.get("identity") for step in steps)
+                  else "GIT_STATE_COMMAND_BLOCKED",
         "steps": steps,
         "untracked_areas": isolate_untracked_warning(root) if steps[-1]["step"] == "untracked" and (steps[-1].get("stderr_type") != "none" or steps[-1].get("returncode") != 0) else [],
         "git_option_checks": compare_readonly_git_options(root) if steps[-1]["step"] == "untracked" and (steps[-1].get("stderr_type") != "none" or steps[-1].get("returncode") != 0) else [],
