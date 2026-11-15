@@ -113,6 +113,40 @@ class GitStateDiagnosticTests(unittest.TestCase):
             )
             self.assertTrue(reserved["windows_reserved_name"])
 
+    def test_raw_warning_byte_decoding_matches_actual_directory(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            target = root / "café"
+            target.mkdir()
+            message = "warning: could not open directory 'café/': No such file or directory\n"
+            raw = message.encode("cp1252")
+            with patch.object(
+                probe.subprocess, "run",
+                return_value=SimpleNamespace(returncode=0, stdout=b"", stderr=raw),
+            ) as git:
+                result = probe.raw_directory_identity(root)
+            self.assertEqual(result["status"], "DIRECTORY_WARNING_CROSSCHECKED")
+            cp1252 = [x for x in result["candidate_decodings"]
+                      if x["encoding"] == "cp1252"]
+            self.assertEqual(len(cp1252), 1)
+            self.assertTrue(cp1252[0]["exact_entry"])
+            self.assertTrue(cp1252[0]["is_dir"])
+            self.assertNotIn("café", str(result))
+            self.assertNotIn("caf", str(result))
+            self.assertIs(git.call_args.kwargs["text"], False)
+            self.assertIs(git.call_args.kwargs["shell"], False)
+
+    def test_raw_git_warning_absent_is_not_reported_as_fixed(self):
+        with tempfile.TemporaryDirectory() as t:
+            with patch.object(
+                probe.subprocess, "run",
+                return_value=SimpleNamespace(
+                    returncode=0, stdout=b"", stderr=b"",
+                ),
+            ):
+                result = probe.raw_directory_identity(Path(t))
+            self.assertEqual(result["status"], "NO_DIRECTORY_WARNING")
+
     def test_fixed_areas_do_not_emit_raw_git_stderr(self):
         with tempfile.TemporaryDirectory() as t:
             secret = "warning: could not open directory 'C:/private': Permission denied"
