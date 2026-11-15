@@ -5,6 +5,7 @@ import hashlib
 import json
 import sys
 import unittest
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -13,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from scripts import noteri_worker_pool_native_stage as stage
 from scripts.noteri_worker_pool_release_audit_readonly import OLD_SHA, audit_one
 from scripts.noteri_worker_pool_bytecode_quarantine import (
-    Blocked, assess, quarantine,
+    Blocked, assess, quarantine, require_worker_api_idle,
 )
 
 
@@ -47,6 +48,21 @@ class QuarantineTests(unittest.TestCase):
         self.cache.parent.mkdir()
         self.cache.write_bytes(b"safe-cache")
         self.fingerprint = hashlib.sha256(b"safe-cache").hexdigest()
+
+    def test_port_unknown_or_active_refuses_mutation(self):
+        with patch("scripts.noteri_worker_pool_bytecode_quarantine.socket.create_connection",
+                   side_effect=OSError("status unavailable")):
+            with self.assertRaisesRegex(Blocked,"PORT_STATUS_UNVERIFIED"):
+                require_worker_api_idle()
+        with patch("scripts.noteri_worker_pool_bytecode_quarantine.socket.create_connection",
+                   return_value=MagicMock()):
+            with self.assertRaisesRegex(Blocked,"PORT_ACTIVE"):
+                require_worker_api_idle()
+
+    def test_port_refused_counts_only_as_idle(self):
+        with patch("scripts.noteri_worker_pool_bytecode_quarantine.socket.create_connection",
+                   side_effect=ConnectionRefusedError("not listening")):
+            require_worker_api_idle()
 
     def test_plan_does_not_move_bytes(self):
         p = assess(self.releases)
