@@ -62,6 +62,26 @@ class CompareTests(unittest.TestCase):
             self.assertFalse(result["model_ready"])
             self.assertEqual(result["verified_official_blobs_by_hash"], 0)
 
+    def test_full_sha_reuse_and_detect_corrupt_same_size(self):
+        with TemporaryDirectory() as tmp:
+            raw, first, size = fixture_bytes()
+            store = Path(tmp)
+            blobs = store / "blobs"
+            blobs.mkdir()
+            (blobs / first.replace(":", "-")).write_bytes(b"payload-for-test-same")
+            second = json.loads(raw)["layers"][0]["digest"]
+            (blobs / second.replace(":", "-")).write_bytes(b"extra")
+            correct = m.compare(raw, raw, store, verify_blob_sha256=True)
+            self.assertTrue(correct["full_official_blob_hash_verified"])
+            self.assertEqual(correct["verified_official_blobs_by_hash"], 2)
+            self.assertEqual(correct["failed_official_blobs_by_hash"], 0)
+            self.assertFalse(correct["model_ready"])
+            (blobs / second.replace(":", "-")).write_bytes(b"other")
+            corrupt = m.compare(raw, raw, store, verify_blob_sha256=True)
+            self.assertEqual(corrupt["classification"], "OFFICIAL_BLOB_SHA256_MISMATCH")
+            self.assertFalse(corrupt["full_official_blob_hash_verified"])
+            self.assertEqual(corrupt["failed_official_blobs_by_hash"], 1)
+
     def test_missing_official_references_fail_closed(self):
         with TemporaryDirectory() as tmp:
             raw, _, _ = fixture_bytes()
