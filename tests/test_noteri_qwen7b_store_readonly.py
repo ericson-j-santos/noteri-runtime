@@ -54,6 +54,8 @@ class Tests(TestCase):
         self.assertEqual(r["blobs_checked"],2)
         self.assertEqual(r["blobs_missing_or_untrusted"],2)
         self.assertFalse(r["model_ready"])
+        self.assertRegex(r["manifest_sha256"],r"^[0-9a-f]{64}$")
+        self.assertTrue(r["manifest_sha256"])
 
     def test_symlink_path_fails_closed(self):
         with TemporaryDirectory() as tmp:
