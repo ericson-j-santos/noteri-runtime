@@ -200,7 +200,7 @@ def test_task_action_failure_does_not_promote_readback(
     result = module.inventory(SHA, CORR, module.CONFIRM)
     assert result["task_action_verified"] is False
     assert result["installed_release_sha256"] is None
-    assert "INSTALLED_RELEASE_READBACK_BLOCKED" in result["blocking_reasons"]
+    assert "INSTALLED_TASK_ACTION_NOT_BOUND" in result["blocking_reasons"]
     assert result["ready_for_builder"] is False
     assert result["state_changed"] is False
     assert meta.read_bytes() == before

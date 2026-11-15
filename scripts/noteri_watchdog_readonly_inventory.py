@@ -144,7 +144,16 @@ def read_installed_release_receipt(metadata: dict[str, Any]) -> dict[str, Any]:
     try:
         _task_contract(launcher._decode_xml(query.stdout).encode("utf-8"),
                        release, runner_home)
-    except (UpgradeBlocked, ValueError, UnicodeError) as exc:
+    except UpgradeBlocked as exc:
+        code = str(exc)
+        # Reutilizar a classificacao fixa do contrato de Task Scheduler.
+        safe = {"TASK_ACTION_UNEXPECTED", "TASK_ACTION_PATH_MISMATCH",
+                "TASK_LOGON_NOT_S4U", "TASK_BOOT_TRIGGER_MISSING",
+                "TASK_DISABLED", "TASK_XML_INVALID"}
+        if code in safe:
+            raise InventoryError("INSTALLED_" + code) from exc
+        raise InventoryError("INSTALLED_TASK_ACTION_NOT_BOUND") from exc
+    except (ValueError, UnicodeError) as exc:
         raise InventoryError("INSTALLED_TASK_ACTION_NOT_BOUND") from exc
     return {
         "installed_release_sha256": digest,
@@ -193,8 +202,29 @@ def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str,
     if metadata:
         try:
             observed_release = read_installed_release_receipt(metadata)
-        except (InventoryError, OSError, ValueError, RuntimeError,
-                subprocess.SubprocessError, AttributeError, TypeError):
+        except InventoryError as exc:
+            # Expor somente codigos permitidos, nunca paths/erro original.
+            safe = {
+                "INSTALLED_SHA_INVALID", "INSTALLED_RELEASE_PATH_INVALID",
+                "INSTALLED_RELEASE_UNAVAILABLE",
+                "INSTALLED_RELEASE_CHANGED_DURING_READ",
+                "INSTALLED_RELEASE_DIGEST_MISMATCH",
+                "INSTALLED_TASK_XML_UNAVAILABLE",
+                "INSTALLED_TASK_ACTION_NOT_BOUND",
+                "INSTALLED_TASK_ACTION_UNEXPECTED",
+                "INSTALLED_TASK_ACTION_PATH_MISMATCH",
+                "INSTALLED_TASK_LOGON_NOT_S4U",
+                "INSTALLED_TASK_BOOT_TRIGGER_MISSING",
+                "INSTALLED_TASK_DISABLED", "INSTALLED_TASK_XML_INVALID",
+            }
+            code = str(exc)
+            reasons.append(code if code in safe else "INSTALLED_RELEASE_READBACK_BLOCKED")
+        except launcher.LauncherError:
+            reasons.append("INSTALLED_RELEASE_REDIRECTED")
+        except watchdog.WatchdogError:
+            reasons.append("INSTALLED_RUNNER_CONTRACT_INVALID")
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError,
+                AttributeError, TypeError):
             reasons.append("INSTALLED_RELEASE_READBACK_BLOCKED")
     try:
         task = launcher.task_status()
