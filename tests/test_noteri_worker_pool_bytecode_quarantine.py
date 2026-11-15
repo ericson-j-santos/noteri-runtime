@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from scripts import noteri_worker_pool_native_stage as stage
 from scripts.noteri_worker_pool_release_audit_readonly import OLD_SHA, audit_one
