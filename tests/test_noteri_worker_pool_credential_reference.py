@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,6 +59,30 @@ class CredentialReferenceTests(unittest.TestCase):
         }
         options.update(overrides)
         return probe.qualify(**options)
+
+    def test_verified_staged_source_import_never_generates_pyc(self) -> None:
+        """Regressão física da Issue #42: importação não pode sujar a release."""
+        release = self.release()
+        manifest = json.loads((release / "manifest.json").read_text(encoding="utf-8"))
+        previous = sys.dont_write_bytecode
+        try:
+            # Simulate a service that does not use -B (the original failure path).
+            sys.dont_write_bytecode = False
+            module = probe._load_secure_file(release, manifest)
+        finally:
+            sys.dont_write_bytecode = previous
+        self.assertEqual(module.VALUE, 1)
+        self.assertFalse((release / "app" / "__pycache__").exists())
+        self.assertTrue(stage.validate_staged(release, manifest))
+
+    def test_staged_module_bad_sha_never_executes_or_generates_cache(self) -> None:
+        release = self.release()
+        source = release / "app" / "secure_file.py"
+        manifest = json.loads((release / "manifest.json").read_text(encoding="utf-8"))
+        source.write_text("raise RuntimeError('SHOULD_NOT_EXECUTE')\\n", encoding="utf-8")
+        with self.assertRaisesRegex(stage.StageBlocked, "release_secure_file_invalid"):
+            probe._load_secure_file(release, manifest)
+        self.assertFalse((release / "app" / "__pycache__").exists())
 
     def test_missing_reference_blocks_without_reading_token(self) -> None:
         self.release()
