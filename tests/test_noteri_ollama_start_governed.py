@@ -67,12 +67,25 @@ class Tests(TestCase):
                              root=ROOT,local=ROOT)
             spawn.assert_not_called()
 
+    def test_model_manifest_pin_mismatch_blocks_before_spawn(self):
+        with patch.object(m,"fixed_binary",return_value=ROOT), \
+             patch.object(m,"assess_model_store",return_value={
+                 "manifest":"PRESENT","digest_prefix_match":False,
+                 "blobs_missing_or_untrusted":0
+             }), \
+             patch.object(m,"spawn_exact_binary") as spawn:
+            with self.assertRaisesRegex(m.StartBlocked,"MODEL_MANIFEST_PIN_MISMATCH"):
+                m.start_once(expected_sha=SHA,correlation_id=ARGS["correlation_id"],
+                             root=ROOT,local=ROOT)
+            spawn.assert_not_called()
+
     def test_race_guard_blocks_process_launch(self):
         from tempfile import TemporaryDirectory
         with TemporaryDirectory() as tmp:
             state=Path(tmp)
             with patch.object(m,"fixed_binary",return_value=ROOT), \
                  patch.object(m,"eligible_preflight",return_value={}), \
+                 patch.object(m,"verify_expected_model_store"), \
                  patch.object(m,"receipt_root",return_value=state), \
                  patch.object(m,"inspect_windows_listener",return_value="UNKNOWN"), \
                  patch.object(m,"spawn_exact_binary") as spawn:
