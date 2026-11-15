@@ -35,7 +35,13 @@ class AuditBlocked(Exception):
 
 
 def _safe_relative(value: str) -> str:
-    """Show exact known source paths, but never disclose unknown private names."""
+    """Show official paths and the one known generated cache path, never secrets."""
+    if re.fullmatch(r"app/__pycache__/secure_file[.]cpython-(?:311|312|313|314)[.]pyc",
+                    value):
+        # The cache contains generated Python bytecode, not an allowlisted
+        # release file. Disclosing its fixed relative name is safe; do not
+        # open its contents or silently permit it inside the immutable tree.
+        return value
     parts = PurePosixPath(value).parts
     allowed = (len(parts) >= 2 and parts[0] == "app") or (
         len(parts) >= 3 and parts[:2] == ("contracts", "v1"))
