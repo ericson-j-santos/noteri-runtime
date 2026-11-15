@@ -133,24 +133,23 @@ def ollama_process_state() -> str:
 
 
 def ollama_port_state(*, detail: dict[str, int | None] | None = None) -> str:
-    """Sonda somente TCP loopback, com código WinSock sanitizado."""
+    """Sonda TCP loopback sem payload; create_connection conclui o handshake."""
     import errno
 
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            probe.settimeout(2.0)
-            code = probe.connect_ex(("127.0.0.1", 11434))
+        # connect_ex em socket com timeout pode devolver WSAEWOULDBLOCK (10035)
+        # antes da conclusao do handshake: nao confundir com porta indisponivel.
+        with socket.create_connection(("127.0.0.1", 11434), timeout=2.0):
+            pass
         if detail is not None:
-            detail["connect_code"] = code if type(code) is int and 0 <= code <= 65535 else None
-        if code == 0:
-            return "OPEN"
+            detail["connect_code"] = 0
+        return "OPEN"
+    except OSError as exc:
+        code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+        if detail is not None:
+            detail["socket_error_code"] = code if type(code) is int and 0 <= code <= 65535 else None
         if code in (errno.ECONNREFUSED, 10061):
             return "CLOSED"
-        return "UNKNOWN"
-    except OSError as exc:
-        if detail is not None:
-            code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
-            detail["socket_error_code"] = code if type(code) is int and 0 <= code <= 65535 else None
         return "UNKNOWN"
 
 
