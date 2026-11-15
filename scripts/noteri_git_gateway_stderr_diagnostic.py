@@ -81,6 +81,71 @@ def error_details(stderr: str) -> dict:
     }
 
 
+def raw_directory_identity(root: Path) -> dict:
+    """Crosscheck a Git stderr byte-name against actual directory entries.
+
+    The output deliberately has no paths, entry names or raw stderr bytes.
+    Read-only; no global Git settings or filesystem mutations.
+    """
+    command = ("git", "ls-files", "--others", "--exclude-standard",
+               "-z", "--", ".")
+    try:
+        check = subprocess.run(
+            command, cwd=root, capture_output=True, text=False,
+            shell=False, timeout=20, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {"status": "GIT_PROBE_UNAVAILABLE"}
+    stderr = check.stderr or b""
+    pattern = re.search(
+        rb"could not open directory ['\"]([^'\"]{1,128})['\"]:",
+        stderr, re.IGNORECASE,
+    )
+    if pattern is None:
+        return {
+            "status": "NO_DIRECTORY_WARNING" if check.returncode == 0 and not stderr
+                      else "UNKNOWN_WARNING",
+            "stderr_raw_sha256": hashlib.sha256(stderr).hexdigest(),
+        }
+    raw = pattern.group(1)
+    try:
+        entries = tuple(item.name for item in os.scandir(root))
+    except OSError:
+        return {"status": "PARENT_UNREADABLE"}
+    matches = []
+    for encoding in ("utf-8", "cp1252", "cp850", "cp437"):
+        try:
+            decoded = raw.decode(encoding, errors="strict")
+        except UnicodeError:
+            continue
+        value = decoded.rstrip("/").rstrip("\\")
+        if (not value or "/" in value or "\\" in value or ":" in value
+                or value in {".", ".."} or "\x00" in value):
+            continue
+        exact = value in entries
+        folded = sum(n.casefold() == value.casefold() for n in entries)
+        candidate = root / value
+        matches.append({
+            "encoding": encoding,
+            "exact_entry": exact,
+            "casefold_entry_count": folded,
+            "exists": candidate.exists(),
+            "is_dir": candidate.is_dir(),
+            "is_symlink": candidate.is_symlink(),
+        })
+    return {
+        "status": "DIRECTORY_WARNING_CROSSCHECKED",
+        "raw_name_byte_count": len(raw),
+        "raw_name_ascii": raw.isascii(),
+        "root_entry_count": len(entries),
+        "nonascii_root_entry_count": sum(not n.isascii() for n in entries),
+        "candidate_decodings": matches,
+        "raw_name_sha256": hashlib.sha256(raw).hexdigest(),
+        "stderr_raw_sha256": hashlib.sha256(stderr).hexdigest(),
+        "exit_code": check.returncode,
+    }
+
+
 def directory_warning_details(stderr: str, root: Path) -> dict:
     """Narrow directory classification; refuse to print arbitrary filenames."""
     pattern = re.search(
@@ -237,6 +302,7 @@ def probe(root: Path, expected_head: str) -> dict:
         "steps": steps,
         "untracked_areas": isolate_untracked_warning(root) if steps[-1]["step"] == "untracked" and (steps[-1].get("stderr_type") != "none" or steps[-1].get("returncode") != 0) else [],
         "git_option_checks": compare_readonly_git_options(root) if steps[-1]["step"] == "untracked" and (steps[-1].get("stderr_type") != "none" or steps[-1].get("returncode") != 0) else [],
+        "raw_directory_identity": raw_directory_identity(root) if steps[-1]["step"] == "untracked" and steps[-1].get("stderr_type") != "none" else {},
         "first_blocked": next((s["step"] for s in steps if
                                s.get("returncode") != 0
                                or s.get("stderr_type") not in (None, "none")
