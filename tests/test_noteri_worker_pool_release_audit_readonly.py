@@ -69,8 +69,30 @@ class AuditTests(unittest.TestCase):
     def test_extra_file(self):
         directory, _ = self.valid()
         (directory / "extra.py").write_text("raise ValueError()\n", encoding="utf-8")
-        self.assertEqual(audit_one(self.releases, OLD_SHA)["result"],
-                         "RELEASE_FILES_MISSING_OR_EXTRA")
+        observed = audit_one(self.releases, OLD_SHA)
+        self.assertEqual(observed["result"], "RELEASE_EXTRA_FILES_VERIFIED_PAYLOAD")
+        self.assertEqual(observed["extra_count"], 1)
+        self.assertEqual(observed["manifest_files_sha256_verified"],
+                         len(stage.REQUIRED))
+        self.assertEqual(observed["extra_categories"],
+                         ["UNMANIFESTED_SOURCE_OR_METADATA"])
+
+    def test_bytecode_cache_classifies_without_ignoring_integrity(self):
+        directory, _ = self.valid()
+        extra = directory / "app" / "__pycache__" / "secure_file.cpython-314.pyc"
+        extra.parent.mkdir(parents=True, exist_ok=True)
+        extra.write_bytes(b"bytecode")
+        observed = audit_one(self.releases, OLD_SHA)
+        self.assertEqual(observed["result"], "RELEASE_EXTRA_FILES_VERIFIED_PAYLOAD")
+        self.assertEqual(observed["extra_categories"], ["PYTHON_BYTECODE_CACHE"])
+        self.assertEqual(observed["extra_count"], 1)
+
+    def test_tampered_with_extra_still_fails_hash_integrity(self):
+        directory, _ = self.valid()
+        (directory / "extra.py").write_bytes(b"noise")
+        (directory / "requirements.txt").write_bytes(b"evil")
+        observed = audit_one(self.releases, OLD_SHA)
+        self.assertEqual(observed["result"], "RELEASE_BYTES_MISMATCH")
 
     def test_tampered_file_bytes(self):
         directory, _ = self.valid()
