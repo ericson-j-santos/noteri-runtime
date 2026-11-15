@@ -81,6 +81,38 @@ def error_details(stderr: str) -> dict:
     }
 
 
+def directory_warning_details(stderr: str, root: Path) -> dict:
+    """Narrow directory classification; refuse to print arbitrary filenames."""
+    pattern = re.search(
+        r"could not open directory ['\"]([^'\"]{1,128})['\"]:\s*([^\r\n]{1,100})",
+        stderr, re.IGNORECASE,
+    )
+    if not pattern:
+        return {"directory_class": "UNKNOWN", "reason": "UNKNOWN"}
+    value, cause = pattern.groups()
+    parts = Path(value.replace("\\", "/"))
+    if parts.is_absolute() or ".." in parts.parts or ":" in value:
+        return {"directory_class": "REDACTED", "reason": "UNKNOWN"}
+    name = parts.as_posix().rstrip("/").casefold()
+    allowed = frozenset(("tmp", "temp", "__pycache__", ".pytest_cache",
+                         ".mypy_cache", "venv", ".venv", "logs", "reports",
+                         "build", "dist", "artifacts"))
+    result = {
+        "directory_class": name if name in allowed else "OTHER_RELATIVE",
+        "directory_hash16": hashlib.sha256(value.encode()).hexdigest()[:16],
+        "reason": ("NOT_FOUND" if "no such file or directory" in cause.casefold()
+                   else "ACCESS_DENIED" if "permission denied" in cause.casefold()
+                   else "OTHER"),
+    }
+    target = root / parts
+    try:
+        result["directory_present"] = target.exists()
+        result["directory_symlink"] = target.is_symlink()
+    except OSError:
+        result["directory_present"] = None
+    return result
+
+
 def isolate_untracked_warning(root: Path) -> list[dict]:
     """Retest with *fixed* tracked top-level pathspecs for location classification."""
     result = []
@@ -140,6 +172,8 @@ def probe(root: Path, expected_head: str) -> dict:
         if name == "revparse_head" and done.stdout.strip().lower() != expected_head:
             detail["identity"] = "HEAD_MISMATCH"
         detail.update(error_details(stderr))
+        if name == "untracked" and stderr:
+            detail.update(directory_warning_details(stderr, root))
         steps.append(detail)
         if done.returncode != 0 or stderr.strip() or detail.get("identity"):
             break
