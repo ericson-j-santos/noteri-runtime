@@ -46,6 +46,25 @@ class ProbeTests(unittest.TestCase):
         self.assertNotIn("authority_id",result)
         self.assertEqual(result["http_status"],200)
 
+    def test_shared_authority_and_fencing_are_independent_of_http_healthy(self):
+        data = {"service":"codex-worker-pool", "status":"healthy",
+                "auth_configured":True,"expected_rules_sha_configured":True,
+                "authority_id":None, "fenced_cutover_enabled":False,
+                "storage_backend":"sqlite"}
+        with patch.object(probe.urllib.request, "build_opener") as op:
+            op.return_value.open.return_value=Reply(data)
+            result=probe.probe_health()
+        self.assertEqual(result["result"], "WORKER_POOL_API_HEALTHY")
+        self.assertFalse(result["authority_id_present"])
+        self.assertFalse(result["fenced_cutover_enabled"])
+        data.update(authority_id="opaque-private-id", fenced_cutover_enabled=True)
+        with patch.object(probe.urllib.request, "build_opener") as op:
+            op.return_value.open.return_value=Reply(data)
+            result=probe.probe_health()
+        self.assertTrue(result["authority_id_present"])
+        self.assertTrue(result["fenced_cutover_enabled"])
+        self.assertNotIn("opaque-private-id", json.dumps(result))
+
     def test_other_service_is_not_attested(self):
         data={"service":"other","status":"healthy",
               "auth_configured":True,"expected_rules_sha_configured":True}
