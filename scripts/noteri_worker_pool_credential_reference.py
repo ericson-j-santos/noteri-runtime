@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import socket
+import sys
 from pathlib import Path
 
 from scripts import noteri_worker_pool_native_stage as stage
@@ -46,7 +47,16 @@ def _load_secure_file(release: Path, manifest: dict):
     if spec is None or spec.loader is None:
         raise stage.StageBlocked("release_secure_file_unavailable")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Loading trusted code from the staged *immutable* release through
+    # importlib may otherwise create app/__pycache__/secure_file.*.pyc.
+    # Such an extra file invalidates the release manifest on the next preflight.
+    # Keep this narrowly scoped and always restore the caller's Python setting.
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
     return module
 
 
