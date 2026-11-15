@@ -105,6 +105,39 @@ class SixSuitesTests(unittest.TestCase):
         self.assertNotIn("private-content-123",str(cases))
         self.assertNotIn("other_private_file",str(cases))
 
+    def test_twenty_parametrized_failures_are_counted_without_private_values(self):
+        source = "tests/test_noteri_worker_pool_native_stage.py"
+        lines = [
+            f"FAILED {source}::Suite::test_context_and_activation_are_denied_before_writes"
+            f"[private value {i} /sensitive::token] - AssertionError: hidden-payload"
+            for i in range(20)
+        ]
+        failed = m._failed_test_cases("\n".join(lines) + "\n66 passed, 20 failed\n")
+        self.assertEqual(len(failed), 20)
+        self.assertEqual(len({case["case"] for case in failed}), 20)
+        self.assertTrue(all(case["file"] == source for case in failed))
+        self.assertTrue(all(case["failure_class"] == "AssertionError" for case in failed))
+        self.assertTrue(all(case["case"].startswith(
+            "test_context_and_activation_are_denied_before_writes-"
+        ) for case in failed))
+        self.assertNotIn("sensitive", str(failed))
+        self.assertNotIn("private value", str(failed))
+        self.assertNotIn("hidden-payload", str(failed))
+
+    def test_unknown_failure_class_and_foreign_path_stay_redacted(self):
+        text = "\n".join([
+            "FAILED tests/test_noteri_worker_pool_native_stage.py::"
+            "test_repro[secret /path] - assert 1 == 2",
+            "FAILED tests/private_unapproved.py::"
+            "test_hidden - AssertionError: private",
+        ])
+        cases = m._failed_test_cases(text)
+        self.assertEqual(len(cases), 1)
+        self.assertEqual(cases[0]["failure_class"], "UNCLASSIFIED_FAILURE")
+        self.assertTrue(cases[0]["case"].startswith("test_repro-"))
+        self.assertNotIn("secret", str(cases))
+        self.assertNotIn("private_unapproved.py", str(cases))
+
     def test_cli_help_imports_without_pythonpath(self):
         script=(Path(__file__).resolve().parents[1]/"scripts"
                 /"noteri_worker_pool_existing_pytest_six_regressions.py")
