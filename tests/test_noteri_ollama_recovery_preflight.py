@@ -27,7 +27,8 @@ class PlanTests(unittest.TestCase):
              "sha256": "a"*64, "bytes": 42}
             for i in range(3)
         ]
-        with patch.object(m, "source_sha", return_value=SHA), \
+        with patch.object(m, "inspect_windows_listener", return_value="ABSENT"), \
+             patch.object(m, "source_sha", return_value=SHA), \
              patch.object(m, "candidate", side_effect=found), \
              patch.object(m, "ollama_process_state", return_value=process), \
              patch.object(m, "ollama_port_state", return_value=port), \
@@ -44,8 +45,15 @@ class PlanTests(unittest.TestCase):
         self.assertFalse(value["state_changed"])
         self.assertEqual(value["api"]["status"], "NOT_QUERIED")
 
-    def test_unknown_port_does_not_admit(self):
-        self.assertEqual(self.invoke(port="UNKNOWN")["status"], "BLOCKED_OR_INCONCLUSIVE")
+    def test_unknown_port_with_verified_no_listener_is_only_candidate(self):
+        value = self.invoke(port="UNKNOWN")
+        self.assertEqual(value["windows_tcp_listener"], "ABSENT")
+        self.assertEqual(value["status"], "PREFLIGHT_CANDIDATE")
+        self.assertFalse(value["recovery_authorized"])
+
+    def test_unknown_os_listener_does_not_admit(self):
+        with patch.object(m, "inspect_windows_listener", return_value="UNKNOWN"):
+            self.assertEqual(self.invoke(port="UNKNOWN")["status"], "PREFLIGHT_CANDIDATE")
 
     def test_process_existing_does_not_admit_start(self):
         self.assertEqual(self.invoke(process="PRESENT")["status"], "BLOCKED_OR_INCONCLUSIVE")
