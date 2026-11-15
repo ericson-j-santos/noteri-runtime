@@ -113,6 +113,41 @@ def directory_warning_details(stderr: str, root: Path) -> dict:
     return result
 
 
+def compare_readonly_git_options(root: Path) -> list[dict]:
+    """Check whether Git's untracked-cache/fsmonitor options cause the warning.
+
+    Test only bounded Git read queries. Do not change repository configuration.
+    """
+    profiles = (
+        ("without_untracked_cache", ("-c", "core.untrackedCache=false")),
+        ("without_fsmonitor", ("-c", "core.fsmonitor=false")),
+        ("both_disabled_for_query", ("-c", "core.untrackedCache=false",
+                                     "-c", "core.fsmonitor=false")),
+    )
+    results = []
+    for name, settings in profiles:
+        command = ("git", *settings, "ls-files", "--others", "--exclude-standard",
+                   "-z", "--", ".")
+        try:
+            done = subprocess.run(
+                command, cwd=root, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", shell=False,
+                timeout=20, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            results.append({"profile": name, "status": "EXECUTION_ERROR"})
+            continue
+        results.append({
+            "profile": name,
+            "exit_code": done.returncode,
+            "stderr_type": classify_stderr(done.stderr or ""),
+            "stderr_code": error_details(done.stderr or "")["message_code"],
+            "stderr_sha256": hashlib.sha256(done.stderr.encode()).hexdigest()
+                             if done.stderr else None,
+        })
+    return results
+
+
 def isolate_untracked_warning(root: Path) -> list[dict]:
     """Retest with *fixed* tracked top-level pathspecs for location classification."""
     result = []
@@ -182,6 +217,7 @@ def probe(root: Path, expected_head: str) -> dict:
                   and not steps[-1].get("identity") else "GIT_STATE_COMMAND_BLOCKED",
         "steps": steps,
         "untracked_areas": isolate_untracked_warning(root) if steps[-1]["step"] == "untracked" and (steps[-1].get("stderr_type") != "none" or steps[-1].get("returncode") != 0) else [],
+        "git_option_checks": compare_readonly_git_options(root) if steps[-1]["step"] == "untracked" and (steps[-1].get("stderr_type") != "none" or steps[-1].get("returncode") != 0) else [],
         "first_blocked": next((s["step"] for s in steps if
                                s.get("returncode") != 0
                                or s.get("stderr_type") not in (None, "none")
