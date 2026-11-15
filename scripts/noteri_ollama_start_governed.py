@@ -22,6 +22,7 @@ from noteri_ollama_recovery_preflight import (
     CONFIRM as PREFLIGHT_CONFIRM, plan as preflight_plan, path_safe,
 )
 from noteri_ollama_tcp_table_probe import inspect_windows_listener
+from noteri_qwen7b_store_readonly import assess_model_store
 from noteri_watchdog_readonly_inventory import ollama_process_state, read_model_tags
 
 SCHEMA = 1
@@ -182,9 +183,22 @@ def rollback_owned(process: subprocess.Popen[bytes]) -> bool:
             and inspect_windows_listener() == "ABSENT")
 
 
+def verify_expected_model_store() -> None:
+    """Fail before spawn if the local model manifest differs from pinned Qwen7B."""
+    home = Path.home()
+    configured = os.environ.get("OLLAMA_MODELS", "")
+    custom = bool(configured and Path(configured) != home / ".ollama" / "models")
+    store = assess_model_store(home, custom)
+    require(store.get("manifest") == "PRESENT"
+            and store.get("digest_prefix_match") is True
+            and store.get("blobs_missing_or_untrusted") == 0,
+            "MODEL_MANIFEST_PIN_MISMATCH")
+
+
 def start_once(*, expected_sha: str, correlation_id: str,
                local: Path, root: Path) -> dict[str, Any]:
     binary = fixed_binary(local)
+    verify_expected_model_store()
     # The process is never started if a typed preflight does not attest absence.
     eligible_preflight(expected_sha=expected_sha, correlation_id=correlation_id,
                        root=root)
