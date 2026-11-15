@@ -95,6 +95,22 @@ class AtomicTests(unittest.TestCase):
                     m.replace_transaction(p, b, lock, after)
                 self.assertEqual(lock.read_bytes(), b"other-owner")
 
+    def test_preexisting_stage_not_deleted_on_block(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "7b"
+            b = Path(td) / "backup"
+            lock = Path(td) / "lock"
+            stage = Path(td) / "7b.reqsys-reconcile-stage"
+            before, after = b"local", b"official"
+            p.write_bytes(before)
+            stage.write_bytes(b"another-owner")
+            with patch.object(m, "EXPECTED_LOCAL_SHA", m.sha(before)), \
+                 patch.object(m, "EXPECTED_OFFICIAL_SHA256", m.sha(after)):
+                result = m.replace_transaction(p, b, lock, after)
+            self.assertEqual(result["result"], "BLOCKED_ROLLED_BACK")
+            self.assertEqual(stage.read_bytes(), b"another-owner")
+            self.assertEqual(p.read_bytes(), before)
+
     def test_no_download_weight_or_service_start(self):
         code = (ROOT / "scripts" / "noteri_qwen7b_manifest_atomic_repair.py").read_text("utf-8")
         for forbidden in ("Popen(", "ollama pull", "curl ", "Start-Service", "Restart-Service", "os.system("):
