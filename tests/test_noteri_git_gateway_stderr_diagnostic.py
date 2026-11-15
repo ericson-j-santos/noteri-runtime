@@ -1,0 +1,77 @@
+"""Bounded tests of the Noteri Git-state stderr diagnostic (no live Git)."""
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import noteri_git_gateway_stderr_diagnostic as probe
+
+
+class GitStateDiagnosticTests(unittest.TestCase):
+    def test_fixed_commands_are_read_only(self):
+        self.assertEqual(len(probe.COMMANDS), 7)
+        self.assertTrue(all(command[0] == "git" for _, command in probe.COMMANDS))
+        self.assertEqual(len(probe.TARGETS), 2)
+        self.assertTrue(all("wt-chat-noteri-six-pspath" in p for p in probe.TARGETS))
+
+    def test_classification_redacts_paths(self):
+        for message, code in (
+            ("warning: unsafe private-data C:/user", "warning_other"),
+            ("fatal: detected dubious ownership in /secret", "ownership"),
+            ("error: Permission denied at C:/private", "access_denied"),
+            ("warning: fsmonitor /some/private/path", "fsmonitor"),
+            ("fatal: unrecognized /secret", "fatal_other"),
+        ):
+            with self.subTest(code=code):
+                actual = probe.classify_stderr(message)
+                self.assertEqual(actual, code)
+                self.assertNotIn("private", actual)
+                self.assertNotIn("secret", actual)
+
+    def test_first_stderr_command_detected_without_raw_log(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            successes = [
+                SimpleNamespace(returncode=0, stdout=str(root), stderr=""),
+                SimpleNamespace(returncode=0, stdout=probe.EXPECTED_HEAD, stderr=""),
+                SimpleNamespace(returncode=0, stdout="", stderr="warning: /secret"),
+            ]
+            with patch.object(probe.subprocess, "run", side_effect=successes) as called:
+                report = probe.probe(root, probe.EXPECTED_HEAD)
+            self.assertEqual(report["first_blocked"], "current_branch")
+            self.assertEqual(len(report["steps"]), 3)
+            self.assertEqual(report["steps"][-1]["stderr_type"], "warning_other")
+            self.assertNotIn("/secret", str(report))
+            self.assertEqual(called.call_count, 3)
+            self.assertTrue(all(call.kwargs["shell"] is False
+                                for call in called.call_args_list))
+
+    def test_refuses_wrong_head_and_invalid_target(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            with self.assertRaisesRegex(probe.Blocked, "HEAD_INVALID"):
+                probe.probe(root, "invalid")
+            with self.assertRaisesRegex(probe.Blocked, "WORKTREE_UNAVAILABLE"):
+                probe.probe(root / "missing", probe.EXPECTED_HEAD)
+
+    def test_clean_git_state_requires_all_seven_checks(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            answers = [
+                SimpleNamespace(returncode=0, stdout=str(root), stderr=""),
+                SimpleNamespace(returncode=0, stdout=probe.EXPECTED_HEAD, stderr=""),
+            ] + [SimpleNamespace(returncode=0, stdout="", stderr="") for _ in range(5)]
+            with patch.object(probe.subprocess, "run", side_effect=answers):
+                report = probe.probe(root, probe.EXPECTED_HEAD)
+            self.assertEqual(report["status"], "GIT_STATE_COMMANDS_CLEAN")
+            self.assertIsNone(report["first_blocked"])
+            self.assertEqual(len(report["steps"]), 7)
+
+
+if __name__ == "__main__":
+    unittest.main()
