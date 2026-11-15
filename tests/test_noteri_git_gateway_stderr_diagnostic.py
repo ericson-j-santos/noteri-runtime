@@ -59,6 +59,34 @@ class GitStateDiagnosticTests(unittest.TestCase):
             with self.assertRaisesRegex(probe.Blocked, "WORKTREE_UNAVAILABLE"):
                 probe.probe(root / "missing", probe.EXPECTED_HEAD)
 
+
+    def test_git_warning_details_redact_path(self):
+        payload = "warning: could not open directory 'C:/private/name': Permission denied"
+        details = probe.error_details(payload)
+        self.assertEqual(details["message_code"], "unreadable_directory")
+        self.assertTrue(details["permission_denied"])
+        self.assertTrue(details["has_quoted_target"])
+        self.assertTrue(details["has_warning_prefix"])
+        self.assertNotIn("private", str(details))
+        self.assertEqual(probe.error_details("")["message_code"], "UNCLASSIFIED")
+
+    def test_fixed_areas_do_not_emit_raw_git_stderr(self):
+        with tempfile.TemporaryDirectory() as t:
+            secret = "warning: could not open directory 'C:/private': Permission denied"
+            answers = [
+                SimpleNamespace(returncode=0, stdout="", stderr=secret)
+                for _ in range(5)
+            ]
+            with patch.object(probe.subprocess, "run", side_effect=answers) as called:
+                result = probe.isolate_untracked_warning(Path(t))
+            self.assertEqual(len(result), 5)
+            self.assertTrue(all(x["stderr_code"] == "unreadable_directory" for x in result))
+            self.assertNotIn("private", str(result))
+            self.assertEqual([x["area"] for x in result], [
+                ".github", ".sdd", "docs", "scripts", "tests",
+            ])
+            self.assertTrue(all(call.kwargs["shell"] is False for call in called.call_args_list))
+
     def test_clean_git_state_requires_all_seven_checks(self):
         with tempfile.TemporaryDirectory() as t:
             root = Path(t)
