@@ -92,6 +92,27 @@ class GitStateDiagnosticTests(unittest.TestCase):
                 "REDACTED",
             )
 
+    def test_warning_directory_shape_has_no_path_leak(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            data = probe.directory_warning_details(
+                "warning: could not open directory 'example/': No such file or directory",
+                root,
+            )
+            self.assertEqual(data["path_segments"], 1)
+            self.assertEqual(data["target_length"], 8)
+            self.assertEqual(data["name_length"], 7)
+            self.assertTrue(data["target_ascii"])
+            self.assertTrue(data["parent_present"])
+            self.assertFalse(data["parent_has_exact_entry"])
+            self.assertFalse(data["directory_present"])
+            self.assertNotIn("example/", str(data))
+            reserved = probe.directory_warning_details(
+                "warning: could not open directory 'nul/': No such file or directory",
+                root,
+            )
+            self.assertTrue(reserved["windows_reserved_name"])
+
     def test_fixed_areas_do_not_emit_raw_git_stderr(self):
         with tempfile.TemporaryDirectory() as t:
             secret = "warning: could not open directory 'C:/private': Permission denied"
