@@ -104,6 +104,51 @@ def read_model_tags() -> dict[str, Any]:
     return {"status": "ABSENT", "present": False, "digest": None}
 
 
+def ollama_process_state() -> str:
+    """Inventário de nomes de processos do Windows, sem executar Ollama."""
+    import csv
+
+    tasklist = Path(os.environ.get("SystemRoot") or r"C:\Windows") / "System32" / "tasklist.exe"
+    if not tasklist.is_file():
+        return "UNKNOWN"
+    try:
+        observed = subprocess.run(
+            [str(tasklist), "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=12, check=False,
+        )
+        if observed.returncode != 0 or len(observed.stdout) > 1048576:
+            return "UNKNOWN"
+        rows = list(csv.reader(observed.stdout.splitlines()))
+        if not rows or any(
+            len(row) < 2 or not row[1].strip().isdigit() for row in rows
+        ):
+            return "UNKNOWN"
+        names = {"ollama.exe", "ollama app.exe", "ollama_llama_server.exe"}
+        return "PRESENT" if any(
+            row[0].strip().casefold() in names for row in rows
+        ) else "ABSENT"
+    except (OSError, subprocess.SubprocessError, csv.Error):
+        return "UNKNOWN"
+
+
+def ollama_port_state() -> str:
+    """Sonda somente TCP loopback 127.0.0.1:11434, sem payload."""
+    import errno
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(2.0)
+            code = probe.connect_ex(("127.0.0.1", 11434))
+        if code == 0:
+            return "OPEN"
+        if code in (errno.ECONNREFUSED, 10061):
+            return "CLOSED"
+        return "UNKNOWN"
+    except OSError:
+        return "UNKNOWN"
+
+
 def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str, Any]:
     if confirm != CONFIRM:
         raise InventoryError("CONFIRMATION_INVALID")
@@ -146,6 +191,7 @@ def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str,
     if profile != "NORMAL":
         reasons.append("PROFILE_NOT_NORMAL")
     model = read_model_tags()
+    transport = {"process": ollama_process_state(), "port": ollama_port_state()}
     if not model["present"]:
         reasons.append("QWEN7B_NOT_ATTESTED")
     return {
@@ -159,6 +205,7 @@ def inventory(expected_sha: str, correlation_id: str, confirm: str) -> dict[str,
         "profile": profile,
         "model_name": MODEL_NAME,
         "model": model,
+        "ollama_transport": transport,
         "blocking_reasons": sorted(set(reasons)),
         "source_sha_verified": True,
         "installation_authorized": False,
