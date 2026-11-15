@@ -33,6 +33,15 @@ FILES = (
     "tests/test_noteri_worker_pool_plan_failure_diagnostic_windows.py",
     "tests/test_noteri_worker_pool_plan_readback.py",
 )
+# Keep Python -I isolated from ambient PYTHONPATH. The only imported
+# working tree is the SHA-validated cwd selected by this program itself.
+PYTEST_BRIDGE = (
+    "import sys;from pathlib import Path;"
+    "root=Path.cwd().resolve();"
+    "sys.path.insert(0,str(root));"
+    "import pytest;"
+    "raise SystemExit(pytest.main(sys.argv[1:]))"
+)
 EXPECTED_PYTEST_VERSION = "9.0.3"
 
 
@@ -116,7 +125,7 @@ def run(root: Path, *, local: Path, roaming: Path) -> dict:
         "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
     }
     command = [
-        str(python), "-B", "-I", "-m", "pytest",
+        str(python), "-B", "-I", "-c", PYTEST_BRIDGE,
         "-q", "--disable-warnings", "-p", "no:cacheprovider",
         "-o", "addopts=", "--tb=short", *files,
     ]
