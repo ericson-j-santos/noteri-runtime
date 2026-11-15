@@ -64,6 +64,27 @@ class SixSuitesTests(unittest.TestCase):
         self.assertEqual(argv[-6:],list(m.FILES))
         self.assertNotIn("pip",argv)
         self.assertEqual(executed.call_args.kwargs["env"]["PYTEST_DISABLE_PLUGIN_AUTOLOAD"],"1")
+        runtime_env = executed.call_args.kwargs["env"]
+        if os.name == "nt":
+            trusted = (Path(os.environ.get("SYSTEMROOT", "C:\\Windows")) /
+                       "System32" / "WindowsPowerShell" / "v1.0")
+            self.assertEqual(runtime_env["PATH"], str(trusted))
+        else:
+            self.assertNotIn("PATH", runtime_env)
+
+
+    def test_windows_missing_powershell_blocks_before_test_process(self):
+        if os.name != "nt":
+            self.skipTest("Requires Windows system-root validation")
+        with patch.dict(os.environ, {"SYSTEMROOT": str(self.root)}), patch.object(
+            m, "_validated_candidates", return_value={
+                "worker_pool_pinned_venv": self.python
+            }), patch.object(m, "_probe", return_value=self.interpreter), patch.object(
+                m.subprocess, "run"
+            ) as process:
+            with self.assertRaisesRegex(m.Blocked, "WINDOWS_POWERSHELL_UNAVAILABLE"):
+                m.run(self.root, local=self.root, roaming=self.root)
+            process.assert_not_called()
 
     def test_skipped_and_failed_tests_do_not_qualify(self):
         for text,exitcode in (("7 passed, 1 skipped in 0.4s",0),
