@@ -98,25 +98,35 @@ SAFE_FAILURE_TYPES = frozenset((
 
 
 def _failed_test_cases(output: str) -> list[dict[str, str]]:
-    """Only file/test IDs from the six fixed suites; no assertion text."""
+    """Identify failures in the six fixed suites without exposing pytest values.
+
+    Pytest parameter IDs may contain spaces, slashes, colons and other private
+    values. Keep only the public test-function name plus a short stable hash.
+    """
     allowed = set(FILES)
-    result = []
+    result: list[dict[str, str]] = []
     expression = re.compile(
-        r"^FAILED (tests[/\\][A-Za-z0-9_.-]+\.py)::"
-        r"([A-Za-z0-9_.\[\]-]+(?:::[A-Za-z0-9_.\[\]-]+)?)"
-        r"\s+-\s+([A-Za-z]+Error|[A-Za-z]+Exception)?",
+        r"^FAILED (tests[/\\][A-Za-z0-9_.-]+\\.py)::([^\\r\\n]+?)(?:\\s+-\\s+([^\\r\\n]*))?$",
         re.MULTILINE,
     )
     for match in expression.finditer(output[-60000:]):
         path = match.group(1).replace("\\", "/")
         if path not in allowed:
             continue
-        short = match.group(2)[:120]
-        failure = match.group(3)
+        node = match.group(2)
+        base = node.rsplit("::", 1)[-1].split("[", 1)[0]
+        if not re.fullmatch(r"test_[A-Za-z0-9_]{1,96}", base):
+            continue
+        short = base
+        if "[" in node or "::" in node:
+            short += "-" + hashlib.sha256(node.encode()).hexdigest()[:16]
+        detail = match.group(3) or ""
+        failure = re.match(r"([A-Za-z]+(?:Error|Exception))\\b", detail)
+        failure_class = failure.group(1) if failure else None
         result.append({
             "file": path,
             "case": short,
-            "failure_class": failure if failure in SAFE_FAILURE_TYPES
+            "failure_class": failure_class if failure_class in SAFE_FAILURE_TYPES
             else "UNCLASSIFIED_FAILURE",
         })
     return result[:60]
