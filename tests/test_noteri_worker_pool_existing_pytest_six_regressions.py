@@ -75,6 +75,18 @@ class SixSuitesTests(unittest.TestCase):
                     result=m.run(self.root,local=self.root,roaming=self.root)
                 self.assertEqual(result["result"],"PYTEST_PARTIAL_OR_FAILED")
 
+    def test_collection_error_classifier_redacts_unexpected_module_names(self):
+        trace = (
+            "ERROR collecting tests/test_noteri_worker_pool_native_stage.py\\n"
+            "E   ModuleNotFoundError: No module named 'scripts'\\n"
+            "E   ModuleNotFoundError: No module named 'some_untrusted_token_label'\\n"
+        )
+        data=m._collection_diagnostics(trace)
+        self.assertTrue(data["collection_error_detected"])
+        self.assertEqual(data["missing_known_modules"], ["scripts"])
+        self.assertEqual(data["unrecognized_missing_module_count"], 1)
+        self.assertNotIn("some_untrusted_token_label",str(data))
+
     def test_cli_help_imports_without_pythonpath(self):
         script=(Path(__file__).resolve().parents[1]/"scripts"
                 /"noteri_worker_pool_existing_pytest_six_regressions.py")
