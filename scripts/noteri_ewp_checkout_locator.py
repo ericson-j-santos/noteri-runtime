@@ -14,7 +14,8 @@ CONFIRM = "LOCATE-EWP-EXISTING-CHECKOUT-READONLY"
 REPO = "ericson-j-santos/engineering-worker-pool"
 ROOT = Path(r"C:\dev\chatgpt-workers")
 SHA = re.compile(r"^[0-9a-f]{40}$")
-MAX_CHILDREN = 300
+MAX_CHILDREN = 10000
+MAX_MATCHING_NAMES = 120
 
 
 def git_text(root: Path, *args: str) -> str | None:
@@ -62,10 +63,19 @@ def locate(host: str, platform: str, confirm: str, expected_sha: str,
         return {"result": "EWP_LOCATOR_BLOCKED", "reason": "SOURCE_SHA_MISMATCH"}
     found = []
     try:
-        children = list(ROOT.iterdir())
-        if len(children) > MAX_CHILDREN:
-            return {"result": "EWP_LOCATOR_BLOCKED", "reason": "LIMIT_EXCEEDED"}
-        for path in children:
+        inspected = 0
+        matching_names = 0
+        for path in ROOT.iterdir():
+            inspected += 1
+            if inspected > MAX_CHILDREN:
+                return {"result": "EWP_LOCATOR_BLOCKED", "reason": "LIMIT_EXCEEDED"}
+            name = path.name.casefold()
+            if not any(fragment in name for fragment in
+                       ("engineering-worker-pool", "worker-pool", "ewp")):
+                continue
+            matching_names += 1
+            if matching_names > MAX_MATCHING_NAMES:
+                return {"result": "EWP_LOCATOR_BLOCKED", "reason": "MATCH_LIMIT_EXCEEDED"}
             result = candidate(path)
             if result is not None:
                 found.append(result)
