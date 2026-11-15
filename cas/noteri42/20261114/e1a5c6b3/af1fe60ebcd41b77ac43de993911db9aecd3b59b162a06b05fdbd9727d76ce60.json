@@ -1,0 +1,60 @@
+{
+  "schema_version": "noteri42-repair-cas-v1",
+  "kind": "repair",
+  "issue": "https://github.com/ericson-j-santos/noteri-runtime/issues/42",
+  "source_mode": "assisted",
+  "model_calls": 0,
+  "model_run_id": null,
+  "model_digest": null,
+  "builder_verified": false,
+  "validator_independent_verified": false,
+  "ready_for_pr": false,
+  "physical_e2e_verified": false,
+  "artifact_created_after_branch_publication": true,
+  "rules_sha": "58dcd4200f412a866278027ba9e433439a03f3b3",
+  "rules_version": "1.6.21",
+  "repository": "ericson-j-santos/noteri-runtime",
+  "base_sha": "e10b3a00a9b3ec803ed4a4cc8f4f8c62b06c8928",
+  "produced_sha": "e1a5c6b3ee8973b853098d2e25f72a6c8a9a92db",
+  "source_branch": "fix/noteri-watchdog-isolated-import-42",
+  "patch_sha256": "0d658a361bd90283df6beefaa24a49819f5bd9cfec25e8a4fa4e9f768382b68a",
+  "patch_contract": "sha256(UTF8(JSON.stringify([{path,before_content,after_content},...]))) in inventory,test order",
+  "files": [
+    {
+      "path": "scripts/noteri_watchdog_readonly_inventory.py",
+      "after_snapshot_path": "cas/noteri42/20261114/e1a5c6b3/inventory.after.py",
+      "git_before": "f3fd50d07fd82549f220cdd99fb05538fb937944",
+      "git_after": "176fcb9f06c796108c3a047e8c63ae49b5d57c08",
+      "before_sha256": "b7c7e2832acb827c85e0d07931656788539e854916f5c8658ca9cb3ce17e741b",
+      "after_sha256": "1d73fbc9e13288241dc71d8f487cd590ff221a5e972e85d82a6e9a1baf655809",
+      "before_bytes": 7721,
+      "after_bytes": 7930
+    },
+    {
+      "path": "tests/test_noteri_watchdog_readonly_inventory.py",
+      "after_snapshot_path": "cas/noteri42/20261114/e1a5c6b3/tests.after.py",
+      "git_before": "e70307780142b9db4282bff3114eca71620281ea",
+      "git_after": "a0496fc839badbfdda5a4fbc0d3ac406f7c3e906",
+      "before_sha256": "8c9475f0e0e97fb2ac8313d167b8c146a8ac569ed1b59eec457c07aea3268ec4",
+      "after_sha256": "9f224aea36c3507f177970b901ba841d81e36f4d75dc42ae8b3b4e20eb1007c9",
+      "before_bytes": 7957,
+      "after_bytes": 9307
+    }
+  ],
+  "ci": {
+    "run_id": 43659622515,
+    "head_sha": "e1a5c6b3ee8973b853098d2e25f72a6c8a9a92db",
+    "conclusion": "success",
+    "jobs_passed": 4,
+    "linux_passed": 909,
+    "linux_skipped": 35
+  },
+  "blockers": [
+    "no real Builder/model_run/digest",
+    "no independent formal Validator",
+    "CAS was not committed before original repair branch",
+    "no authorized physical installation"
+  ],
+  "idempotency_key": "noteri-runtime:issue42:watchdog-portable-import:e10b3a00-v1",
+  "correlation_id": "noteri42-watchdog-portable-import-20261114"
+}
