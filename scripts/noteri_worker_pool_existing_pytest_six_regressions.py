@@ -50,6 +50,37 @@ def _summary(output: str) -> dict[str, int]:
     }
 
 
+SAFE_DEPENDENCIES = frozenset((
+    "pytest", "yaml", "fastapi", "pydantic", "httpx", "requests",
+    "scripts", "app", "noteri_worker_pool_native_stage",
+    "noteri_worker_pool_activation_preflight",
+))
+
+
+def _collection_diagnostics(output: str) -> dict:
+    """Return only allowlisted module IDs and previously fixed test file names."""
+    names = sorted(set(re.findall(
+        r"No module named ['\"]([A-Za-z0-9_.-]{1,80})['\"]",
+        output[-20000:],
+    )))
+    missing = [item for item in names if item in SAFE_DEPENDENCIES]
+    unrecognized = len([item for item in names if item not in SAFE_DEPENDENCIES])
+    collected = set(re.findall(
+        r"ERROR collecting (tests[/\\][A-Za-z0-9_.-]+\.py)",
+        output[-20000:],
+    ))
+    fixed = {path.replace("/", "\\"):path for path in FILES}
+    fixed.update({path:path for path in FILES})
+    error_files = sorted({fixed[name] for name in collected if name in fixed})
+    return {
+        "missing_known_modules": missing,
+        "unrecognized_missing_module_count": unrecognized,
+        "known_collection_files": error_files,
+        "collection_error_detected": "ERROR collecting" in output,
+        "isolated_python": True,
+    }
+
+
 def _fixed_test_paths(root: Path) -> tuple[str, ...]:
     base = root.resolve()
     paths: list[str] = []
@@ -109,6 +140,7 @@ def run(root: Path, *, local: Path, roaming: Path) -> dict:
         "pytest_version": EXPECTED_PYTEST_VERSION,
         "python_version": "3.11", "test_files": len(files),
         "tests": summary, "process_exit_code": test.returncode,
+        "collection_diagnostics": _collection_diagnostics(raw),
         "output_sha256": hashlib.sha256(raw.encode()).hexdigest(),
         "state_changed": False, "packages_installed": False,
         "network_accessed": False, "credentials_read": False,
