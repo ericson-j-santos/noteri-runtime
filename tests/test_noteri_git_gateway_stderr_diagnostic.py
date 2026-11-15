@@ -153,6 +153,22 @@ class GitStateDiagnosticTests(unittest.TestCase):
             self.assertNotIn("café", str(data))
             self.assertEqual(utf8["replacement_character_count"], 0)
 
+    def test_surrogate_replacement_is_precise(self):
+        self.assertEqual(
+            probe._surrogate_replaced("a\ud800b"), "a\ufffdb"
+        )
+        self.assertEqual(
+            probe._surrogate_replaced("café"), "café"
+        )
+        with tempfile.TemporaryDirectory() as t:
+            root = Path(t)
+            self.assertIsNone(probe._empty_directory_readonly(root / "missing"))
+            present = root / "safe"
+            present.mkdir()
+            self.assertTrue(probe._empty_directory_readonly(present))
+            (present / "file").write_text("x", encoding="ascii")
+            self.assertFalse(probe._empty_directory_readonly(present))
+
     def test_raw_git_warning_absent_is_not_reported_as_fixed(self):
         with tempfile.TemporaryDirectory() as t:
             with patch.object(
