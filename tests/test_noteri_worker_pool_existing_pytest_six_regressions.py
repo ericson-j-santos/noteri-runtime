@@ -90,6 +90,21 @@ class SixSuitesTests(unittest.TestCase):
         self.assertEqual(data["unrecognized_missing_module_count"], 1)
         self.assertNotIn("some_untrusted_token_label",str(data))
 
+    def test_only_known_failed_test_ids_and_safe_classes_escape(self):
+        text = (
+            "FAILED tests/test_noteri_worker_pool_native_stage.py::"
+            "test_repro - AssertionError: private-content-123\\n"
+            "FAILED tests/other_private_file.py::"
+            "test_hidden - PermissionError: hidden\\n"
+        )
+        cases=m._failed_test_cases(text)
+        self.assertEqual(cases,[{
+            "file":"tests/test_noteri_worker_pool_native_stage.py",
+            "case":"test_repro","failure_class":"AssertionError",
+        }])
+        self.assertNotIn("private-content-123",str(cases))
+        self.assertNotIn("other_private_file",str(cases))
+
     def test_cli_help_imports_without_pythonpath(self):
         script=(Path(__file__).resolve().parents[1]/"scripts"
                 /"noteri_worker_pool_existing_pytest_six_regressions.py")
