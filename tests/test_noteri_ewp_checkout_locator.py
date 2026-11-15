@@ -37,6 +37,17 @@ class LocatorTests(unittest.TestCase):
             self.assertEqual(out["candidate_count"],0)
             self.assertFalse(out["state_changed"])
 
+    def test_large_directory_with_no_matching_names_returns_empty(self):
+        with TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            for i in range(301):
+                (root/("other-"+str(i))).mkdir()
+            with patch.object(m, "ROOT", root), patch.object(
+                m, "git_text", return_value="e"*40
+            ):
+                out=m.locate("Noteri","nt",m.CONFIRM,"e"*40,Path(tmp))
+            self.assertEqual(out["candidate_count"],0)
+
     def test_wrong_remote_rejected(self):
         with TemporaryDirectory() as tmp:
             root=Path(tmp)
