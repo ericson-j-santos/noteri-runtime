@@ -9,6 +9,8 @@ a SESSION_LAUNCH_OK Command Gateway session, with matching risk authorization.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import os
 from pathlib import Path
@@ -86,6 +88,12 @@ def run_typed(request: dict, *, apply: bool = False) -> dict:
             and result.get("journal_sha256") == JOURNAL
             and result.get("receipt_sha256") == RECEIPT,
             "ARCHIVE_READBACK_IDENTITY_INVALID")
+    allowed_results = ({"JOURNAL_ARCHIVED_VERIFIED", "JOURNAL_ALREADY_ARCHIVED_VERIFIED"}
+                       if apply else {"JOURNAL_ARCHIVE_PREPARED_READONLY"})
+    require(result.get("result") in allowed_results and
+            bool(result.get("archived")) is apply and
+            (not result.get("mutation_performed") or apply),
+            "ARCHIVE_EXECUTION_POSTCONDITION_INVALID")
     out = {
         "schema_version": 1,
         "action_id": ACTION,
@@ -102,19 +110,46 @@ def run_typed(request: dict, *, apply: bool = False) -> dict:
         "archived": bool(result["archived"]),
         "update_lock_held": bool(result["update_lock_held"]),
         "backups_verified": result.get("backups_verified"),
-        "rollback_possible": True,
+        "rollback_on_failure_implemented": True,
     }
     return out
 
 
+def decode_closed_request(value: str) -> dict:
+    require(type(value) is str and 0 < len(value) <= 8192,
+            "REQUEST_BASE64_LENGTH_INVALID")
+    try:
+        payload = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise AdmissionBlocked("REQUEST_BASE64_INVALID") from exc
+    require(0 < len(payload) <= 4096, "REQUEST_JSON_SIZE_INVALID")
+
+    def unique(pairs: list[tuple[str, object]]) -> dict:
+        result = {}
+        for name, val in pairs:
+            require(name not in result, "DUPLICATE_REQUEST_KEY")
+            result[name] = val
+        return result
+
+    try:
+        data = json.loads(
+            payload.decode("utf-8"), object_pairs_hook=unique,
+            parse_constant=lambda _: (_ for _ in ()).throw(
+                AdmissionBlocked("INVALID_JSON_CONSTANT")),
+        )
+    except (ValueError, UnicodeError) as exc:
+        raise AdmissionBlocked("REQUEST_JSON_INVALID") from exc
+    require(type(data) is dict, "REQUEST_NOT_OBJECT")
+    return data
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--request", required=True)
+    p.add_argument("--request-b64", required=True)
     p.add_argument("--apply", action="store_true")
     args = p.parse_args()
     try:
-        request = json.loads(args.request, parse_constant=lambda _:
-                             (_ for _ in ()).throw(AdmissionBlocked("JSON_CONSTANT")))
+        request = decode_closed_request(args.request_b64)
         result = run_typed(request, apply=args.apply)
         print(json.dumps(result, sort_keys=True))
         return 0
