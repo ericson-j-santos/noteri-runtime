@@ -224,3 +224,37 @@ def test_native_probe_errors_fail_closed_and_do_not_skip_other_probe():
         listener_probe=lambda: pytest.fail("called on wrong host"),
         task_probe=lambda: pytest.fail("called on wrong host"))
     assert blocked["native_idle_attested"] is False
+
+
+def test_detailed_service_status_keeps_unknown_distinct_from_absent():
+    state = q.detailed_service_status(
+        hostname="Noteri", platform="nt",
+        socket_probe=lambda: "listening_unverified",
+        schtasks_probe=lambda: "absent_or_unreadable")
+    assert state == {"native_socket_status": "listening_unverified",
+                     "native_schtasks_status": "absent_or_unreadable"}
+    state = q.detailed_service_status(
+        hostname="Noteri", platform="nt",
+        socket_probe=lambda: "not_listening",
+        schtasks_probe=lambda: "present_unverified")
+    assert state == {"native_socket_status": "not_listening",
+                     "native_schtasks_status": "present_unverified"}
+
+
+def test_detailed_service_probe_errors_are_not_treated_as_absence():
+    def fail():
+        raise OSError("synthetic")
+
+    assert q.detailed_service_status(
+        hostname="Noteri", platform="nt", socket_probe=fail,
+        schtasks_probe=fail) == {
+            "native_socket_status": "unknown",
+            "native_schtasks_status": "unknown",
+        }
+    assert q.detailed_service_status(
+        hostname="Noteri", platform="nt",
+        socket_probe=lambda: "unexpected",
+        schtasks_probe=lambda: "unexpected") == {
+            "native_socket_status": "unknown",
+            "native_schtasks_status": "unknown",
+        }
