@@ -49,12 +49,6 @@ def test_minimal_candidate_changes_only_single_literal_and_is_idempotent():
     'RULES_SHA = "' + OLD_RULES + '"\nRULES_SHA += "x"\n',
 ])
 def test_untrusted_source_fails_closed(content):
-    if "RULES_SHA +=" in content:
-        # The candidate may look locally safe, but a later reassignment is
-        # executable behavior and should not be covered by a literal patch.
-        # This test guards parsing at least the valid pinned assignment.
-        assert pin.pinned_sha(content) == OLD_RULES
-        return
     with pytest.raises(pin.SyncBlocked):
         pin.candidate_source(content, CURRENT_RULES)
 
@@ -156,7 +150,7 @@ def test_plan_is_read_only_and_prepare_updates_only_candidate(tmp_path):
     assert result["branch_merged"] is False and result["deployed"] is False
     assert pin.pinned_sha(runner.read_text(encoding="utf-8")) == CURRENT_RULES
     assert _git(repo, "rev-parse", "HEAD") == head
-    assert _git(repo, "status", "--porcelain") == " M scripts/noteri_worker_pool_api_runner.py"
+    assert _git(repo, "status", "--porcelain") == "M scripts/noteri_worker_pool_api_runner.py"
     assert pin.sync(repo=repo, canonical=CURRENT_RULES, mode="plan")["result"] == "RULES_SHA_ALIGNED"
 
 
