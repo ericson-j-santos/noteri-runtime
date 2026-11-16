@@ -339,7 +339,9 @@ def _task_xml_stable(initial: bytes) -> None:
 
 
 def _quarantine(paths: dict) -> str:
-    need(paths["quarantine"].parent.is_dir(), "quarantine_parent_missing")
+    parent = checked(paths["quarantine"].parent)
+    parent.mkdir(parents=True, exist_ok=True)
+    checked(parent)
     source = checked(paths["release"] / cache.CACHE_RELATIVE)
     need(source.is_file() and stage.file_sha256(source) == CACHE_SHA256,
          "cache_changed")
@@ -349,12 +351,20 @@ def _quarantine(paths: dict) -> str:
     dest = checked(directory / f"{cache.CACHE_RELATIVE.name}.{CACHE_SHA256}.quarantined")
     need(not dest.exists(), "quarantine_backup_collision")
     os.replace(source, dest)
-    need(stage.file_sha256(dest) == CACHE_SHA256, "quarantine_hash_drift")
-    need(cache._backups(directory) == [(dest, CACHE_SHA256)],
-         "quarantine_readback_failed")
-    manifest = json.loads((paths["release"] / "manifest.json").read_text())
-    need(stage.validate_staged(paths["release"], manifest),
-         "release_still_untrusted")
+    try:
+        need(stage.file_sha256(dest) == CACHE_SHA256,
+             "quarantine_hash_drift")
+        need(cache._backups(directory) == [(dest, CACHE_SHA256)],
+             "quarantine_readback_failed")
+        manifest = json.loads((paths["release"] / "manifest.json").read_text())
+        need(stage.validate_staged(paths["release"], manifest),
+             "release_still_untrusted")
+    except Exception:
+        # Restore only the exact known bytecode from our own destination.
+        if (not source.exists() and dest.is_file()
+                and stage.file_sha256(dest) == CACHE_SHA256):
+            os.replace(dest, source)
+        raise
     return CACHE_SHA256
 
 
@@ -379,8 +389,15 @@ def _safe_rollback(local: Path, plan: dict, base: Path, *, stopped: bool) -> boo
         paths = plan["paths"]
         if not stopped:
             return False
+        # No second stop attempt here: an uncertain stop must be reconciled,
+        # never retried merely to make the postcondition look successful.
         if not _zero_instances(local):
-            _stop(local)
+            return False
+        original_cache = checked(paths["release"] / cache.CACHE_RELATIVE)
+        if original_cache.exists():
+            need(stage.file_sha256(original_cache) == CACHE_SHA256,
+                 "rollback_cache_untrusted")
+            _quarantine(paths)
         old = checked(base / "runner-before.py").read_bytes()
         need(sha(old) == plan["old_sha"], "rollback_backup_drift")
         if sha(paths["runner"].read_bytes()) != sha(old):
@@ -405,6 +422,7 @@ def apply(*, local: Path, expected_sha: str, confirm: str) -> dict[str, Any]:
     fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     stopped = False
     started = False
+    rollback_verified = False
     try:
         # Readback immediately before stopping. No queue claim or enrollment.
         queue_safe(local)
@@ -414,8 +432,8 @@ def apply(*, local: Path, expected_sha: str, confirm: str) -> dict[str, Any]:
         need(backups == {"runner": plan["old_sha"], "task_xml": sha(plan["xml"])},
              "backup_hash_mismatch")
         _task_xml_stable(plan["xml"])
+        stopped = True  # Stop may partially succeed before returning.
         _stop(local)
-        stopped = True
         _task_xml_stable(plan["xml"])
         queue_safe(local)
         dbhash = sqlite_consistent_backup(paths["database"], folder / "pool-consistent.db")
@@ -441,17 +459,20 @@ def apply(*, local: Path, expected_sha: str, confirm: str) -> dict[str, Any]:
                 "cache_backup_sha256": CACHE_SHA256,
                 "api_authenticated": True, "service_preserved": True}
     except Exception:
-        rollback = _safe_rollback(local, plan, folder, stopped=stopped)
-        return {"result": "MAINTENANCE_ROLLED_BACK" if rollback
-                else "MAINTENANCE_BLOCKED_RECONCILE",
+        rollback_verified = _safe_rollback(
+            local, plan, folder, stopped=stopped,
+        ) if stopped else False
+        return {"result": "MAINTENANCE_ROLLED_BACK" if rollback_verified
+                else ("MAINTENANCE_BLOCKED_RECONCILE" if stopped
+                      else "MAINTENANCE_BLOCKED_NO_STOP"),
                 "source_sha": expected_sha, "changed": stopped,
-                "rollback_verified": rollback,
+                "rollback_verified": rollback_verified,
                 "backup_retained": folder.exists(),
-                "service_preserved": rollback or not stopped}
+                "service_preserved": rollback_verified or not stopped}
     finally:
         os.close(fd)
-        # Persistent lock when recovery is ambiguous; no automatic replay.
-        if started or not stopped or _zero_instances(local):
+        # An ambiguous interrupted update holds its lease until reconciliation.
+        if started or rollback_verified or not stopped:
             lock.unlink(missing_ok=True)
 
 
