@@ -129,18 +129,45 @@ def attest(*, local: Path, host: str, platform: str, user: str) -> dict:
         audit = release_audit.audit(
             source=source, release=release, hostname=host, platform=platform,
             profile=profile, inspect_git=stage.git_identity)
-        if (audit.get("source_identity_verified") is not True or
-                audit.get("result") != "RELEASE_MISMATCH" or
-                audit.get("expected_file_count") != 38 or
-                audit.get("extra") != [cache.CACHE_LABEL] or
-                audit.get("counts", {}).get("extra") != 1 or
-                any(audit["counts"].get(name) != 0 for name in (
-                    "missing", "hash_mismatch", "unsafe", "manifest_keys_missing",
-                    "manifest_keys_extra", "manifest_hash_mismatch")) or
-                audit.get("manifest_metadata_mismatch") != []):
-            # The cache is an explicit known exception solely for observation.
-            # The normal immutable-stage integrity gate remains unchanged.
+        # The only two admitted release shapes are:
+        # (1) the previously observed single generated cache; or
+        # (2) the immutable release restored to exact manifest contents with
+        #     that exact bytecode preserved in hashed same-volume quarantine.
+        # Never accept a missing cache with no independently verified backup.
+        counts = audit.get("counts", {})
+        official_files_valid = (
+            audit.get("source_identity_verified") is True
+            and audit.get("installed_manifest") == "valid"
+            and audit.get("expected_file_count") == 38
+            and all(counts.get(name) == 0 for name in (
+                "missing", "hash_mismatch", "unsafe", "manifest_keys_missing",
+                "manifest_keys_extra", "manifest_hash_mismatch"))
+            and audit.get("manifest_metadata_mismatch") == []
+        )
+        old_shape = (
+            audit.get("result") == "RELEASE_MISMATCH"
+            and audit.get("extra") == [cache.CACHE_LABEL]
+            and counts.get("extra") == 1
+        )
+        restored_shape = (
+            audit.get("result") == "RELEASE_INTACT"
+            and audit.get("extra") == []
+            and counts.get("extra") == 0
+        )
+        if not official_files_valid or not (old_shape or restored_shape):
             return _fail(result, "BLOCKED_RELEASE")
+        if restored_shape:
+            try:
+                expected_backup = (
+                    local / cache.QUARANTINE_FOLDER
+                    / (cache.CACHE_RELATIVE.name + "."
+                       + cache.KNOWN_CACHE_SHA256 + ".quarantined")
+                )
+                backups = cache._backups(local / cache.QUARANTINE_FOLDER)
+                if backups != [(expected_backup, cache.KNOWN_CACHE_SHA256)]:
+                    return _fail(result, "BLOCKED_QUARANTINE_BACKUP")
+            except (OSError, ValueError, TypeError, cache.Blocked):
+                return _fail(result, "BLOCKED_QUARANTINE_BACKUP")
         for name in activation.RUNNER_FILES:
             installed = root / "bin" / name
             source_file = Path(__file__).resolve().parent / name
