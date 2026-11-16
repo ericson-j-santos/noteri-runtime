@@ -49,7 +49,11 @@ def admission(*, target: str, state_root: Path,
     _condition(profile == "NORMAL", "PROFILE_NOT_NORMAL")
     _condition(not state_root.is_symlink(), "CONTROL_STATE_LINK")
     _condition(
-        isinstance(owner_rows, list) and len(owner_rows) == 1,
+        isinstance(owner_rows, list) and len(owner_rows) == 1
+        and isinstance(owner_rows[0], dict)
+        and str(owner_rows[0].get("name", "")).casefold() == "python.exe"
+        and type(owner_rows[0].get("pid")) is int
+        and owner_rows[0]["pid"] > 0,
         "WORKER_POOL_OWNER_NOT_UNIQUE",
     )
     _condition(
@@ -57,7 +61,9 @@ def admission(*, target: str, state_root: Path,
         and pool_health.get("result") == "WORKER_POOL_API_HEALTHY"
         and pool_health.get("http_status") == 200
         and pool_health.get("service") == "codex-worker-pool"
-        and pool_health.get("auth_configured") is True,
+        and pool_health.get("auth_configured") is True
+        and pool_health.get("rules_pin_configured") is True
+        and pool_health.get("storage_backend") in {"sqlite", "postgres"},
         "WORKER_POOL_UNTRUSTED",
     )
     check = diag.reservation_attestation(
@@ -156,7 +162,9 @@ def main() -> int:
         )
         result["correlation_id"] = args.correlation_id
         print(json.dumps(result, sort_keys=True))
-        return 0
+        # Status and process code agree: a non-admitted maintenance operation
+        # must never look like an executable/green dispatch to a scheduler.
+        return 2
     except (AdmissionBlocked, diag.Blocked, recovery.Blocked,
             OSError, ValueError) as exc:
         reason = str(exc) if isinstance(exc, AdmissionBlocked) else (
