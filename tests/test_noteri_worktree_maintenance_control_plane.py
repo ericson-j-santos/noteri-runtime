@@ -32,6 +32,7 @@ class AdmissionTests(unittest.TestCase):
                 "result": "WORKER_POOL_API_HEALTHY",
                 "http_status": 200, "service": "codex-worker-pool",
                 "auth_configured": True,
+                "rules_pin_configured": True,
                 "authority_id_present": False,
                 "fenced_cutover_enabled": False,
                 "storage_backend": "sqlite",
@@ -85,6 +86,12 @@ class AdmissionTests(unittest.TestCase):
             ({"source_head": "bad"}, "SOURCE_HEAD_INVALID"),
             ({"owner_rows": []}, "WORKER_POOL_OWNER_NOT_UNIQUE"),
             ({"owner_rows": [{}, {}]}, "WORKER_POOL_OWNER_NOT_UNIQUE"),
+            ({"owner_rows": [{"name": "other.exe", "pid": 9184}]},
+             "WORKER_POOL_OWNER_NOT_UNIQUE"),
+            ({"owner_rows": [{"name": "python.exe", "pid": True}]},
+             "WORKER_POOL_OWNER_NOT_UNIQUE"),
+            ({"pool_health": {**self.args["pool_health"],
+                             "rules_pin_configured": False}}, "WORKER_POOL_UNTRUSTED"),
             ({"pool_health": {**self.args["pool_health"],
                              "auth_configured": False}}, "WORKER_POOL_UNTRUSTED"),
             ({"pool_health": {**self.args["pool_health"],
@@ -172,6 +179,7 @@ class AdmissionTests(unittest.TestCase):
         self.assertNotIn('add_argument("--path"', code)
         self.assertNotIn("subprocess.run(", code)
         self.assertNotIn('method="POST"', code)
+        self.assertIn("return 2", code)
 
 
 if __name__ == "__main__":
