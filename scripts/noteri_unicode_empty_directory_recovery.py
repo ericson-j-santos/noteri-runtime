@@ -21,6 +21,8 @@ import stat
 import subprocess
 import unicodedata
 
+from noteri_capability_contract import validate_request, CapabilityContractError
+
 HOST = "noteri"
 EXPECTED_HEAD = "9840ec316ba5d76f17cd1cf113d208ed649daf7d"
 NAME_SHA256 = "8bf5d2badf76dfee095b8e6784af2f24231fe5bc5774b83736e2141897a12159"
@@ -32,6 +34,8 @@ TARGETS = frozenset((
 ID = re.compile(r"^[A-Za-z0-9._:-]{12,128}$")
 WARNING = re.compile(rb"could not open directory ['\"]([^'\"]{1,128})['\"]:", re.I)
 PROBE_CMD = ("git", "ls-files", "--others", "--exclude-standard", "-z", "--", ".")
+CAPABILITY = "noteri.worktree.unicode-empty-quarantine.v1"
+CONFIRM = "NOTERI-UNICODE-QUARANTINE-REVERSIBLE-DEV"
 
 
 class Blocked(RuntimeError):
@@ -217,6 +221,57 @@ def recover_with_authority(root: Path, target: str, quarantine: Path, *,
         return {"result": "QUARANTINED_REVERSIBLY", "target": target,
                 "state_changed": True, "rollback_available": destination.is_dir(),
                 "idempotency_key": idempotency_key}
+
+
+
+def admit_typed_request(payload: dict, *, controller_source_sha: str) -> dict:
+    """Strongly bounded request for a separately installed control plane.
+
+    Validation is not proof of a lease, approval or runtime installation.
+    """
+    try:
+        request = validate_request(
+            payload, capability=CAPABILITY, allowed_environments={"DEV"},
+            expected_source_sha=controller_source_sha,
+            allowed_params={"target", "original_head", "warning_name_sha256"},
+            required_params={"target", "original_head", "warning_name_sha256"},
+            expected_confirmation=CONFIRM,
+        )
+    except CapabilityContractError as exc:
+        raise Blocked("MAINTENANCE_REQUEST_INVALID") from exc
+    params = request["params"]
+    if (params["target"] not in TARGETS
+            or params["original_head"] != EXPECTED_HEAD
+            or params["warning_name_sha256"] != NAME_SHA256):
+        raise Blocked("MAINTENANCE_REQUEST_TARGET_INVALID")
+    return {
+        "target": params["target"],
+        "correlation_id": request["correlation_id"],
+        "idempotency_key": request["idempotency_key"],
+        "source_sha": request["source_sha"],
+        "request_sha256": request["request_sha256"],
+        "apply_authorized": False,
+        "exclusive_lease_proven": False,
+    }
+
+
+def recover_typed_request(payload: dict, *,
+                          controller_source_sha: str,
+                          authority: object,
+                          trusted_quarantine: Path) -> dict:
+    """A controller adapter: schema -> owned lease -> reversible repair.
+
+    This function must be called ONLY from the separately admitted and
+    deployed controller, not from a generic command runner.
+    """
+    request = admit_typed_request(
+        payload, controller_source_sha=controller_source_sha,
+    )
+    return recover_with_authority(
+        ROOT / request["target"], request["target"], trusted_quarantine,
+        authority=authority, idempotency_key=request["idempotency_key"],
+        correlation_id=request["correlation_id"],
+    )
 
 
 def main() -> int:
