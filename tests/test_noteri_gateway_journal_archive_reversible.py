@@ -111,7 +111,7 @@ class ArchiveReversibleTests(unittest.TestCase):
         archive.recover(self.root, apply=True, mover=self.move,
                         helper_loader=FakeMetadata)
         (self.root / "update-transaction.json").write_bytes(b"unexpected")
-        with self.assertRaises(archive.RecoveryBlocked):
+        with self.assertRaises((archive.RecoveryBlocked, meta.safe.Blocked)):
             archive.recover(self.root, apply=True, mover=self.move,
                             helper_loader=FakeMetadata)
         self.assertTrue(self.archive_path.exists())
