@@ -243,3 +243,76 @@ def test_check_mode_success_on_canonical_and_no_file_change(monkeypatch, capsys)
     assert outcome["result"] == "RULES_SHA_ALIGNED"
     assert outcome["change_required"] is False
     assert target.read_bytes() == before
+
+
+
+def test_public_git_fallback_reads_only_exact_authoritative_ref(monkeypatch):
+    observed = []
+    def fake_run(argv, **opts):
+        observed.append((argv, opts))
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=CURRENT_RULES + "\trefs/heads/main\n", stderr=""
+        )
+    monkeypatch.setattr(pin.subprocess, "run", fake_run)
+    assert pin.canonical_rules_sha_git() == CURRENT_RULES
+    assert len(observed) == 1
+    argv, opts = observed[0]
+    assert argv[0] == "git" and argv[1:3] == ["-c", "http.followRedirects=false"]
+    assert argv[3:5] == ["ls-remote", "--exit-code"]
+    assert argv[5] == pin.RULES_GIT_REMOTE
+    assert argv[6] == "refs/heads/main"
+    assert opts["timeout"] == 12
+    assert opts["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert opts["env"]["GIT_ASKPASS"] == pin.os.devnull
+
+
+@pytest.mark.parametrize("output,returncode", [
+    ("", 0),
+    (CURRENT_RULES + "\trefs/heads/dev\n", 0),
+    ("z" * 40 + "\trefs/heads/main\n", 0),
+    (CURRENT_RULES + " refs/heads/main\n", 0),
+    (CURRENT_RULES + "\trefs/heads/main\n" * 2, 0),
+    (CURRENT_RULES + "\trefs/heads/main\n", 1),
+])
+def test_git_canonical_invalid_ref_fails_closed(monkeypatch, output, returncode):
+    monkeypatch.setattr(pin.subprocess, "run", lambda argv, **opts:
+                        subprocess.CompletedProcess(
+                            argv, returncode, stdout=output, stderr="private-unprinted"
+                        ))
+    with pytest.raises(pin.SyncBlocked):
+        pin.canonical_rules_sha_git()
+
+
+def test_git_canonical_unavailable_fails_closed(monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=12)
+    monkeypatch.setattr(pin.subprocess, "run", unavailable)
+    with pytest.raises(pin.SyncBlocked, match="BLOCKED_CANONICAL_UNAVAILABLE"):
+        pin.canonical_rules_sha_git()
+
+
+def test_live_fallback_only_if_rest_unavailable(monkeypatch):
+    calls = []
+    def no_api():
+        calls.append("rest")
+        raise pin.SyncBlocked("BLOCKED_CANONICAL_UNAVAILABLE")
+    def git_ok():
+        calls.append("git")
+        return CURRENT_RULES
+    monkeypatch.setattr(pin, "canonical_rules_sha", no_api)
+    monkeypatch.setattr(pin, "canonical_rules_sha_git", git_ok)
+    assert pin.current_rules_sha() == CURRENT_RULES
+    assert calls == ["rest", "git"]
+
+    calls.clear()
+    monkeypatch.setattr(pin, "canonical_rules_sha",
+                        lambda: (_ for _ in ()).throw(
+                            pin.SyncBlocked("BLOCKED_CANONICAL_ORIGIN")))
+    with pytest.raises(pin.SyncBlocked, match="BLOCKED_CANONICAL_ORIGIN"):
+        pin.current_rules_sha()
+    assert calls == []  # A malformed response never becomes a fallback.
+
+    calls.clear()
+    monkeypatch.setattr(pin, "canonical_rules_sha", lambda: CURRENT_RULES)
+    assert pin.current_rules_sha() == CURRENT_RULES
+    assert calls == []  # No needless second request.
