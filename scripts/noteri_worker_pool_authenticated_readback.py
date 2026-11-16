@@ -79,6 +79,31 @@ def xml_difference_fields(raw: bytes, python: Path, runner: Path, user: str) -> 
         return ["xml_parse"]
 
 
+def xml_optional_field_states(raw: bytes, fields: list[str]) -> dict[str, str]:
+    """Only tell whether a required XML element is missing or has another value."""
+    mapping = {
+        "run_level": "t:Principals/t:Principal/t:RunLevel",
+        "boot_trigger": "t:Triggers/t:BootTrigger/t:Enabled",
+        "task_enabled": "t:Settings/t:Enabled",
+    }
+    try:
+        try:
+            doc = ET.fromstring(raw)
+        except ET.ParseError:
+            if not (raw.startswith(b'<?xml ') and
+                    b'encoding="UTF-16"' in raw[:128]):
+                return {k: "unparsed" for k in fields if k in mapping}
+            doc = ET.fromstring(raw.replace(
+                b'encoding="UTF-16"', b'encoding="UTF-8"', 1))
+        return {
+            k: ("missing" if doc.find(mapping[k], namespaces={"t": activation.NS}) is None
+                else "different")
+            for k in fields if k in mapping
+        }
+    except (ET.ParseError, ValueError, TypeError):
+        return {k: "unparsed" for k in fields if k in mapping}
+
+
 def _fail(result: dict, reason: str) -> dict:
     result["result"] = reason
     return result
@@ -154,6 +179,8 @@ def attest(*, local: Path, host: str, platform: str, user: str) -> dict:
         if not xml_matches:
             result["xml_difference_fields"] = xml_difference_fields(
                 task.stdout, python, runner, user_id)
+            result["xml_field_states"] = xml_optional_field_states(
+                task.stdout, result["xml_difference_fields"])
             return _fail(result, "BLOCKED_TASK_XML")
         result["task_s4u_verified"] = True
         if not activation.listener_owned_by_task(python, runner):
