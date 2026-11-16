@@ -33,8 +33,19 @@ jobs:
           python-version: "3.12"
       - name: Install test dependencies
         run: python -m pip install --disable-pip-version-check pytest==8.4.2 PyYAML==6.0.2
+      - name: Checkout immutable shared Worker Pool for scoped adapter tests
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ericson-j-santos/engineering-worker-pool
+          ref: e22aabb14e1a646e274c331e83cc06c470607a38
+          path: _worker_pool
+          persist-credentials: false
+      - name: Verify exact shared Worker Pool source
+        run: test "$(git -C _worker_pool rev-parse HEAD)" = "e22aabb14e1a646e274c331e83cc06c470607a38"
       - name: Run tests
-        run: python -m pytest -q
+        env:
+          PYTHONPATH: ${{ github.workspace }}/_worker_pool
+        run: python -m pytest -q --ignore=_worker_pool
       - name: Check canonical Worker Pool rules SHA (read-only, no install)
         run: python -B -m scripts.noteri_worker_pool_rules_pin_sync --mode check
 
