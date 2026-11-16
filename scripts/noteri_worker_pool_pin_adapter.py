@@ -392,3 +392,72 @@ class NoteriRulesPinAdapter:
             invoked_commands=tuple(context.invoked),
             evidence_sha256=receipt,
         )
+
+
+class FencedOnlyPinApi:
+    """Permit only fenced/exact claims for this fixed Noteri repair profile.
+
+    This proxy wraps the existing Worker Pool transport; it does not register
+    workers, create tasks, enable cutover or claim anything during construction.
+    It cannot represent a successfully admitted worker by itself. The caller
+    must still prove authorization, fresh API state, native Gateway, artifact
+    transport and independent Validator. The unsafe legacy claim never passes.
+    """
+
+    _LIFECYCLE = frozenset({
+        "get_latest_checkpoint", "record_checkpoint", "start",
+        "submit_validation", "complete", "fail", "block",
+    })
+
+    def __init__(self, transport: Any, binding: TrustedTask) -> None:
+        require(type(binding) is TrustedTask, "pin_binding_untrusted")
+        binding.check()
+        require(callable(getattr(transport, "get_task", None))
+                and callable(getattr(transport, "claim_fenced_exact", None))
+                and all(callable(getattr(transport, name, None))
+                        for name in self._LIFECYCLE),
+                "pin_api_transport_incomplete")
+        self._transport = transport
+        self._binding = binding
+
+    @staticmethod
+    def _fenced(value: Any) -> bool:
+        # SQLite-origin 1 and HTTP-origin true are the only admitted encodings.
+        return value is True or (type(value) is int and value == 1)
+
+    def get_task(self, task_id: str) -> dict[str, Any]:
+        require(task_id == self._binding.task_id,
+                "pin_wrong_task_id")
+        observed = self._transport.get_task(task_id)
+        require(type(observed) is dict
+                and observed.get("task_id") == self._binding.task_id
+                and observed.get("repository") == REPOSITORY
+                and observed.get("issue_number") == ISSUE
+                and observed.get("base_sha") == self._binding.base_sha
+                and self._fenced(observed.get("fencing_required")),
+                "pin_live_task_not_fenced")
+        return observed
+
+    def claim_exact(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        # Fail BEFORE any API call. Never downgrade from fenced/exact.
+        raise PinAdapterBlocked("pin_legacy_claim_forbidden")
+
+    def claim_fenced_exact(
+        self, worker_id: str, task_id: str, correlation_id: str,
+    ) -> dict[str, Any]:
+        live = self.get_task(task_id)
+        require(live.get("state") in ("queued", "validating")
+                and live.get("leased_by") is None,
+                "pin_task_not_claimable")
+        # The actual Worker Pool endpoint atomically enforces fencing and the
+        # expected worker/lease. No fallback or retry on a failed claim.
+        return self._transport.claim_fenced_exact(
+            worker_id, task_id, correlation_id,
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        # Forward only the typed operations required by NativeOneShotExecutor.
+        # In particular, never expose POST/enqueue/register or generic _request.
+        if name in self._LIFECYCLE:
+            return getattr(self._transport, name)
+        raise AttributeError(name)
