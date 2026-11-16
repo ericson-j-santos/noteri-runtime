@@ -54,7 +54,7 @@ def attest(*, local: Path, host: str, platform: str, user: str) -> dict:
             stage.ensure_no_link_components(fixed)
         audit = release_audit.audit(
             source=source, release=release, hostname=host, platform=platform,
-            profile=profile)
+            profile=profile, inspect_git=stage.git_identity)
         if (audit.get("source_identity_verified") is not True or
                 audit.get("result") != "RELEASE_MISMATCH" or
                 audit.get("expected_file_count") != 38 or
