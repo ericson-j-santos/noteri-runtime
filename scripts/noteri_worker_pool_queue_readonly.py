@@ -8,6 +8,7 @@ never returns task IDs, token values or absolute host paths.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import socket
@@ -23,11 +24,13 @@ STATES = ("queued", "leased", "running", "validating", "blocked", "completed", "
 ACTIVE = ("leased", "running", "validating")
 SCHEMA = {
     "tasks": {"task_id", "repository", "issue_number", "state", "leased_by",
-              "lease_expires_at", "fencing_required", "lease_generation"},
+              "lease_expires_at", "fencing_required", "lease_generation",
+              "request_id", "idempotency_key", "base_sha", "priority", "max_attempts"},
     "task_attempts": {"ended_at"},
     "task_checkpoints": {"effect_state"},
     "workers": {"last_heartbeat_at"},
     "pool_control": {"control_key", "enabled"},
+    "repository_lanes": {"repository", "enabled", "max_in_flight"},
 }
 MAX_DB_BYTES = 1_073_741_824
 BASE = {"schema_version": "1", "source_sha": authenticated.SOURCE_SHA,
@@ -117,6 +120,46 @@ def inspect_database(db_path: Path, *, now: datetime) -> dict:
         if cutover_row is None or cutover_row["enabled"] not in (0, 1):
             return {**result, "result": "BLOCKED_CUTOVER_STATE"}
         cutover = bool(cutover_row["enabled"])
+        # The ReqSys smoke producer intentionally uses a non-existent repo
+        # and disabled lane. Never treat its synthetic task as a real issue.
+        smoke_repo = "ericson-j-santos/codex-worker-pool-smoke"
+        smoke_issue = 1914
+        lane = con.execute(
+            "SELECT enabled,max_in_flight FROM repository_lanes WHERE repository=?",
+            (smoke_repo,)).fetchone()
+        if lane is not None and (lane["enabled"] not in (0, 1) or
+                                 int(lane["max_in_flight"]) < 1):
+            return {**result, "result": "BLOCKED_LANE_CONFIG"}
+        smoke_rows = list(con.execute(
+            "SELECT task_id,request_id,idempotency_key,base_sha,state,priority,"
+            "max_attempts,fencing_required,lease_generation,leased_by "
+            "FROM tasks WHERE repository=? AND issue_number=? LIMIT 2",
+            (smoke_repo, smoke_issue)))
+        if len(smoke_rows) > 1:
+            return {**result, "result": "BLOCKED_SMOKE_DUPLICATE"}
+        smoke_consistent = False
+        if len(smoke_rows) == 1:
+            item = smoke_rows[0]
+            sha = str(item["base_sha"] or "")
+            if re.fullmatch(r"[0-9a-f]{40}", sha):
+                seed = "smoke-" + sha[:12]
+                request = hashlib.sha256(
+                    f"{smoke_repo}:{smoke_issue}:{seed}".encode("utf-8")
+                ).hexdigest()[:24]
+                identity = hashlib.sha256(
+                    f"{smoke_repo}|{smoke_issue}|{request}".encode("utf-8")
+                ).hexdigest()
+                smoke_consistent = (
+                    item["task_id"] == f"cwp-{identity[:24]}"
+                    and item["idempotency_key"] == identity
+                    and item["request_id"] == request
+                    and item["state"] == "queued"
+                    and int(item["priority"]) == 10
+                    and int(item["max_attempts"]) == 3
+                    and int(item["fencing_required"]) == 0
+                    and int(item["lease_generation"]) == 0
+                    and item["leased_by"] is None
+                )
         con.execute("ROLLBACK")
         result.update(
             result="READ_ONLY_QUEUE_AUDIT_OK",
@@ -125,6 +168,12 @@ def inspect_database(db_path: Path, *, now: datetime) -> dict:
             queued_task_sample=queue_sample,
             queued_task_sample_truncated=counts["queued"] > len(queue_sample),
             fenced_cutover_enabled=cutover,
+            synthetic_smoke_reference="ericson-j-santos/codex-worker-pool-smoke#1914",
+            synthetic_smoke_lane_found=lane is not None,
+            synthetic_smoke_lane_disabled=(lane is not None and lane["enabled"] == 0),
+            synthetic_smoke_count=len(smoke_rows),
+            synthetic_smoke_identity_consistent=smoke_consistent,
+            synthetic_smoke_never_claim=True,
             tasks_total=sum(counts.values()),
             tasks_active_states=sum(counts[s] for s in ACTIVE),
             leases_unexpired=int(active),
