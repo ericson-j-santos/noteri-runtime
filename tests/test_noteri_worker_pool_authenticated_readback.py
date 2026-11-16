@@ -247,3 +247,44 @@ def test_xml_optional_states_distinguish_missing_and_explicit_conflicts(tmp_path
             altered = xml.replace(part, b"", 1)
             observed = probe.xml_optional_field_states(altered, labels)
             assert "missing" in observed.values()
+
+
+def test_xml_omitted_defaults_pass_only_with_verified_com(tmp_path, monkeypatch):
+    real_parser = activation.task_matches
+    local, secure, cache, token = prepare(tmp_path, monkeypatch)
+    root = local / "ReqSys" / "NoteriWorkerPool"
+    python = root / "venvs" / probe.SOURCE_SHA / "Scripts" / "python.exe"
+    runner = root / "bin" / activation.RUNNER_FILES[0]
+    xml = activation.task_xml(python, runner, "Noteri\\erics")
+    # The real schtasks XML export may omit these three default-valued tags.
+    xml = xml.replace(b"<RunLevel>LeastPrivilege</RunLevel>", b"")
+    xml = xml.replace(b"<Enabled>true</Enabled>", b"")
+    monkeypatch.setattr(activation, "schtasks",
+                        lambda *_: subprocess.CompletedProcess([], 0, stdout=xml))
+    monkeypatch.setattr(activation, "task_matches", real_parser)
+    result = run(local)
+    assert result["result"] == "AUTHENTICATED_READBACK_OK"
+    assert result["task_defaults_attested_by_com"] == [
+        "boot_trigger", "run_level", "task_enabled"
+    ]
+    assert result["task_com_verified"] is True
+    assert secure.opened is True
+
+
+def test_explicit_xml_conflict_never_reuses_protected_token(tmp_path, monkeypatch):
+    real_parser = activation.task_matches
+    local, secure, cache, token = prepare(tmp_path, monkeypatch)
+    root = local / "ReqSys" / "NoteriWorkerPool"
+    python = root / "venvs" / probe.SOURCE_SHA / "Scripts" / "python.exe"
+    runner = root / "bin" / activation.RUNNER_FILES[0]
+    xml = activation.task_xml(python, runner, "Noteri\\erics")
+    xml = xml.replace(b"<RunLevel>LeastPrivilege</RunLevel>",
+                      b"<RunLevel>HighestAvailable</RunLevel>")
+    monkeypatch.setattr(activation, "schtasks",
+                        lambda *_: subprocess.CompletedProcess([], 0, stdout=xml))
+    monkeypatch.setattr(activation, "task_matches", real_parser)
+    result = run(local)
+    assert result["result"] == "BLOCKED_TASK_XML"
+    assert result["xml_field_states"]["run_level"] == "different"
+    assert secure.opened is False
+    assert result["token_bytes_read"] is False
