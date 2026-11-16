@@ -456,8 +456,17 @@ class FencedOnlyPinApi:
         )
 
     def __getattr__(self, name: str) -> Any:
-        # Forward only the typed operations required by NativeOneShotExecutor.
-        # In particular, never expose POST/enqueue/register or generic _request.
-        if name in self._LIFECYCLE:
-            return getattr(self._transport, name)
-        raise AttributeError(name)
+        # Bound lifecycle operations must not be reusable for a different task.
+        # Check before forwarding ANY GET or mutation; never expose POST,
+        # enqueue/register, unrestricted _request or another repository.
+        if name not in self._LIFECYCLE:
+            raise AttributeError(name)
+        method = getattr(self._transport, name)
+
+        def exact_task(*args: Any, **kwargs: Any) -> Any:
+            task_id = args[0] if args else kwargs.get("task_id")
+            require(task_id == self._binding.task_id, "pin_wrong_task_id")
+            self.get_task(task_id)
+            return method(*args, **kwargs)
+
+        return exact_task
