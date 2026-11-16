@@ -162,25 +162,58 @@ def _folder_backup_state(root: Path, helper, backup_value: object, manifest_hash
     _validate_file_security(helper, manifest_path, None)
     backup_valid = 0
     active_metadata_valid = 0
+    newly_created_without_streams = 0
+    historical_absent_verified = 0
     for rel in sorted(binding.legacy.MANAGED):
         record = entries[rel]
-        _require(isinstance(record, dict) and record.get("existed") is True,
+        _require(isinstance(record, dict) and
+                 type(record.get("existed")) is bool,
                  "BACKUP_ENTRY_INVALID")
-        expected = record.get("previous_windows_state")
-        _require(isinstance(expected, dict), "WINDOWS_ROLLBACK_STATE_MISSING")
         saved = backup / "files" / rel
         current = root.joinpath(*rel.split("/"))
-        _validate_file_security(helper, saved, expected)
-        backup_valid += 1
-        # Only compare installed-file metadata where its content matches
-        # the state recorded by that backup, regardless of earlier/later generation.
-        allowed_digest = record.get("previous_sha256") if mode == "historical" else record.get("desired_sha256")
-        _require(binding._matched(current, allowed_digest,
-                                 record.get("previous_size") if mode == "historical"
-                                 else record.get("desired_size")),
-                 "CURRENT_RUNTIME_CONTENT_DIVERGED")
-        _validate_file_security(helper, current, expected)
-        active_metadata_valid += 1
+        if record["existed"]:
+            expected = record.get("previous_windows_state")
+            _require(isinstance(expected, dict), "WINDOWS_ROLLBACK_STATE_MISSING")
+            _require(binding._matched(saved, record.get("previous_sha256"),
+                                     record.get("previous_size")),
+                     "SAVED_FILE_CONTENT_DIVERGED")
+            _validate_file_security(helper, saved, expected)
+            backup_valid += 1
+        else:
+            _require(record.get("previous_windows_state") is None,
+                     "NONEXISTENT_FILE_HAS_PREVIOUS_SECURITY")
+            _require(not os.path.lexists(saved),
+                     "NONEXISTENT_BACKUP_FILE_PRESENT")
+            backup_valid += 1
+
+        if mode == "historical":
+            if record["existed"]:
+                _require(binding._matched(current, record.get("previous_sha256"),
+                                         record.get("previous_size")),
+                         "HISTORICAL_RUNTIME_CONTENT_DIVERGED")
+                _validate_file_security(helper, current, expected)
+                active_metadata_valid += 1
+            else:
+                _require(not os.path.lexists(current),
+                         "HISTORICAL_ABSENT_FILE_PRESENT")
+                historical_absent_verified += 1
+                active_metadata_valid += 1
+        elif mode == "current":
+            _require(binding._matched(current, record.get("desired_sha256"),
+                                     record.get("desired_size")),
+                     "CURRENT_RUNTIME_CONTENT_DIVERGED")
+            if record["existed"]:
+                _validate_file_security(helper, current, expected)
+            else:
+                # Brand-new file has no preserved owner/DACL baseline.
+                # Inventory it twice and reject unexpected ADS; do NOT label
+                # its owner/group/DACL as equivalent to a nonexistent state.
+                _validate_file_security(helper, current, None,
+                                        require_no_streams=True)
+                newly_created_without_streams += 1
+            active_metadata_valid += 1
+        else:
+            raise Blocked("INVALID_AUDIT_MODE")
     _require(safe.read_stable_object(manifest_path)[1] == manifest_hash,
              "BACKUP_MANIFEST_CHANGED")
     return {
@@ -188,6 +221,8 @@ def _folder_backup_state(root: Path, helper, backup_value: object, manifest_hash
         "managed_count": len(entries),
         "backup_security_matches": backup_valid,
         "current_security_matches": active_metadata_valid,
+        "new_files_without_ads": newly_created_without_streams,
+        "historical_absences_verified": historical_absent_verified,
         "directory_descriptor_stable": True,
     }
 
