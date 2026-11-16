@@ -42,10 +42,23 @@ jobs:
           persist-credentials: false
       - name: Verify exact shared Worker Pool source
         run: test "$(git -C _worker_pool rev-parse HEAD)" = "e22aabb14e1a646e274c331e83cc06c470607a38"
+      - name: Checkout exact Worker Pool version currently installed on Noteri
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ericson-j-santos/engineering-worker-pool
+          ref: 21fd68dec6f0da92b3e7da201463401ac5429d64
+          path: _worker_pool_installed
+          persist-credentials: false
+      - name: Verify exact installed Worker Pool source SHA
+        run: test "$(git -C _worker_pool_installed rev-parse HEAD)" = "21fd68dec6f0da92b3e7da201463401ac5429d64"
       - name: Run tests
         env:
           PYTHONPATH: ${{ github.workspace }}/_worker_pool
-        run: python -m pytest -q --ignore=_worker_pool
+        run: python -m pytest -q --ignore=_worker_pool --ignore=_worker_pool_installed
+      - name: Verify native adapter against installed Worker Pool contract
+        env:
+          PYTHONPATH: ${{ github.workspace }}/_worker_pool_installed
+        run: python -m pytest -q tests/test_noteri_worker_pool_pin_adapter.py
       - name: Check canonical Worker Pool rules SHA (read-only, no install)
         run: python -B -m scripts.noteri_worker_pool_rules_pin_sync --mode check
 
