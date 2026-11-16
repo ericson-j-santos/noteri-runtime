@@ -22,10 +22,12 @@ from scripts import noteri_worker_pool_native_stage as stage
 STATES = ("queued", "leased", "running", "validating", "blocked", "completed", "failed")
 ACTIVE = ("leased", "running", "validating")
 SCHEMA = {
-    "tasks": {"state", "leased_by", "lease_expires_at"},
+    "tasks": {"task_id", "repository", "issue_number", "state", "leased_by",
+              "lease_expires_at", "fencing_required", "lease_generation"},
     "task_attempts": {"ended_at"},
     "task_checkpoints": {"effect_state"},
     "workers": {"last_heartbeat_at"},
+    "pool_control": {"control_key", "enabled"},
 }
 MAX_DB_BYTES = 1_073_741_824
 BASE = {"schema_version": "1", "source_sha": authenticated.SOURCE_SHA,
@@ -89,11 +91,40 @@ def inspect_database(db_path: Path, *, now: datetime) -> dict:
         fresh = con.execute(
             "SELECT COUNT(*) n FROM workers WHERE last_heartbeat_at > ?",
             (recent,)).fetchone()["n"]
+        # Only allowlisted, non-sensitive queue identity fields are returned.
+        # Never export request_id, idempotency_key, lease_token, correlation_id,
+        # private worktree paths or arbitrary task content.
+        import re
+        queue_sample = []
+        for row in con.execute(
+            "SELECT task_id,repository,issue_number,fencing_required,lease_generation "
+            "FROM tasks WHERE state='queued' ORDER BY rowid LIMIT 5"
+        ):
+            task_id = str(row["task_id"])
+            repo = str(row["repository"])
+            if (not re.fullmatch(r"cwp-[a-f0-9]{24}", task_id) or
+                    not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)):
+                return {**result, "result": "BLOCKED_QUEUE_IDENTITY"}
+            queue_sample.append({
+                "task_id": task_id, "repository": repo,
+                "issue_number": int(row["issue_number"]),
+                "fencing_required": bool(row["fencing_required"]),
+                "lease_generation": int(row["lease_generation"]),
+            })
+        cutover_row = con.execute(
+            "SELECT enabled FROM pool_control WHERE control_key='fenced_cutover'"
+        ).fetchone()
+        if cutover_row is None or cutover_row["enabled"] not in (0, 1):
+            return {**result, "result": "BLOCKED_CUTOVER_STATE"}
+        cutover = bool(cutover_row["enabled"])
         con.execute("ROLLBACK")
         result.update(
             result="READ_ONLY_QUEUE_AUDIT_OK",
             observed_utc=stamp,
             queue_counts=counts,
+            queued_task_sample=queue_sample,
+            queued_task_sample_truncated=counts["queued"] > len(queue_sample),
+            fenced_cutover_enabled=cutover,
             tasks_total=sum(counts.values()),
             tasks_active_states=sum(counts[s] for s in ACTIVE),
             leases_unexpired=int(active),
