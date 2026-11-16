@@ -94,6 +94,28 @@ class ArchiveReversibleTests(unittest.TestCase):
         self.assertEqual(digest(self.root / "update-transaction.json"), original)
         self.assertFalse(self.archive_path.exists())
 
+    def test_move_reports_error_after_moving_and_still_rolls_back(self):
+        original = digest(self.root / "update-transaction.json")
+        def move_then_raise(source, dest):
+            source.rename(dest)
+            if dest == self.archive_path:
+                raise OSError("simulated Win32 ambiguous return")
+        with self.assertRaisesRegex(archive.RecoveryBlocked,
+                                    "POST_MOVE_FAILED_ROLLED_BACK"):
+            archive.recover(self.root, apply=True, mover=move_then_raise,
+                            helper_loader=FakeMetadata)
+        self.assertEqual(digest(self.root / "update-transaction.json"), original)
+        self.assertFalse(self.archive_path.exists())
+
+    def test_collision_while_replaying_does_not_touch_any_file(self):
+        archive.recover(self.root, apply=True, mover=self.move,
+                        helper_loader=FakeMetadata)
+        (self.root / "update-transaction.json").write_bytes(b"unexpected")
+        with self.assertRaises(archive.RecoveryBlocked):
+            archive.recover(self.root, apply=True, mover=self.move,
+                            helper_loader=FakeMetadata)
+        self.assertTrue(self.archive_path.exists())
+
     def test_destination_collision_blocks_before_any_move(self):
         self.archive_path.write_bytes(b"do-not-overwrite")
         original = digest(self.root / "update-transaction.json")
