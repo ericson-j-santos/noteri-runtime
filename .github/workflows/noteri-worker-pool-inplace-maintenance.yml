@@ -1,0 +1,66 @@
+name: Noteri Worker Pool Maintenance — Approval Evidence Only
+
+# One protected, owner-reviewed run is required before any future physical
+# maintenance capability may rely on its *independently verified* receipt.
+# This workflow intentionally has no physical runner or maintenance step.
+on:
+  workflow_dispatch:
+    inputs:
+      expected_workflow_sha:
+        description: Immutable Noteri main commit that contains this workflow
+        required: true
+        type: string
+      correlation_id:
+        description: Unique non-secret correlation ID for the approval review
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: noteri-worker-pool-inplace-maintenance-review
+  cancel-in-progress: false
+
+jobs:
+  approval-evidence-only:
+    name: Protected owner review — no host access
+    if: >-
+      github.repository == 'ericson-j-santos/noteri-runtime' &&
+      github.ref == 'refs/heads/main' &&
+      github.actor == 'ericson-j-santos' &&
+      github.triggering_actor == 'ericson-j-santos'
+    environment:
+      name: noteri-worker-pool-maintenance-dev
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Reject unpinned or mismatched dispatch
+        shell: bash
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+          REQUESTED_SHA: ${{ inputs.expected_workflow_sha }}
+          CORRELATION_ID: ${{ inputs.correlation_id }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ "$WORKFLOW_SHA" != "$REQUESTED_SHA" ]]; then
+            echo 'NOTERI_APPROVAL_REVIEW_WORKFLOW_SHA_MISMATCH' >&2
+            exit 1
+          fi
+          if [[ ! "$CORRELATION_ID" =~ ^[A-Za-z0-9._:-]{8,128}$ ]]; then
+            echo 'NOTERI_APPROVAL_REVIEW_CORRELATION_INVALID' >&2
+            exit 1
+          fi
+          if [[ "$RUN_ATTEMPT" != '1' ]] || [[ ! "$RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo 'NOTERI_APPROVAL_REVIEW_REPLAY_BLOCKED' >&2
+            exit 1
+          fi
+          echo "NOTERI_REVIEW_EVIDENCE_ONLY run_id=$RUN_ID correlation_id=$CORRELATION_ID"
+      - name: Explicitly refuse physical execution and authorization
+        shell: bash
+        run: |
+          echo 'NOTERI_REVIEW_ONLY: no host, Gateway, token, maintenance, or execution authorization'
+          echo 'A consumer must independently read GitHub run, approvals and environment protections.'
+          echo 'The maintenance SHA remains fd07d0742ad345efe934c7b800145765aaba6462.'
