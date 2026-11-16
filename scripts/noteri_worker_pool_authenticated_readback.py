@@ -13,6 +13,7 @@ import json
 import os
 import socket
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 from scripts import noteri_worker_pool_native_activation as activation
 from scripts import noteri_worker_pool_native_stage as stage
@@ -28,6 +29,54 @@ BASE = {"schema_version": "1", "source_sha": SOURCE_SHA, "result": "BLOCKED",
         "negative_auth_verified": False, "contract_authenticated": False,
         "contract_replay_verified": False, "token_bytes_read": False,
         "token_disclosed": False, "state_changed": False, "activated": False}
+
+
+def xml_difference_fields(raw: bytes, python: Path, runner: Path, user: str) -> list[str]:
+    """Read XML values but reveal ONLY public, bounded field names, never values."""
+    if not raw or len(raw) > 131072:
+        return ["xml_unavailable"]
+    try:
+        try:
+            doc = ET.fromstring(raw)
+        except ET.ParseError:
+            # schtasks.exe can emit UTF-8 content with a UTF-16 declaration.
+            if not (raw.startswith(b'<?xml ') and
+                    b'encoding="UTF-16"' in raw[:128]):
+                return ["xml_parse"]
+            doc = ET.fromstring(raw.replace(
+                b'encoding="UTF-16"', b'encoding="UTF-8"', 1))
+        ns = {"t": activation.NS}
+        def field(path: str) -> str:
+            return doc.findtext(path, default="", namespaces=ns)
+        def expected(path: str, target: str, label: str) -> list[str]:
+            return [] if field(path) == target else [label]
+        differences = []
+        observed_user = field("t:Principals/t:Principal/t:UserId")
+        # Avoid showing a SID, account name, or normalized principal value.
+        user_matches = observed_user.casefold() == user.casefold()
+        if observed_user and not user_matches:
+            try:
+                expected_sid = activation.account_sid(user)
+                user_matches = (observed_user == expected_sid
+                                or activation.account_sid(observed_user) == expected_sid)
+            except Exception:
+                pass
+        if not user_matches:
+            differences.append("principal")
+        for path, value, label in (
+            ("t:Principals/t:Principal/t:LogonType", "S4U", "logon_type"),
+            ("t:Principals/t:Principal/t:RunLevel", "LeastPrivilege", "run_level"),
+            ("t:Triggers/t:BootTrigger/t:Enabled", "true", "boot_trigger"),
+            ("t:Settings/t:Enabled", "true", "task_enabled"),
+            ("t:Actions/t:Exec/t:Command", str(python), "action_path"),
+            ("t:Actions/t:Exec/t:Arguments", f'-B "{runner}"', "action_arguments"),
+            ("t:Actions/t:Exec/t:WorkingDirectory", str(runner.parent),
+             "action_working_directory"),
+        ):
+            differences.extend(expected(path, value, label))
+        return sorted(set(differences))
+    except (ET.ParseError, ValueError, TypeError, OSError):
+        return ["xml_parse"]
 
 
 def _fail(result: dict, reason: str) -> dict:
@@ -103,6 +152,8 @@ def attest(*, local: Path, host: str, platform: str, user: str) -> dict:
             return _fail(result, "BLOCKED_TASK_COM")
         result["task_com_verified"] = True
         if not xml_matches:
+            result["xml_difference_fields"] = xml_difference_fields(
+                task.stdout, python, runner, user_id)
             return _fail(result, "BLOCKED_TASK_XML")
         result["task_s4u_verified"] = True
         if not activation.listener_owned_by_task(python, runner):
