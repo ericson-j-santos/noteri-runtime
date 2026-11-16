@@ -276,8 +276,12 @@ def test_adapter_never_starts_service_or_chooses_arbitrary_execution():
     assert "workflow_dispatch" not in data
     assert "git push" not in data
     assert "register_worker" not in data
-    assert "claim_exact(" not in data
-    assert "claim_fenced_exact(" not in data
+    # The proxy MUST expose a rejecting legacy method while still refusing
+    # to forward legacy claims to the underlying transport.
+    assert "def claim_exact(" in data
+    assert "pin_legacy_claim_forbidden" in data
+    assert "_transport.claim_exact(" not in data
+    assert "_transport.claim_fenced_exact(" in data
     assert "subprocess.run" not in data
 
 
