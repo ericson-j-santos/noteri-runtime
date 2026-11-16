@@ -1,0 +1,297 @@
+"""Noteri registered-task maintenance contracts: backup/rollback in isolated fixtures.
+
+NO real Task Scheduler, token, service stop, Qwen, Worker Pool claim or deploy.
+"""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import types
+from pathlib import Path
+
+import pytest
+
+from scripts import noteri_worker_pool_inplace_maintenance as m
+
+SHA = "a" * 40
+XML = b"<Task>private-synthetic-owner</Task>"
+OLD = b"RULES_SHA = '" + b"0" * 40 + b"'\n"
+NEW = b"RULES_SHA = '" + b"f" * 40 + b"'\n"
+
+
+def plan_fixture(tmp_path):
+    work = tmp_path / "work"
+    runtime = tmp_path / "ReqSys" / "NoteriWorkerPool"
+    installed = runtime / "bin" / m.RUNNER
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(OLD)
+    release = runtime / "releases" / "old"
+    pycache = release / m.cache.CACHE_RELATIVE
+    pycache.parent.mkdir(parents=True)
+    pycache.write_bytes(importlib.util.MAGIC_NUMBER + b"cache-test")
+    (release / "manifest.json").write_text('{"files":{}}')
+    quarantine = runtime / "quarantine" / "old"
+    quarantine.parent.mkdir(parents=True)
+    maintenance = runtime / "maintenance"
+    source = runtime / "data" / "pool.db"
+    source.parent.mkdir(parents=True)
+    db = sqlite3.connect(source)
+    db.execute("CREATE TABLE data (id INTEGER PRIMARY KEY, value TEXT)")
+    db.execute("INSERT INTO data VALUES (1, 'before')")
+    db.commit()
+    db.close()
+    work.mkdir()
+    selected = {
+        "runtime": runtime, "release": release, "runner": installed,
+        "database": source, "quarantine": quarantine, "maintenance": maintenance,
+        "token": runtime / "credentials" / "api-token.txt",
+        "python": runtime / "venvs" / "python.exe",
+    }
+    return {"paths": selected, "old_runner": OLD, "new_runner": NEW,
+            "old_sha": m.sha(OLD), "new_sha": m.sha(NEW), "xml": XML,
+            "code_sha": SHA}
+
+
+def allow(monkeypatch):
+    monkeypatch.setenv("NOTERI_POOL_MAINTENANCE_APPROVED_SHA", SHA)
+
+
+def simulate(monkeypatch, tmp_path, *, failure=None):
+    proof = plan_fixture(tmp_path)
+    events = []
+    stopped = [False]
+    monkeypatch.setattr(m, "preflight", lambda **_: proof)
+    monkeypatch.setattr(m, "queue_safe", lambda _: {"workers": 0})
+    monkeypatch.setattr(m.activation, "listener_owned_by_task", lambda *_: True)
+    monkeypatch.setattr(m, "_zero_instances", lambda _: stopped[0])
+    monkeypatch.setattr(m, "_task_xml_stable", lambda xml:
+                        events.append(("xml", m.sha(xml))))
+    def stop(_):
+        events.append(("stop",))
+        stopped[0] = True
+        if failure == "stop":
+            raise m.MaintenanceBlocked("stop_failed_test")
+    def start(_, paths):
+        events.append(("start",))
+        if failure == "start":
+            raise m.MaintenanceBlocked("api_failed_test")
+        stopped[0] = False
+    monkeypatch.setattr(m, "_stop", stop)
+    monkeypatch.setattr(m, "_start", start)
+    monkeypatch.setattr(m, "_atomic_runner", lambda path, data:
+                        (events.append(("replace", m.sha(data))),
+                         path.write_bytes(data)))
+    def quarantine(paths):
+        events.append(("quarantine",))
+        dest = paths["quarantine"]
+        dest.mkdir()
+        src = paths["release"] / m.cache.CACHE_RELATIVE
+        src.rename(dest / (src.name + "." + m.CACHE_SHA256 + ".quarantined"))
+        return m.CACHE_SHA256
+    monkeypatch.setattr(m, "_quarantine", quarantine)
+    monkeypatch.setattr(m.cache, "_backups", lambda folder: [(
+        folder / ("secure_file.cpython-314.pyc." + m.CACHE_SHA256 + ".quarantined"),
+        m.CACHE_SHA256,
+    )])
+    allow(monkeypatch)
+    return proof, events
+
+
+def test_no_approval_never_reaches_preflight(tmp_path, monkeypatch):
+    called = []
+    monkeypatch.delenv("NOTERI_POOL_MAINTENANCE_APPROVED_SHA", raising=False)
+    monkeypatch.setattr(m, "preflight", lambda **_:
+                        called.append("bad") or (_ for _ in ()).throw(
+                            AssertionError("not called")))
+    with pytest.raises(m.MaintenanceBlocked, match="new_sha_authorization_required"):
+        m.apply(local=tmp_path, expected_sha=SHA, confirm=m.CONFIRM)
+    assert called == []
+
+
+@pytest.mark.parametrize("bad", ["", "authorize", "MAINTAIN-OTHER", "MAINTAIN-*"])
+def test_wrong_confirmation_fails_closed(tmp_path, monkeypatch, bad):
+    allow(monkeypatch)
+    with pytest.raises(m.MaintenanceBlocked, match="new_sha_authorization_required"):
+        m.apply(local=tmp_path, expected_sha=SHA, confirm=bad)
+
+
+def test_real_sqlite_backup_includes_committed_wal_records(tmp_path):
+    src, dest = tmp_path / "pool.db", tmp_path / "backup.db"
+    writer = sqlite3.connect(src)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("CREATE TABLE activity (name TEXT)")
+    writer.commit()
+    writer.execute("INSERT INTO activity VALUES ('persisted-in-wal')")
+    writer.commit()
+    assert Path(str(src) + "-wal").is_file()
+    signature = m.sqlite_consistent_backup(src, dest)
+    with sqlite3.connect(dest) as read:
+        assert read.execute("SELECT name FROM activity").fetchone() == (
+            "persisted-in-wal",)
+        assert read.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert signature == m.sha(dest.read_bytes())
+    assert writer.execute("SELECT count(*) FROM activity").fetchone() == (1,)
+    writer.close()
+
+
+def test_sqlite_backup_refuses_existing_backup(tmp_path):
+    src, dest = tmp_path / "pool.db", tmp_path / "backup.db"
+    sqlite3.connect(src).close()
+    dest.write_bytes(b"keep-this")
+    with pytest.raises(m.MaintenanceBlocked, match="backup_collision"):
+        m.sqlite_consistent_backup(src, dest)
+    assert dest.read_bytes() == b"keep-this"
+
+
+def test_exact_registration_stopped_means_com_zero_and_port_absent(
+    tmp_path, monkeypatch,
+):
+    real_client = types.ModuleType("win32com.client")
+    class Count:
+        def __init__(self, count):
+            self.Count = count
+    class Task:
+        def GetInstances(self, _):
+            return Count(0)
+    class Folder:
+        def GetTask(self, name):
+            assert name == "NoteriWorkerPoolApi"
+            return Task()
+    class Service:
+        def Connect(self):
+            pass
+        def GetFolder(self, name):
+            assert name == r"\Automation"
+            return Folder()
+    real_client.Dispatch = lambda name: Service()
+    win32com = types.ModuleType("win32com")
+    win32com.client = real_client
+    monkeypatch.setitem(sys.modules, "win32com", win32com)
+    monkeypatch.setitem(sys.modules, "win32com.client", real_client)
+    monkeypatch.setattr(m.venv, "_paths", lambda p: (
+        tmp_path, tmp_path / "release", tmp_path / "venv"))
+    monkeypatch.setattr(m.control, "verify", lambda p: True)
+    monkeypatch.setattr(m.site, "addsitedir", lambda p: None)
+    monkeypatch.setattr(m.activation, "listener_absent", lambda: True)
+    assert m.stopped_task_registered(tmp_path) is True
+    monkeypatch.setattr(m.activation, "listener_absent", lambda: False)
+    assert m.stopped_task_registered(tmp_path) is False
+
+
+def test_task_status_unknown_cannot_attest_stopped(tmp_path, monkeypatch):
+    monkeypatch.setattr(m.control, "verify", lambda p: False)
+    monkeypatch.setattr(m.venv, "_paths", lambda p: (
+        tmp_path, tmp_path, tmp_path))
+    assert m.stopped_task_registered(tmp_path) is False
+
+
+def test_transaction_commits_only_after_backup_stop_quarantine_and_readback(
+    tmp_path, monkeypatch,
+):
+    proof, events = simulate(monkeypatch, tmp_path)
+    result = m.apply(local=tmp_path, expected_sha=SHA, confirm=m.CONFIRM)
+    assert result["result"] == "INPLACE_MAINTENANCE_VERIFIED"
+    assert result["api_authenticated"] is True
+    assert proof["paths"]["runner"].read_bytes() == NEW
+    assert events.index(("stop",)) < events.index(("quarantine",))
+    assert events.index(("quarantine",)) < events.index(("replace", m.sha(NEW)))
+    assert events.index(("replace", m.sha(NEW))) < events.index(("start",))
+    backups = proof["paths"]["maintenance"] / SHA
+    assert (backups / "runner-before.py").read_bytes() == OLD
+    assert (backups / "task-before.xml").read_bytes() == XML
+    assert (backups / "pool-consistent.db").is_file()
+    assert result["sqlite_backup_sha256"] == m.sha(
+        (backups / "pool-consistent.db").read_bytes())
+    assert not (proof["paths"]["maintenance"] /
+                ".maintenance-exclusive.lock").exists()
+
+
+def test_fail_before_stop_preserves_runner_and_does_not_claim_success(
+    tmp_path, monkeypatch,
+):
+    proof, events = simulate(monkeypatch, tmp_path)
+    monkeypatch.setattr(m, "_backup_before_stop", lambda *_:
+                        (_ for _ in ()).throw(m.MaintenanceBlocked("backup_failed")))
+    result = m.apply(local=tmp_path, expected_sha=SHA, confirm=m.CONFIRM)
+    assert result["result"] != "INPLACE_MAINTENANCE_VERIFIED"
+    assert proof["paths"]["runner"].read_bytes() == OLD
+    assert ("stop",) not in events
+
+
+def test_failed_restart_requires_rollback_before_completion(tmp_path, monkeypatch):
+    proof, events = simulate(monkeypatch, tmp_path, failure="start")
+    called = []
+    monkeypatch.setattr(m, "_safe_rollback", lambda *a, **k:
+                        called.append(k) or False)
+    result = m.apply(local=tmp_path, expected_sha=SHA, confirm=m.CONFIRM)
+    assert result["result"] == "MAINTENANCE_BLOCKED_RECONCILE"
+    assert result["rollback_verified"] is False
+    assert called
+    assert proof["paths"]["runner"].read_bytes() == NEW
+    # An ambiguous state must preserve the backup/maintenance lock for review.
+    assert (proof["paths"]["maintenance"] / SHA / "runner-before.py").exists()
+
+
+def test_quarantine_refuses_unsafe_release(tmp_path, monkeypatch):
+    proof = plan_fixture(tmp_path)
+    paths = proof["paths"]
+    monkeypatch.setattr(m.stage, "validate_staged", lambda *_: False)
+    monkeypatch.setattr(m.stage, "file_sha256", lambda p:
+                        m.CACHE_SHA256 if p.name.endswith(".pyc")
+                        or p.name.endswith(".quarantined") else m.sha(p.read_bytes()))
+    with pytest.raises(m.MaintenanceBlocked):
+        # Source in fixture lacks the known digest; source is never moved.
+        m._quarantine(paths)
+    assert (paths["release"] / m.cache.CACHE_RELATIVE).is_file()
+
+
+def test_real_runner_atomic_replace_rejects_acl_change_before_replace(
+    tmp_path, monkeypatch,
+):
+    runner = tmp_path / "runner.py"
+    runner.write_bytes(OLD)
+    def acl(path):
+        return b"first" if path == runner else b"changed"
+    monkeypatch.setattr(m, "_acl", acl)
+    with pytest.raises(m.MaintenanceBlocked, match="runner_acl_would_change"):
+        m._atomic_runner(runner, NEW)
+    assert runner.read_bytes() == OLD
+    assert not runner.with_name(runner.name + ".maintenance-stage").exists()
+
+
+def test_runner_replace_success_preserves_identical_acl(tmp_path, monkeypatch):
+    runner = tmp_path / "runner.py"
+    runner.write_bytes(OLD)
+    monkeypatch.setattr(m, "_acl", lambda path: b"same-acl")
+    m._atomic_runner(runner, NEW)
+    assert runner.read_bytes() == NEW
+    assert not runner.with_name(runner.name + ".maintenance-stage").exists()
+
+
+def test_backup_before_stop_never_overwrites_existing_evidence(tmp_path):
+    proof = plan_fixture(tmp_path)
+    folder = proof["paths"]["maintenance"] / SHA
+    folder.mkdir(parents=True)
+    (folder / "runner-before.py").write_bytes(b"original")
+    with pytest.raises(m.MaintenanceBlocked, match="maintenance_backup_collision"):
+        m._backup_before_stop(proof, folder)
+    assert (folder / "runner-before.py").read_bytes() == b"original"
+
+
+def test_no_task_deletion_or_privilege_change_in_source():
+    data = Path(m.__file__).read_text(encoding="utf-8")
+    assert '"/Delete"' not in data
+    assert "/Create" not in data
+    assert "runas" not in data.lower()
+    assert "ShellExecute" not in data
+    assert "register_worker" not in data
+    assert "claim_exact" not in data
+    assert "UPDATE tasks" not in data
+    assert "DELETE FROM" not in data
+    assert "sqlite3.connect" in data
+    assert ".backup(" in data
+    assert "/End" in data and "/Run" in data
