@@ -123,7 +123,7 @@ class RecoveryTests(unittest.TestCase):
                 returncode=0, stderr=b"", stdout=b"",
             )
         ), patch.object(m, "_probe", return_value=(self.source, b"warning")):
-            with self.assertRaisesRegex(m.Blocked, "POSTMOVE_DIRECTORY_MISMATCH"):
+            with self.assertRaisesRegex(m.Blocked, "SOURCE_NOT_EMPTY_OR_CHANGED"):
                 m.recover_with_authority(**self.call)
         # The temporary data remains in its original directory (rollback);
         # recovery must never delete unknown files.
