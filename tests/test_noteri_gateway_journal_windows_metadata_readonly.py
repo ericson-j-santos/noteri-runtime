@@ -128,6 +128,36 @@ class MetadataAuditTests(unittest.TestCase):
             str(p): digest(p) for p in self.root.rglob("*") if p.is_file()
         })
 
+    def test_new_file_missing_from_old_backup_is_accepted_without_ads(self):
+        path = self.backups[1] / "rollback-manifest.json"
+        record = json.loads(path.read_text(encoding="utf-8"))
+        item = record["entries"]["bin/command_gateway.py"]
+        item.update({
+            "existed": False, "previous_sha256": None,
+            "previous_size": None, "previous_windows_state": None,
+        })
+        path.write_text(json.dumps(record), encoding="utf-8")
+        (self.backups[1] / "files" / "bin" / "command_gateway.py").unlink()
+        with mock.patch.object(audit, "RECEIPT_MANIFEST_HASH", digest(path)):
+            out = audit.inspect(self.root, helper_loader=FakeMetadata)
+        self.assertEqual(out["rollback_current"]["new_files_without_ads"], 1)
+        self.assertFalse(out["journal_move_authorized"])
+
+    def test_alternate_stream_on_new_file_fails_closed(self):
+        class MetadataWithStream(FakeMetadata):
+            def _windows_persisted_file_state(self, path):
+                value = super()._windows_persisted_file_state(path)
+                value["streams"] = [{"name": ":unexpected:$DATA", "size": 0,
+                                     "sha256": "0" * 64}]
+                return value
+
+        with self.assertRaisesRegex(audit.Blocked,
+                                    "NEW_FILE_HAS_ALTERNATE_DATA_STREAMS"):
+            audit._validate_file_security(
+                MetadataWithStream(), self.root / "bin" / "command_gateway.py",
+                expected=None, require_no_streams=True,
+            )
+
     def test_persisted_acl_mismatch_fails_closed(self):
         changed = self.backups[0] / "rollback-manifest.json"
         value = json.loads(changed.read_text(encoding="utf-8"))
