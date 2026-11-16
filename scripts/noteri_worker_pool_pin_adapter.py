@@ -278,7 +278,7 @@ class NoteriRulesPinAdapter:
                     and git(root, "rev-parse", "HEAD") == self.binding.base_sha
                     and git(root, "status", "--porcelain", "--untracked-files=all") == "",
                     "pin_git_boundary")
-            require(pin.canonical_rules_sha() == self.binding.canonical_sha,
+            require(pin.current_rules_sha() == self.binding.canonical_sha,
                     "pin_canonical_changed")
             outcome = self.model(before, self.binding.canonical_sha)
             require(type(outcome) is dict
@@ -333,7 +333,7 @@ class NoteriRulesPinAdapter:
             require(after == check_source(self.original,
                                           self.binding.canonical_sha),
                     "pin_validator_not_exact")
-            require(pin.canonical_rules_sha() == self.binding.canonical_sha,
+            require(pin.current_rules_sha() == self.binding.canonical_sha,
                     "pin_canonical_changed")
             clean_git_configuration(root)
             require(git(root, "remote") == ""
