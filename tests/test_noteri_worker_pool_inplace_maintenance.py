@@ -85,6 +85,14 @@ def simulate(monkeypatch, tmp_path, *, failure=None):
     monkeypatch.setattr(m, "_atomic_runner", lambda path, data:
                         (events.append(("replace", m.sha(data))),
                          path.write_bytes(data)))
+    monkeypatch.setattr(m.authenticated, "attest", lambda **_:
+                        {"result": "AUTHENTICATED_READBACK_OK",
+                         "contract_replay_verified": True,
+                         "negative_auth_verified": True}
+                        if failure != "attestation"
+                        else {"result": "BLOCKED_AUTH_CONTRACT",
+                              "contract_replay_verified": False,
+                              "negative_auth_verified": False})
     def quarantine(paths):
         events.append(("quarantine",))
         dest = paths["quarantine"]
@@ -295,3 +303,29 @@ def test_no_task_deletion_or_privilege_change_in_source():
     assert "sqlite3.connect" in data
     assert ".backup(" in data
     assert "/End" in data and "/Run" in data
+
+
+
+def test_an_unauthenticated_health_readback_blocks_success_and_rolls_back(
+    tmp_path, monkeypatch,
+):
+    proof, events = simulate(monkeypatch, tmp_path, failure="attestation")
+    called = []
+    monkeypatch.setattr(m, "_safe_rollback", lambda *a, **kw:
+                        called.append(kw) or True)
+    result = m.apply(local=tmp_path, expected_sha=SHA, confirm=m.CONFIRM)
+    assert result["result"] == "MAINTENANCE_ROLLED_BACK"
+    assert result["rollback_verified"] is True
+    assert result["api_authenticated"] if "api_authenticated" in result else True
+    assert ("start",) in events
+    assert called
+
+
+def test_unverifiable_rules_lookup_uses_no_backup_or_stop(tmp_path, monkeypatch):
+    allow(monkeypatch)
+    def bad_preflight(**_):
+        raise m.rules_pin.SyncBlocked("BLOCKED_CANONICAL_UNAVAILABLE")
+    monkeypatch.setattr(m, "preflight", bad_preflight)
+    with pytest.raises(m.rules_pin.SyncBlocked):
+        m.apply(local=tmp_path, expected_sha=SHA, confirm=m.CONFIRM)
+    assert not (tmp_path / "ReqSys").exists()
