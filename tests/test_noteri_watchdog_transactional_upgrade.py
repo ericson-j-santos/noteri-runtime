@@ -242,3 +242,15 @@ def test_restore_validates_real_unicode_task_definition(monkeypatch,tmp_path):
     assert calls[0][-1]==2
     assert metadata.read_bytes()==old_metadata
 
+
+
+def test_safe_failure_reason_preserves_codes_but_not_windows_paths():
+    import subprocess
+    assert m.safe_failure_reason(m.UpgradeBlocked("SOURCE_REDIRECTED")) == "SOURCE_REDIRECTED"
+    assert m.safe_failure_reason(RuntimeError("pywin32 indisponível")) == "PYWIN32_UNAVAILABLE"
+    assert m.safe_failure_reason(subprocess.CalledProcessError(1, ["git"])) == "SOURCE_GIT_COMMAND_FAILED"
+    assert m.safe_failure_reason(subprocess.TimeoutExpired(["git"], 5)) == "SOURCE_GIT_TIMEOUT"
+    assert m.safe_failure_reason(ImportError("win32com private path")) == "RUNTIME_IMPORT_BLOCKED"
+    assert m.safe_failure_reason(PermissionError("C:/Users/private/token")) == "RUNTIME_PERMISSION_BLOCKED"
+    assert m.safe_failure_reason(OSError("C:/Users/private/token")) == "UNCLASSIFIED_UPGRADE_BLOCKED"
+    assert m.safe_failure_reason(m.UpgradeBlocked("C:/Users/private/token")) == "UNCLASSIFIED_UPGRADE_BLOCKED"

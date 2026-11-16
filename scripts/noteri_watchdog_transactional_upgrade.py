@@ -310,6 +310,26 @@ class WindowsAdapter:
                        Path(json.loads(saved.metadata)["runner_home"]))
 
 
+def safe_failure_reason(exc: BaseException) -> str:
+    """Normaliza excecoes para codigos sem caminhos, credenciais ou mensagem livre."""
+    description = str(exc).strip()
+    if isinstance(exc, UpgradeBlocked) and re.fullmatch(r"[A-Z][A-Z0-9_]{2,80}", description):
+        return description
+    if isinstance(exc, RuntimeError) and description == "pywin32 indisponível":
+        return "PYWIN32_UNAVAILABLE"
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "SOURCE_GIT_TIMEOUT"
+    if isinstance(exc, subprocess.CalledProcessError):
+        return "SOURCE_GIT_COMMAND_FAILED"
+    if isinstance(exc, ImportError):
+        return "RUNTIME_IMPORT_BLOCKED"
+    if isinstance(exc, PermissionError):
+        return "RUNTIME_PERMISSION_BLOCKED"
+    if isinstance(exc, FileNotFoundError):
+        return "RUNTIME_FILE_MISSING"
+    return "UNCLASSIFIED_UPGRADE_BLOCKED"
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--repo-root", type=Path, required=True)
@@ -329,8 +349,10 @@ def main() -> int:
                           confirm=args.confirm)
         print(json.dumps(result, sort_keys=True))
         return 0
-    except (UpgradeBlocked, OSError, ValueError, KeyError, RuntimeError) as exc:
-        print(json.dumps({"result": "BLOCKED", "reason": str(exc)[:190],
+    except (UpgradeBlocked, OSError, ValueError, KeyError, RuntimeError,
+            subprocess.SubprocessError, ImportError, TypeError, AttributeError) as exc:
+        # Nunca repassar traceback ou caminho do Windows pela resposta do Gateway.
+        print(json.dumps({"result": "BLOCKED", "reason": safe_failure_reason(exc),
                           "state_verified": False, "production_touched": False}))
         return 2
 
