@@ -135,7 +135,7 @@ class JournalBindingTests(unittest.TestCase):
             audit.inspect(self.root)
 
     def test_backup_outside_fixed_root_blocked(self):
-        self.journal["backup_dir"] = str(self.root.parent / "backup-20261116-020000-" + "c" * 32)
+        self.journal["backup_dir"] = str(self.root.parent / ("backup-20261116-020000-" + "c" * 32))
         self.write_state()
         with self.assertRaisesRegex(audit.Blocked, "BACKUP_REFERENCE_OUTSIDE_INSTALL_ROOT"):
             audit.inspect(self.root)
