@@ -189,3 +189,24 @@ def test_probe_has_no_cli_token_or_arbitrary_urls():
     assert ".unlink(" not in text
     assert "/v1/contract" in text
     assert "invalid-attestation-control" in text
+
+
+def test_task_com_mismatch_outputs_only_allowlisted_field_names(tmp_path, monkeypatch):
+    local, secure, cache, token = prepare(tmp_path, monkeypatch)
+    monkeypatch.setattr(activation, "task_com_mismatches",
+                        lambda *_: ["action_path", "principal", "private://do-not-log"])
+    result = run(local)
+    assert result["result"] == "BLOCKED_TASK_COM"
+    assert result["task_difference_fields"] == ["action_path", "other", "principal"]
+    assert secure.opened is False
+    assert result["token_bytes_read"] is False
+    assert "private://do-not-log" not in json.dumps(result)
+
+
+def test_xml_mismatch_with_matching_com_still_blocks_secret(tmp_path, monkeypatch):
+    local, secure, cache, token = prepare(tmp_path, monkeypatch)
+    monkeypatch.setattr(activation, "task_matches", lambda *_: False)
+    result = run(local)
+    assert result["result"] == "BLOCKED_TASK_XML"
+    assert result["task_com_verified"] is True
+    assert secure.opened is False
