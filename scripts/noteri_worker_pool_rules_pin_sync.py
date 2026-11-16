@@ -68,6 +68,56 @@ def canonical_rules_sha(*, opener=None) -> str:
         raise SyncBlocked("BLOCKED_CANONICAL_UNAVAILABLE") from None
 
 
+RULES_GIT_REMOTE = "https://github.com/ericson-j-santos/chatgpt-operational-rules.git"
+RULES_MAIN_REF = "refs/heads/main"
+
+
+def canonical_rules_sha_git() -> str:
+    """Bounded anonymous read of the SAME canonical public GitHub branch.
+
+    Git's public smart-HTTP endpoint avoids the unauthenticated REST quota.
+    This is not a cache or a stale hardcoded fallback; both transports retrieve
+    today's remote ref. A wrong/absent ref or any network error stays blocked.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-c", "http.followRedirects=false",
+             "ls-remote", "--exit-code", RULES_GIT_REMOTE, RULES_MAIN_REF],
+            capture_output=True, text=True, timeout=12, check=False,
+            env={
+                "PATH": os.environ.get("PATH", os.defpath),
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_SYSTEM": os.devnull,
+                "GIT_ASKPASS": os.devnull,
+            },
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise SyncBlocked("BLOCKED_CANONICAL_UNAVAILABLE") from None
+    rows = result.stdout.splitlines()
+    if (result.returncode != 0 or len(rows) != 1
+            or len(result.stdout) > 120):
+        raise SyncBlocked("BLOCKED_CANONICAL_UNAVAILABLE")
+    parts = rows[0].split("\t")
+    if len(parts) != 2 or parts[1] != RULES_MAIN_REF:
+        raise SyncBlocked("BLOCKED_CANONICAL_RESPONSE")
+    return verified_sha(parts[0])
+
+
+def current_rules_sha() -> str:
+    """Read REST first; only an unavailable REST channel may use live Git.
+
+    Invalid origin/payload/identity NEVER falls back to an alternative.
+    Neither source uses user-input URLs, secrets or an approved stale SHA.
+    """
+    try:
+        return canonical_rules_sha()
+    except SyncBlocked as error:
+        if str(error) != "BLOCKED_CANONICAL_UNAVAILABLE":
+            raise
+        return canonical_rules_sha_git()
+
+
 def pinned_sha(source: str) -> str:
     try:
         tree = ast.parse(source)
@@ -236,7 +286,7 @@ def main() -> int:
     # may supply an arbitrary root, remote, target file, or rules SHA.
     repo = Path(__file__).resolve().parents[1]
     try:
-        canonical = canonical_rules_sha()
+        canonical = current_rules_sha()
         result = sync(repo=repo, canonical=canonical, mode=args.mode,
                       expected_head=args.expected_head, confirm=args.confirm)
         ok = (args.mode != "check" or not result["change_required"]) and result["result"] in {
