@@ -220,53 +220,7 @@ jobs:
             throw 'NOTERI_WATCHDOG_UPGRADE_TARGET_MISSING'
           }
           $targetDigest = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($targetDigest -notmatch '^[0-9a-f]{64}
-    name: Independent GitHub-hosted inventory receipt readback
-    needs: inventory
-    if: needs.inventory.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    permissions:
-      contents: read
-    env:
-      RECEIPT_B64: ${{ needs.inventory.outputs.receipt_b64 }}
-      RECEIPT_SHA256: ${{ needs.inventory.outputs.receipt_sha256 }}
-      EXPECTED_RULES_SHA: 58dcd4200f412a866278027ba9e433439a03f3b3
-    steps:
-      - name: Validate digest, source identity and non-promoting receipt
-        run: |
-          set -euo pipefail
-          test -n "$RECEIPT_B64"
-          [[ "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          test "${#RECEIPT_B64}" -le 12000
-          observed="$(printf '%s' "$RECEIPT_B64" | base64 --decode | sha256sum | cut -d' ' -f1)"
-          test "$observed" = "$RECEIPT_SHA256"
-          if test "$observed" = "$(printf '%s' tampered | sha256sum | cut -d' ' -f1)"; then
-            echo 'TAMPERED_INVENTORY_RECEIPT_ACCEPTED'
-            exit 2
-          fi
-          printf '%s' "$RECEIPT_B64" | base64 --decode | jq -e \
-            --arg source "$GITHUB_SHA" --arg rules "$EXPECTED_RULES_SHA" '
-            .result == "NOTERI_WATCHDOG_READONLY_INVENTORY" and
-            .source_workflow_sha == $source and .expected_sha == $source and
-            .rules_sha == $rules and .source_sha_verified == true and
-            .state_changed == false and .production_touched == false and
-            .installation_authorized == false and .ready_for_builder == false and
-            (.task_action_verified == false or
-              (.task_action_verified == true and
-               (.installed_release_sha256 | test("^[0-9a-f]{64}$")) and
-               (.task_definition_sha256 | test("^[0-9a-f]{64}$"))))' >/dev/null
-          # Projecao sanitizada para fixar o SHA antigo antes do upgrade.
-          # Nunca publicar metadata, XML, caminhos privados ou credenciais.
-          printf '%s' "$RECEIPT_B64" | base64 --decode | jq -c '{
-            result, correlation_id, expected_sha, installed_source_sha,
-            installed_release_sha256, task_definition_sha256, task_action_verified,
-            installed_attested, live_task_s4u, profile, blocking_reasons,
-            state_changed, production_touched, installation_authorized,
-            ready_for_builder
-          }'
-          echo 'NOTERI_WATCHDOG_INVENTORY_INDEPENDENT_READBACK_OK_NO_INSTALL'
-) {
+          if ($targetDigest -notmatch '^[0-9a-f]{64}$') {
             throw 'NOTERI_WATCHDOG_UPGRADE_TARGET_DIGEST_INVALID'
           }
           $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'

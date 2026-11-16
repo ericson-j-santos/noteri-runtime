@@ -94,3 +94,11 @@ def test_upgrade_preflight_receipt_requires_hosted_independent_readback():
     assert ".state_changed == false" in code
     assert "metadata.json" not in code and "task.xml" not in code
     assert "PREFLIGHT_OK_NOT_AUTHORIZED" in code
+
+
+def test_workflow_structure_does_not_duplicate_jobs_or_split_powershell():
+    raw = WORKFLOW.read_text(encoding="utf-8")
+    assert raw.count("\n  inventory_readback:") == 1
+    assert raw.count("\n  upgrade_preflight_readback:") == 1
+    assert "if ($targetDigest -notmatch '^[0-9a-f]{64}$') {" in raw
+    assert raw.count("NOTERI_WATCHDOG_INVENTORY_INDEPENDENT_READBACK_OK_NO_INSTALL") == 1
