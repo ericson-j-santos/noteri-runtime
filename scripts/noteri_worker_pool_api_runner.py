@@ -13,7 +13,7 @@ from pathlib import Path
 import noteri_worker_pool_native_stage as stage
 
 SOURCE_SHA = "21fd68dec6f0da92b3e7da201463401ac5429d64"
-RULES_SHA = "4e6091a133f8d7d157abe6f83c31ca597812e0a4"
+RULES_SHA = "58dcd4200f412a866278027ba9e433439a03f3b3"
 
 
 def sha256(path: Path) -> str:
