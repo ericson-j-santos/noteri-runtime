@@ -78,14 +78,32 @@ def attest(*, local: Path, host: str, platform: str, user: str) -> dict:
             return _fail(result, "BLOCKED_RUNTIME_PYTHON")
         user_id = f"{host}\\{user}"
         task = activation.schtasks("/Query", "/TN", activation.TASK_NAME, "/XML")
-        if (task.returncode != 0 or len(task.stdout) > 131072 or
-                not activation.task_matches(task.stdout, python, runner, user_id)):
-            return _fail(result, "BLOCKED_TASK_XML")
-        if not control.verify(root / "control" / control.TARGET_NAME):
+        if task.returncode != 0:
+            return _fail(result, "BLOCKED_TASK_QUERY")
+        if len(task.stdout) > 131072:
+            return _fail(result, "BLOCKED_TASK_SIZE")
+        xml_matches = activation.task_matches(task.stdout, python, runner, user_id)
+        package = root / "control" / control.TARGET_NAME
+        if not control.verify(package):
             return _fail(result, "BLOCKED_CONTROL_PACKAGE")
-        if activation.task_com_mismatches(
-                python, runner, user_id, root / "control" / control.TARGET_NAME):
+        task_diffs = activation.task_com_mismatches(python, runner, user_id, package)
+        if task_diffs:
+            permitted = {"principal", "logon_type", "run_level", "boot_trigger",
+                         "boot_delay", "trigger_count", "action_count", "action_path",
+                         "action_arguments", "action_working_directory", "task_path",
+                         "task_enabled", "multiple_instances", "execution_time_limit",
+                         "com_readback"}
+            result["task_difference_fields"] = sorted({
+                v if v in permitted or v.startswith("settings_") and
+                v in ("settings_Enabled", "settings_StartWhenAvailable",
+                      "settings_DisallowStartIfOnBatteries",
+                      "settings_StopIfGoingOnBatteries") else "other"
+                for v in task_diffs
+            })
             return _fail(result, "BLOCKED_TASK_COM")
+        result["task_com_verified"] = True
+        if not xml_matches:
+            return _fail(result, "BLOCKED_TASK_XML")
         result["task_s4u_verified"] = True
         if not activation.listener_owned_by_task(python, runner):
             return _fail(result, "BLOCKED_PROCESS_ATTRIBUTION")
