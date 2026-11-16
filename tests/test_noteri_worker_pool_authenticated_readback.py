@@ -288,3 +288,54 @@ def test_explicit_xml_conflict_never_reuses_protected_token(tmp_path, monkeypatc
     assert result["xml_field_states"]["run_level"] == "different"
     assert secure.opened is False
     assert result["token_bytes_read"] is False
+
+
+
+def test_post_quarantine_release_is_authenticated_only_with_exact_backup(
+    tmp_path, monkeypatch,
+):
+    local, secure, bytecode, token = prepare(tmp_path, monkeypatch)
+    old = bytecode.read_bytes()
+    correct = __import__("hashlib").sha256(old).hexdigest()
+    monkeypatch.setattr(probe.cache, "KNOWN_CACHE_SHA256", correct)
+    destination = local / probe.cache.QUARANTINE_FOLDER
+    destination.mkdir(parents=True)
+    target = destination / (bytecode.name + "." + correct + ".quarantined")
+    bytecode.rename(target)
+    assert target.read_bytes() == old
+    assert stage.validate_staged(
+        local / reference.RELEASES_RELATIVE / probe.SOURCE_SHA,
+        json.loads((local / reference.RELEASES_RELATIVE / probe.SOURCE_SHA /
+                    "manifest.json").read_text()))
+    result = run(local)
+    assert result["result"] == "AUTHENTICATED_READBACK_OK"
+    assert result["contract_replay_verified"] is True
+    assert secure.opened is True
+    assert target.read_bytes() == old
+    assert not bytecode.exists()
+
+
+def test_missing_quarantine_backup_never_unlocks_token(tmp_path, monkeypatch):
+    local, secure, bytecode, _token = prepare(tmp_path, monkeypatch)
+    bytecode.unlink()
+    result = run(local)
+    assert result["result"] == "BLOCKED_QUARANTINE_BACKUP"
+    assert result["token_bytes_read"] is False
+    assert secure.opened is False
+
+
+def test_quarantine_backup_digest_mismatch_blocks_before_token(
+    tmp_path, monkeypatch,
+):
+    local, secure, bytecode, _token = prepare(tmp_path, monkeypatch)
+    correct = __import__("hashlib").sha256(bytecode.read_bytes()).hexdigest()
+    monkeypatch.setattr(probe.cache, "KNOWN_CACHE_SHA256", correct)
+    destination = local / probe.cache.QUARANTINE_FOLDER
+    destination.mkdir(parents=True)
+    target = destination / (bytecode.name + "." + correct + ".quarantined")
+    bytecode.rename(target)
+    target.write_bytes(b"replaced")
+    result = run(local)
+    assert result["result"] == "BLOCKED_QUARANTINE_BACKUP"
+    assert result["token_bytes_read"] is False
+    assert secure.opened is False
