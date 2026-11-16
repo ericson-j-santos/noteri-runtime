@@ -279,3 +279,149 @@ def test_adapter_never_starts_service_or_chooses_arbitrary_execution():
     assert "claim_exact(" not in data
     assert "claim_fenced_exact(" not in data
     assert "subprocess.run" not in data
+
+
+
+class ReadOnlyFencedTransport:
+    def __init__(self, task):
+        self.task = dict(task)
+        self.legacy_claim_calls = 0
+        self.fenced_claim_calls = 0
+        self.lifecycle_calls = []
+
+    def get_task(self, task_id):
+        assert task_id == self.task["task_id"]
+        return dict(self.task)
+
+    def claim_exact(self, *_args, **_kwargs):
+        self.legacy_claim_calls += 1
+        raise AssertionError("legacy claim must never run")
+
+    def claim_fenced_exact(self, worker_id, task_id, correlation_id):
+        self.fenced_claim_calls += 1
+        return {"claimed": False, "task_id": task_id}
+
+    def get_latest_checkpoint(self, *args, **kwargs):
+        self.lifecycle_calls.append("get_latest_checkpoint")
+        return None
+
+    def record_checkpoint(self, *args, **kwargs):
+        self.lifecycle_calls.append("record_checkpoint")
+
+    def start(self, *args, **kwargs):
+        self.lifecycle_calls.append("start")
+
+    def submit_validation(self, *args, **kwargs):
+        self.lifecycle_calls.append("submit_validation")
+
+    def complete(self, *args, **kwargs):
+        self.lifecycle_calls.append("complete")
+
+    def fail(self, *args, **kwargs):
+        self.lifecycle_calls.append("fail")
+
+    def block(self, *args, **kwargs):
+        self.lifecycle_calls.append("block")
+
+
+def test_fenced_proxy_routes_only_to_exact_fenced_claim_without_legacy(tmp_path):
+    _, _, binding = checkout(tmp_path)
+    transport = ReadOnlyFencedTransport(binding.task)
+    proxy = repair.FencedOnlyPinApi(transport, binding)
+    assert proxy.get_task(binding.task_id)["task_id"] == TASK_ID
+    assert proxy.claim_fenced_exact("builder-1", TASK_ID, "issue42-fenced-only") == {
+        "claimed": False, "task_id": TASK_ID,
+    }
+    assert transport.fenced_claim_calls == 1
+    assert transport.legacy_claim_calls == 0
+
+
+@pytest.mark.parametrize("value", [False, 0, "false", None, 2, -1])
+def test_fenced_proxy_never_downgrades_when_live_flag_missing_or_false(tmp_path, value):
+    _, _, binding = checkout(tmp_path)
+    transport = ReadOnlyFencedTransport({
+        **binding.task, "fencing_required": value,
+    })
+    proxy = repair.FencedOnlyPinApi(transport, binding)
+    with pytest.raises(repair.PinAdapterBlocked, match="pin_live_task_not_fenced"):
+        proxy.claim_fenced_exact("builder-1", TASK_ID, "issue42-fenced-only")
+    assert transport.fenced_claim_calls == 0
+    assert transport.legacy_claim_calls == 0
+
+
+def test_fenced_proxy_sqlite_one_allowed_and_legacy_never(tmp_path):
+    _, _, binding = checkout(tmp_path)
+    transport = ReadOnlyFencedTransport({
+        **binding.task, "fencing_required": 1,
+    })
+    proxy = repair.FencedOnlyPinApi(transport, binding)
+    with pytest.raises(repair.PinAdapterBlocked, match="pin_legacy_claim_forbidden"):
+        proxy.claim_exact("builder", TASK_ID, "issue42")
+    assert transport.legacy_claim_calls == 0
+    proxy.claim_fenced_exact("builder", TASK_ID, "issue42")
+    assert transport.fenced_claim_calls == 1
+
+
+@pytest.mark.parametrize("bad", [
+    {"task_id": "cwp-" + "b" * 24},
+    {"repository": "ericson-j-santos/codex-worker-pool-smoke"},
+    {"issue_number": 1914},
+    {"base_sha": "a" * 40},
+])
+def test_fenced_proxy_live_identity_drift_blocks_before_claim(tmp_path, bad):
+    _, _, binding = checkout(tmp_path)
+    transport = ReadOnlyFencedTransport({**binding.task, **bad})
+    proxy = repair.FencedOnlyPinApi(transport, binding)
+    with pytest.raises((AssertionError, repair.PinAdapterBlocked)):
+        proxy.claim_fenced_exact("builder", TASK_ID, "issue42")
+    assert transport.legacy_claim_calls == 0
+    assert transport.fenced_claim_calls == 0
+
+
+@pytest.mark.parametrize("bad", [
+    {"state": "running"},
+    {"state": "completed"},
+    {"leased_by": "another-worker"},
+])
+def test_fenced_proxy_wrong_live_state_blocks_before_claim(tmp_path, bad):
+    _, _, binding = checkout(tmp_path)
+    transport = ReadOnlyFencedTransport({**binding.task, **bad})
+    proxy = repair.FencedOnlyPinApi(transport, binding)
+    with pytest.raises(repair.PinAdapterBlocked, match="pin_task_not_claimable"):
+        proxy.claim_fenced_exact("builder", TASK_ID, "issue42")
+    assert transport.legacy_claim_calls == 0
+    assert transport.fenced_claim_calls == 0
+
+
+@pytest.mark.parametrize("method", [
+    "start", "submit_validation", "complete", "fail", "block",
+    "record_checkpoint", "get_latest_checkpoint",
+])
+def test_fenced_proxy_lifecycle_bound_to_exact_task(tmp_path, method):
+    _, _, binding = checkout(tmp_path)
+    transport = ReadOnlyFencedTransport(binding.task)
+    proxy = repair.FencedOnlyPinApi(transport, binding)
+    with pytest.raises(repair.PinAdapterBlocked, match="pin_wrong_task_id"):
+        getattr(proxy, method)("cwp-" + "c" * 24)
+    assert transport.lifecycle_calls == []
+    getattr(proxy, method)(TASK_ID)
+    assert transport.lifecycle_calls == [method]
+
+
+def test_fenced_proxy_denies_management_and_arbitrary_api(tmp_path):
+    _, _, binding = checkout(tmp_path)
+    transport = ReadOnlyFencedTransport(binding.task)
+    proxy = repair.FencedOnlyPinApi(transport, binding)
+    for attr in ("enqueue_fenced_issue", "register_worker", "_request",
+                 "list_repositories", "close", "_client"):
+        with pytest.raises(AttributeError):
+            getattr(proxy, attr)
+
+
+def test_fenced_proxy_does_not_authenticate_by_constructor(tmp_path):
+    _, _, binding = checkout(tmp_path)
+    with pytest.raises(repair.PinAdapterBlocked, match="pin_preflight_incomplete"):
+        repair.FencedOnlyPinApi(
+            ReadOnlyFencedTransport(binding.task),
+            replace(binding, fenced_cutover_attested=False),
+        )
