@@ -227,10 +227,22 @@ def recover(root: Path = ROOT, *, apply: bool = False,
             }
         except Exception as cause:
             if not moved:
-                raise RecoveryBlocked("MOVE_NOT_COMPLETED_OR_UNKNOWN") from cause
+                # Win32 failures are not proof of no effect. If a mover raised
+                # after changing the filesystem, reconcile the exact pinned
+                # file before attempting any rollback. Unknown states block.
+                if (not os.path.lexists(journal) and os.path.lexists(archive)
+                        and sha256(archive) == metadata.JOURNAL_HASH):
+                    moved = True
+                else:
+                    raise RecoveryBlocked("MOVE_NOT_COMPLETED_OR_UNKNOWN") from cause
             try:
                 require(not os.path.lexists(journal) and os.path.lexists(archive),
                         "ROLLBACK_PREDICATE_FAILED")
+                require(sha256(archive) == metadata.JOURNAL_HASH,
+                        "ROLLBACK_ARCHIVE_PIN_MISMATCH")
+                require(metadata._validate_file_security(helper, archive, None)
+                        == first["journal_windows_metadata_sha256"],
+                        "ROLLBACK_ARCHIVE_SECURITY_CHANGED")
                 mover(archive, journal)
                 require(os.path.lexists(journal) and not os.path.lexists(archive),
                         "ROLLBACK_MOVE_POSTCONDITION_FAILED")
