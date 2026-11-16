@@ -186,3 +186,41 @@ def test_cli_has_only_fixed_mode_confirmation_and_no_generic_path():
     assert "shutil.rmtree" not in script
     assert "os.remove(" not in script
     assert "os.unlink(" not in script
+
+
+@pytest.mark.parametrize("listener,task,expected", [
+    (True, True, True),
+    (False, True, False),
+    (True, False, False),
+    (False, False, False),
+])
+def test_independent_native_idle_probes(listener, task, expected):
+    seen = []
+    result = q.native_idle_status(
+        hostname="Noteri", platform="nt",
+        listener_probe=lambda: seen.append("listener") or listener,
+        task_probe=lambda: seen.append("task") or task)
+    assert seen == ["listener", "task"]
+    assert result["native_listener_absent"] is listener
+    assert result["native_task_absent"] is task
+    assert result["native_idle_attested"] is expected
+
+
+def test_native_probe_errors_fail_closed_and_do_not_skip_other_probe():
+    seen = []
+
+    def unavailable():
+        seen.append("listener")
+        raise OSError("synthetic probe error")
+
+    state = q.native_idle_status(
+        hostname="Noteri", platform="nt", listener_probe=unavailable,
+        task_probe=lambda: seen.append("task") or True)
+    assert seen == ["listener", "task"]
+    assert state == {"native_listener_absent": False,
+                     "native_task_absent": True, "native_idle_attested": False}
+    blocked = q.native_idle_status(
+        hostname="Desktop", platform="nt",
+        listener_probe=lambda: pytest.fail("called on wrong host"),
+        task_probe=lambda: pytest.fail("called on wrong host"))
+    assert blocked["native_idle_attested"] is False
