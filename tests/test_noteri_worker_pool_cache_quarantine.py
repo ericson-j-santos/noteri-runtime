@@ -258,3 +258,71 @@ def test_detailed_service_probe_errors_are_not_treated_as_absence():
             "native_socket_status": "unknown",
             "native_schtasks_status": "unknown",
         }
+
+
+def test_fixed_health_readback_reports_only_known_boolean_fields():
+    from io import BytesIO
+
+    class Response:
+        status = 200
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self, count):
+            assert count == 4097
+            return b'{"service":"codex-worker-pool","status":"healthy","auth_configured":true,"expected_rules_sha_configured":true,"authority_id":"private-never-log"}'
+
+    def read(request, timeout):
+        assert request.full_url == "http://127.0.0.1:8097/health"
+        assert timeout == 2
+        assert request.get_header("Accept") == "application/json"
+        return Response()
+
+    result = q.fixed_health_readback(fetch=read)
+    assert result == {
+        "native_health_http_code": 200,
+        "native_health_state": "healthy",
+        "native_health_label_matches": True,
+        "native_health_authenticated": False,
+        "native_health_auth_configured": True,
+        "native_health_rules_sha_configured": True,
+    }
+    assert "private-never-log" not in json.dumps(result)
+
+
+def test_fixed_health_unready_and_wrong_service_do_not_prove_identity():
+    from io import BytesIO
+    from urllib.error import HTTPError
+
+    def service_unready(request, timeout):
+        raise HTTPError(request.full_url, 503, "unready", {},
+                        BytesIO(b'{"service":"codex-worker-pool","status":"not_ready","auth_configured":false}'))
+
+    result = q.fixed_health_readback(fetch=service_unready)
+    assert result["native_health_http_code"] == 503
+    assert result["native_health_state"] == "not_ready"
+    assert result["native_health_authenticated"] is False
+    assert result["native_health_auth_configured"] is False
+
+    class WrongService:
+        status = 200
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self, count):
+            return b'{"service":"attacker","status":"healthy"}'
+
+    result = q.fixed_health_readback(fetch=lambda *_args, **_kwargs: WrongService())
+    assert result["native_health_state"] == "unverified"
+    assert result["native_health_label_matches"] is False
+    assert result["native_health_authenticated"] is False
+
+
+def test_fixed_health_unreachable_has_no_false_success():
+    from urllib.error import URLError
+    result = q.fixed_health_readback(
+        fetch=lambda *_args, **_kwargs: (_ for _ in ()).throw(URLError("offline")))
+    assert result["native_health_state"] == "unreachable"
+    assert result["native_health_label_matches"] is False
