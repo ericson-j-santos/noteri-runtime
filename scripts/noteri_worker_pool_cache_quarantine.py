@@ -54,6 +54,25 @@ def _exclusive(quarantine: Path):
         lock.unlink(missing_ok=True)
 
 
+def native_idle_status(*, hostname: str, platform: str,
+                       listener_probe: Callable, task_probe: Callable) -> dict:
+    """Independent read-only probes; uncertainty never qualifies as idle."""
+    listener_absent = False
+    task_absent = False
+    if platform == "nt" and hostname.casefold() == "noteri":
+        try:
+            listener_absent = listener_probe() is True
+        except (OSError, ValueError, AttributeError):
+            pass
+        try:
+            task_absent = task_probe() is True
+        except (OSError, ValueError, AttributeError):
+            pass
+    return {"native_listener_absent": listener_absent,
+            "native_task_absent": task_absent,
+            "native_idle_attested": listener_absent and task_absent}
+
+
 def _backups(folder: Path) -> list[tuple[Path, str]]:
     if not folder.exists():
         return []
@@ -213,20 +232,23 @@ def main() -> int:
                 encoding="utf-8")).get("profile")
         except (OSError, ValueError, TypeError):
             profile = None
-        # Only explicitly verified idle native runtimes may have their staged
-        # files moved; a listener or ambiguous scheduled task blocks.
-        inactive = False
-        if socket.gethostname().casefold() == "noteri" and os.name == "nt":
-            from scripts import noteri_worker_pool_native_activation as activation
-            inactive = (activation.listener_absent() and
-                        activation.task_absent(Path(os.environ.get("WINDIR", "C:\\Windows"))))
+        # Both probes are evaluated independently, including if the listener
+        # is present. The readback never changes task, port or privilege state.
+        from scripts import noteri_worker_pool_native_activation as activation
+        native = native_idle_status(
+            hostname=socket.gethostname(), platform=os.name,
+            listener_probe=activation.listener_absent,
+            task_probe=lambda: activation.task_absent(
+                Path(os.environ.get("WINDIR", "C:\\Windows"))))
         source = (root / "ReqSys" / "NoteriRuntimeRunner" / "_work" /
                   "noteri-runtime" / "noteri-runtime" / "_worker_pool")
         release = root / reference.RELEASES_RELATIVE / SOURCE_SHA
         result = operate(source=source, release=release,
                          quarantine=root / QUARANTINE_FOLDER, profile=profile,
                          hostname=socket.gethostname(), platform=os.name,
-                         mode=args.mode, confirm=args.confirm, inactive=inactive)
+                         mode=args.mode, confirm=args.confirm,
+                         inactive=native["native_idle_attested"])
+        result.update(native)
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0 if result["result"] in (
         "QUARANTINE_PLAN_READY", "CACHE_QUARANTINED",
