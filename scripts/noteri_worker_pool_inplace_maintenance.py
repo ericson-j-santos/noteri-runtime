@@ -413,10 +413,30 @@ def _safe_rollback(local: Path, plan: dict, base: Path, *, stopped: bool) -> boo
         paths = plan["paths"]
         if not stopped:
             return False
-        # No second stop attempt here: an uncertain stop must be reconciled,
-        # never retried merely to make the postcondition look successful.
+        runner_backup = checked(base / "runner-before.py").read_bytes()
+        need(sha(runner_backup) == plan["old_sha"], "rollback_backup_drift")
+        installed_hash = stage.file_sha256(paths["runner"])
+        need(installed_hash in {plan["old_sha"], plan["new_sha"]},
+             "rollback_installed_unknown")
+        _task_xml_stable(plan["xml"])
         if not _zero_instances(local):
-            return False
+            # If stop did not succeed and the ORIGINAL service is still
+            # running, do not stop it again. Only declare unchanged state
+            # after independent listener/health/contract attribution.
+            need(activation.listener_owned_by_task(
+                paths["python"], paths["runner"]),
+                "rollback_process_untrusted")
+            if installed_hash == plan["old_sha"]:
+                need(activation.verify_api(
+                    paths["token"], paths["python"], paths["runner"]),
+                    "rollback_original_api_untrusted")
+                _task_xml_stable(plan["xml"])
+                return True
+            # Only the exact authorized candidate can be restarted and then
+            # re-stopped for recovery. No arbitrary process termination or
+            # other Task Scheduler registration is permitted.
+            _stop(local)
+            need(_zero_instances(local), "rollback_stop_unproved")
         original_cache = checked(paths["release"] / cache.CACHE_RELATIVE)
         if original_cache.exists():
             need(stage.file_sha256(original_cache) == CACHE_SHA256,
