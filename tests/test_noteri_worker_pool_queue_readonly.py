@@ -18,11 +18,16 @@ def fixture_db(tmp_path: Path) -> Path:
     path = tmp_path / "pool.db"
     with sqlite3.connect(path) as conn:
         conn.executescript("""
-            CREATE TABLE tasks(state TEXT NOT NULL, leased_by TEXT,
-                               lease_expires_at TEXT);
+            CREATE TABLE tasks(task_id TEXT NOT NULL, repository TEXT NOT NULL,
+                               issue_number INTEGER NOT NULL,
+                               state TEXT NOT NULL, leased_by TEXT,
+                               lease_expires_at TEXT, fencing_required INTEGER NOT NULL DEFAULT 0,
+                               lease_generation INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE task_attempts(ended_at TEXT);
             CREATE TABLE task_checkpoints(effect_state TEXT NOT NULL);
             CREATE TABLE workers(last_heartbeat_at TEXT NOT NULL);
+            CREATE TABLE pool_control(control_key TEXT PRIMARY KEY,enabled INTEGER NOT NULL);
+            INSERT INTO pool_control VALUES('fenced_cutover',0);
         """)
     return path
 
@@ -58,13 +63,18 @@ def test_active_leases_and_stale_attempts_are_distinguished(tmp_path):
     fresh = _stamp(NOW + timedelta(seconds=100))
     expired = _stamp(NOW - timedelta(seconds=100))
     with sqlite3.connect(db) as con:
-        con.executemany("INSERT INTO tasks VALUES (?, ?, ?)", [
-            ("queued", None, None),
-            ("leased", "builder-a", fresh),
-            ("running", "builder-b", expired),
-            ("validating", "validator-c", None),
-            ("completed", None, None),
-            ("blocked", None, None),
+        con.executemany(
+            "INSERT INTO tasks(task_id,repository,issue_number,state,leased_by,lease_expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)", [
+            (f"cwp-{i:024x}", "ericson-j-santos/noteri-runtime", 42, state, who, expires)
+            for i, (state, who, expires) in enumerate([
+                ("queued", None, None),
+                ("leased", "builder-a", fresh),
+                ("running", "builder-b", expired),
+                ("validating", "validator-c", None),
+                ("completed", None, None),
+                ("blocked", None, None),
+            ], 1)
         ])
         con.executemany("INSERT INTO task_attempts VALUES (?)",
                         [(None,), (expired,)])
@@ -78,6 +88,12 @@ def test_active_leases_and_stale_attempts_are_distinguished(tmp_path):
     result = probe.inspect_database(db, now=NOW)
     assert result["result"] == "READ_ONLY_QUEUE_AUDIT_OK"
     assert result["queue_counts"]["queued"] == 1
+    assert result["queued_task_sample"] == [{
+        "task_id": "cwp-000000000000000000000001",
+        "repository": "ericson-j-santos/noteri-runtime",
+        "issue_number": 42, "fencing_required": False, "lease_generation": 0,
+    }]
+    assert result["fenced_cutover_enabled"] is False
     assert result["tasks_active_states"] == 3
     assert result["leases_unexpired"] == 1
     assert result["active_states_expired_or_missing_lease"] == 2
@@ -105,7 +121,9 @@ def test_file_not_found_or_untrusted_schema_fails_closed(tmp_path):
 def test_unrecognized_state_does_not_return_false_no_work(tmp_path):
     db = fixture_db(tmp_path)
     with sqlite3.connect(db) as conn:
-        conn.execute("INSERT INTO tasks VALUES ('private_state', NULL, NULL)")
+        conn.execute("INSERT INTO tasks(task_id,repository,issue_number,state) "
+                     "VALUES ('cwp-000000000000000000000001',"
+                     "'ericson-j-santos/noteri-runtime',42,'private_state')")
     result = probe.inspect_database(db, now=NOW)
     assert result["result"] == "BLOCKED_UNKNOWN_STATE"
     assert result["maintenance_authorized"] is False
@@ -147,3 +165,32 @@ def test_script_never_calls_mutating_snapshot_or_accepts_arbitrary_db_path():
     assert "shutil." not in src
     assert ".write_text(" not in src
     assert ".unlink(" not in src
+
+
+def test_invalid_repository_or_task_identity_never_escapes(tmp_path):
+    db = fixture_db(tmp_path)
+    with sqlite3.connect(db) as con:
+        con.execute(
+            "INSERT INTO tasks(task_id,repository,issue_number,state) "
+            "VALUES ('cwp-000000000000000000000001','private /token',42,'queued')")
+    result = probe.inspect_database(db, now=NOW)
+    assert result["result"] == "BLOCKED_QUEUE_IDENTITY"
+    assert "private /token" not in json.dumps(result)
+
+
+def test_queued_fenced_task_and_cutover_report_are_readonly(tmp_path):
+    db = fixture_db(tmp_path)
+    with sqlite3.connect(db) as con:
+        con.execute("UPDATE pool_control SET enabled=1 WHERE control_key='fenced_cutover'")
+        con.execute(
+            "INSERT INTO tasks(task_id,repository,issue_number,state,fencing_required) "
+            "VALUES ('cwp-000000000000000000000001',"
+            "'ericson-j-santos/engineering-worker-pool',62,'queued',1)")
+    before = _hash(db)
+    result = probe.inspect_database(db, now=NOW)
+    assert result["result"] == "READ_ONLY_QUEUE_AUDIT_OK"
+    assert result["fenced_cutover_enabled"] is True
+    assert result["queued_task_sample"][0]["fencing_required"] is True
+    assert result["queued_task_sample"][0]["issue_number"] == 62
+    assert result["maintenance_authorized"] is False
+    assert before == _hash(db)
