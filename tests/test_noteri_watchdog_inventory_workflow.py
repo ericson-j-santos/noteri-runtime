@@ -54,3 +54,43 @@ def test_separate_readback_never_promotes_host():
     assert "installed_release_sha256, task_definition_sha256, task_action_verified" in step
     assert "jq -c" in step
     assert "metadata.json" not in step and "task.xml" not in step
+
+
+def test_upgrade_preflight_only_readonly_on_exact_branch_sha_and_owner():
+    doc = data()
+    events = doc.get("on", doc.get(True))
+    assert "upgrade-preflight" in events["workflow_dispatch"]["inputs"]["mode"]["options"]
+    inventory = doc["jobs"]["inventory"]
+    gate = inventory["if"]
+    assert "github.actor == 'ericson-j-santos'" in gate
+    assert "contains(github.event.head_commit.message, '[risk1-upgrade-preflight-once]')" in gate
+    assert events["push"]["branches"] == ["fix/noteri-watchdog-transactional-upgrade-20261115"]
+    step = next(s for s in inventory["steps"] if s.get("id") == "upgrade_preflight")
+    assert step["shell"] == "powershell"
+    cmd = step["run"]
+    assert "'--risk', '1'" in cmd
+    assert "SESSION_ID" in cmd and "TARGET_PATH" in cmd
+    assert "noteri_watchdog_transactional_upgrade.py" in cmd
+    assert "'--mode', 'preflight'" in cmd
+    assert "PREFLIGHT_OK_NOT_AUTHORIZED" in cmd
+    assert "installed_source_sha" in cmd and "installed_release_sha256" in cmd
+    assert "task_action_verified -ne $true" in cmd
+    assert "profile -ne 'NORMAL'" in cmd
+    assert "installation_authorized = $false" in cmd
+    assert "state_changed = $false" in cmd
+    for forbidden in ("'--risk', '2'", "'--mode', 'upgrade'", "ShellExecuteW", "Start-Process", "schtasks /Create"):
+        assert forbidden not in cmd
+
+
+def test_upgrade_preflight_receipt_requires_hosted_independent_readback():
+    doc = data()
+    job = doc["jobs"]["upgrade_preflight_readback"]
+    assert job["needs"] == "inventory"
+    assert job["runs-on"] == "ubuntu-latest"
+    code = job["steps"][0]["run"]
+    assert "sha256sum" in code and "jq -e" in code
+    assert ".target_sha == $source" in code
+    assert ".installation_authorized == false" in code
+    assert ".state_changed == false" in code
+    assert "metadata.json" not in code and "task.xml" not in code
+    assert "PREFLIGHT_OK_NOT_AUTHORIZED" in code

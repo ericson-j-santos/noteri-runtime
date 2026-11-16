@@ -6,11 +6,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Executar E2E ou inventario fisico governado somente leitura
+        description: E2E, inventario ou preflight de upgrade sem modificacao
         required: true
         default: e2e
         type: choice
-        options: [e2e, inventory]
+        options: [e2e, inventory, upgrade-preflight]
 
 permissions:
   contents: read
@@ -80,12 +80,14 @@ jobs:
 
   inventory:
     name: Governed Noteri watchdog physical inventory (read only)
-    if: github.actor == 'ericson-j-santos' && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'inventory') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[risk1-inventory-once]')))
+    if: github.actor == 'ericson-j-santos' && ((github.event_name == 'workflow_dispatch' && (inputs.mode == 'inventory' || inputs.mode == 'upgrade-preflight')) || (github.event_name == 'push' && (contains(github.event.head_commit.message, '[risk1-inventory-once]') || contains(github.event.head_commit.message, '[risk1-upgrade-preflight-once]'))))
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 7
     outputs:
       receipt_b64: ${{ steps.inventory.outputs.receipt_b64 }}
       receipt_sha256: ${{ steps.inventory.outputs.receipt_sha256 }}
+      preflight_receipt_b64: ${{ steps.upgrade_preflight.outputs.preflight_receipt_b64 }}
+      preflight_receipt_sha256: ${{ steps.upgrade_preflight.outputs.preflight_receipt_sha256 }}
     env:
       RULES_SHA: 58dcd4200f412a866278027ba9e433439a03f3b3
       CORRELATION_ID: noteri-watchdog-inventory-${{ github.run_id }}-${{ github.run_attempt }}
@@ -190,6 +192,139 @@ jobs:
           "receipt_sha256=$digest" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
           Write-Output 'NOTERI_WATCHDOG_RISK1_INVENTORY_COMPLETE_NON_PROMOTING'
 
+      - name: Preflight exact installed-to-candidate upgrade through existing Risk1 Gateway
+        id: upgrade_preflight
+        if: (github.event_name == 'workflow_dispatch' && inputs.mode == 'upgrade-preflight') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[risk1-upgrade-preflight-once]'))
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+          INVENTORY_RECEIPT_B64: ${{ steps.inventory.outputs.receipt_b64 }}
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $oldSha = 'cc06e6530ca57058db22651ac75d623f6ec921c1'
+          $oldDigest = '090728ba5f52360654cacac6bf44366fb6e03c7016ddea763ce62c425c2f76a0'
+          $inventory = [System.Text.Encoding]::UTF8.GetString(
+            [Convert]::FromBase64String($env:INVENTORY_RECEIPT_B64)) | ConvertFrom-Json
+          if ($inventory.installed_source_sha -ne $oldSha -or
+              $inventory.installed_release_sha256 -ne $oldDigest -or
+              $inventory.task_action_verified -ne $true -or
+              $inventory.live_task_s4u -ne $true -or
+              $inventory.profile -ne 'NORMAL') {
+            throw 'NOTERI_WATCHDOG_UPGRADE_PRECONDITIONS_BLOCKED'
+          }
+          $source = Join-Path $env:TARGET_PATH 'scripts/noteri_control_plane_watchdog.py'
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw 'NOTERI_WATCHDOG_UPGRADE_TARGET_MISSING'
+          }
+          $targetDigest = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($targetDigest -notmatch '^[0-9a-f]{64}
+    name: Independent GitHub-hosted inventory receipt readback
+    needs: inventory
+    if: needs.inventory.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    env:
+      RECEIPT_B64: ${{ needs.inventory.outputs.receipt_b64 }}
+      RECEIPT_SHA256: ${{ needs.inventory.outputs.receipt_sha256 }}
+      EXPECTED_RULES_SHA: 58dcd4200f412a866278027ba9e433439a03f3b3
+    steps:
+      - name: Validate digest, source identity and non-promoting receipt
+        run: |
+          set -euo pipefail
+          test -n "$RECEIPT_B64"
+          [[ "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "${#RECEIPT_B64}" -le 12000
+          observed="$(printf '%s' "$RECEIPT_B64" | base64 --decode | sha256sum | cut -d' ' -f1)"
+          test "$observed" = "$RECEIPT_SHA256"
+          if test "$observed" = "$(printf '%s' tampered | sha256sum | cut -d' ' -f1)"; then
+            echo 'TAMPERED_INVENTORY_RECEIPT_ACCEPTED'
+            exit 2
+          fi
+          printf '%s' "$RECEIPT_B64" | base64 --decode | jq -e \
+            --arg source "$GITHUB_SHA" --arg rules "$EXPECTED_RULES_SHA" '
+            .result == "NOTERI_WATCHDOG_READONLY_INVENTORY" and
+            .source_workflow_sha == $source and .expected_sha == $source and
+            .rules_sha == $rules and .source_sha_verified == true and
+            .state_changed == false and .production_touched == false and
+            .installation_authorized == false and .ready_for_builder == false and
+            (.task_action_verified == false or
+              (.task_action_verified == true and
+               (.installed_release_sha256 | test("^[0-9a-f]{64}$")) and
+               (.task_definition_sha256 | test("^[0-9a-f]{64}$"))))' >/dev/null
+          # Projecao sanitizada para fixar o SHA antigo antes do upgrade.
+          # Nunca publicar metadata, XML, caminhos privados ou credenciais.
+          printf '%s' "$RECEIPT_B64" | base64 --decode | jq -c '{
+            result, correlation_id, expected_sha, installed_source_sha,
+            installed_release_sha256, task_definition_sha256, task_action_verified,
+            installed_attested, live_task_s4u, profile, blocking_reasons,
+            state_changed, production_touched, installation_authorized,
+            ready_for_builder
+          }'
+          echo 'NOTERI_WATCHDOG_INVENTORY_INDEPENDENT_READBACK_OK_NO_INSTALL'
+) {
+            throw 'NOTERI_WATCHDOG_UPGRADE_TARGET_DIGEST_INVALID'
+          }
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $args = @('--policy', (Join-Path $rules 'config/command-gateway.policy.json'),
+            '--correlation-id', $env:CORRELATION_ID,
+            'run', '--cwd', $env:TARGET_PATH,
+            '--session-id', $env:SESSION_ID, '--risk', '1', '--timeout', '45',
+            '--expected-head', $env:GITHUB_SHA, '--',
+            'python3', '-B', (Join-Path $env:TARGET_PATH 'scripts/noteri_watchdog_transactional_upgrade.py'),
+            '--repo-root', $env:TARGET_PATH,
+            '--old-sha', $oldSha, '--old-digest', $oldDigest,
+            '--target-sha', $env:GITHUB_SHA, '--target-digest', $targetDigest,
+            '--correlation-id', $env:CORRELATION_ID, '--mode', 'preflight')
+          $raw = @(& python3 -B (Join-Path $rules 'scripts/command_gateway.py') @args)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) {
+            throw 'NOTERI_WATCHDOG_UPGRADE_PREFLIGHT_GATEWAY_BLOCKED'
+          }
+          $envelope = @($raw)[-1] | ConvertFrom-Json
+          if ($envelope.result -ne 'ok' -or
+              $envelope.gateway_exit_code -ne 0 -or
+              $envelope.command_exit_code -ne 0 -or
+              $envelope.state_changed -ne $false) {
+            throw 'NOTERI_WATCHDOG_UPGRADE_PREFLIGHT_GATEWAY_INVALID'
+          }
+          $report = $envelope.stdout | ConvertFrom-Json
+          if ($report.result -ne 'PREFLIGHT_OK_NOT_AUTHORIZED' -or
+              $report.state_changed -ne $false -or
+              $report.target_sha -ne $env:GITHUB_SHA -or
+              $report.old_sha -ne $oldSha) {
+            throw 'NOTERI_WATCHDOG_UPGRADE_PREFLIGHT_REPORT_INVALID'
+          }
+          $receipt = @{
+            result = $report.result
+            source_workflow_sha = $env:GITHUB_SHA
+            rules_sha = $env:RULES_SHA
+            old_sha = $oldSha
+            old_digest = $oldDigest
+            target_sha = $env:GITHUB_SHA
+            target_digest = $targetDigest
+            profile = $inventory.profile
+            task_action_verified = $true
+            session_gateway_verified = $true
+            state_changed = $false
+            installation_authorized = $false
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            correlation_id = $env:CORRELATION_ID
+          }
+          $json = [string]($receipt | ConvertTo-Json -Compress)
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+          if ($bytes.Length -gt 4096 -or $bytes.Length -lt 150) {
+            throw 'NOTERI_WATCHDOG_UPGRADE_RECEIPT_SIZE_INVALID'
+          }
+          $digest = (Get-FileHash -InputStream ([System.IO.MemoryStream]::new($bytes)) -Algorithm SHA256).Hash.ToLowerInvariant()
+          "preflight_receipt_b64=$([System.Convert]::ToBase64String($bytes))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          "preflight_receipt_sha256=$digest" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          Write-Output 'NOTERI_WATCHDOG_GATEWAY_PREFLIGHT_OK_NO_MUTATION'
+
   inventory_readback:
     name: Independent GitHub-hosted inventory receipt readback
     needs: inventory
@@ -236,3 +371,45 @@ jobs:
             ready_for_builder
           }'
           echo 'NOTERI_WATCHDOG_INVENTORY_INDEPENDENT_READBACK_OK_NO_INSTALL'
+
+  upgrade_preflight_readback:
+    name: Independent non-mutating upgrade-preflight receipt verification
+    needs: inventory
+    if: needs.inventory.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'upgrade-preflight') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[risk1-upgrade-preflight-once]')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    env:
+      PREFLIGHT_B64: ${{ needs.inventory.outputs.preflight_receipt_b64 }}
+      PREFLIGHT_SHA256: ${{ needs.inventory.outputs.preflight_receipt_sha256 }}
+      EXPECTED_RULES_SHA: 58dcd4200f412a866278027ba9e433439a03f3b3
+    steps:
+      - name: Verify exact SHA, digest, session and non-authorization
+        run: |
+          set -euo pipefail
+          test -n "$PREFLIGHT_B64"
+          [[ "$PREFLIGHT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "${#PREFLIGHT_B64}" -le 8192
+          observed="$(printf '%s' "$PREFLIGHT_B64" | base64 --decode | sha256sum | cut -d' ' -f1)"
+          test "$observed" = "$PREFLIGHT_SHA256"
+          printf '%s' "$PREFLIGHT_B64" | base64 --decode | jq -e \
+            --arg source "$GITHUB_SHA" \
+            --arg rules "$EXPECTED_RULES_SHA" \
+            --arg old "cc06e6530ca57058db22651ac75d623f6ec921c1" \
+            --arg olddigest "090728ba5f52360654cacac6bf44366fb6e03c7016ddea763ce62c425c2f76a0" '
+            .result == "PREFLIGHT_OK_NOT_AUTHORIZED" and
+            .source_workflow_sha == $source and
+            .rules_sha == $rules and
+            .target_sha == $source and
+            .old_sha == $old and
+            .old_digest == $olddigest and
+            (.target_digest | test("^[0-9a-f]{64}$")) and
+            .profile == "NORMAL" and
+            .task_action_verified == true and
+            .session_gateway_verified == true and
+            .state_changed == false and
+            .installation_authorized == false and
+            (.run_id | tostring) == env.GITHUB_RUN_ID and
+            (.run_attempt | tostring) == env.GITHUB_RUN_ATTEMPT' >/dev/null
+          echo 'NOTERI_WATCHDOG_UPGRADE_PREFLIGHT_INDEPENDENT_READBACK_OK_NO_INSTALL'
