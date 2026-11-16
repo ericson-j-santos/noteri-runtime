@@ -230,3 +230,20 @@ def test_unparseable_xml_only_emits_generic_classification(tmp_path):
     assert probe.xml_difference_fields(
         b"\x00bad-private-name\x00", tmp_path / "python.exe",
         tmp_path / "runner.py", "Noteri\\user") == ["xml_parse"]
+
+
+def test_xml_optional_states_distinguish_missing_and_explicit_conflicts(tmp_path):
+    python = tmp_path / "python.exe"
+    runner = tmp_path / "runner.py"
+    xml = activation.task_xml(python, runner, "Noteri\\synthetic")
+    labels = ["boot_trigger", "run_level", "task_enabled"]
+    states = probe.xml_optional_field_states(xml, labels)
+    assert states == {key: "different" for key in labels}
+    # Missing an element differs from an explicit, conflicting value.  No
+    # private values are returned, even for malformed/unknown XML content.
+    for part in (b"<RunLevel>LeastPrivilege</RunLevel>",
+                 b"<Enabled>true</Enabled>"):
+        if part in xml:
+            altered = xml.replace(part, b"", 1)
+            observed = probe.xml_optional_field_states(altered, labels)
+            assert "missing" in observed.values()
