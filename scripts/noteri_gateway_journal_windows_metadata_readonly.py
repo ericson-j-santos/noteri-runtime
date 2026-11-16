@@ -78,7 +78,8 @@ def _fixed_helper():
     return module
 
 
-def _validate_file_security(helper, path: Path, expected: dict | None):
+def _validate_file_security(helper, path: Path, expected: dict | None,
+                            *, require_no_streams: bool = False):
     try:
         first = helper._windows_persisted_file_state(path)
         second = helper._windows_persisted_file_state(path)
@@ -87,6 +88,8 @@ def _validate_file_security(helper, path: Path, expected: dict | None):
             helper._validate_windows_persisted_state(expected, path.name)
             _require(helper._windows_persisted_state_equivalent(expected, first),
                      "WINDOWS_METADATA_MISMATCH")
+        if require_no_streams:
+            _require(first.get("streams") == [], "NEW_FILE_HAS_ALTERNATE_DATA_STREAMS")
         # Stable metadata hash (not raw owner, group, DACL or ADS names).
         return hashlib.sha256(
             json.dumps(first, sort_keys=True, separators=(",", ":")).encode()
