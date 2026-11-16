@@ -14,6 +14,8 @@ import json
 import os
 import re
 import socket
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
@@ -92,6 +94,44 @@ def detailed_service_status(*, hostname: str, platform: str,
             pass
     return {"native_socket_status": socket_state,
             "native_schtasks_status": task_state}
+
+
+def fixed_health_readback(fetch=urlopen) -> dict:
+    """Unauthenticated, bounded GET; a self-reported label is NOT identity proof."""
+    request = Request("http://127.0.0.1:8097/health", headers={"Accept": "application/json"})
+    code = 0
+    raw = b""
+    try:
+        with fetch(request, timeout=2) as response:
+            code = response.status
+            raw = response.read(4097)
+    except HTTPError as exc:
+        code = exc.code
+        raw = exc.read(4097)
+    except (OSError, URLError, ValueError, TimeoutError):
+        return {"native_health_http_code": 0, "native_health_state": "unreachable",
+                "native_health_label_matches": False,
+                "native_health_authenticated": False}
+    result = {"native_health_http_code": code, "native_health_state": "unverified",
+              "native_health_label_matches": False,
+              "native_health_authenticated": False}
+    if len(raw) > 4096:
+        return result
+    try:
+        payload = json.loads(raw)
+    except (ValueError, UnicodeError):
+        return result
+    if not isinstance(payload, dict):
+        return result
+    label = payload.get("service") == "codex-worker-pool"
+    state = payload.get("status")
+    if label and state in ("healthy", "not_ready"):
+        result["native_health_label_matches"] = True
+        result["native_health_state"] = state
+        result["native_health_auth_configured"] = payload.get("auth_configured") is True
+        result["native_health_rules_sha_configured"] = (
+            payload.get("expected_rules_sha_configured") is True)
+    return result
 
 
 def _backups(folder: Path) -> list[tuple[Path, str]]:
@@ -276,6 +316,8 @@ def main() -> int:
                          inactive=native["native_idle_attested"])
         result.update(native)
         result.update(observed)
+        if args.mode == "plan" and socket.gethostname().casefold() == "noteri" and os.name == "nt":
+            result.update(fixed_health_readback())
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0 if result["result"] in (
         "QUARANTINE_PLAN_READY", "CACHE_QUARANTINED",
