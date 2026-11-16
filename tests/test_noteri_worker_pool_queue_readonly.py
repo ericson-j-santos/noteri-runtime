@@ -22,12 +22,16 @@ def fixture_db(tmp_path: Path) -> Path:
                                issue_number INTEGER NOT NULL,
                                state TEXT NOT NULL, leased_by TEXT,
                                lease_expires_at TEXT, fencing_required INTEGER NOT NULL DEFAULT 0,
-                               lease_generation INTEGER NOT NULL DEFAULT 0);
+                               lease_generation INTEGER NOT NULL DEFAULT 0,
+                               request_id TEXT, idempotency_key TEXT, base_sha TEXT,
+                               priority INTEGER, max_attempts INTEGER);
             CREATE TABLE task_attempts(ended_at TEXT);
             CREATE TABLE task_checkpoints(effect_state TEXT NOT NULL);
             CREATE TABLE workers(last_heartbeat_at TEXT NOT NULL);
             CREATE TABLE pool_control(control_key TEXT PRIMARY KEY,enabled INTEGER NOT NULL);
             INSERT INTO pool_control VALUES('fenced_cutover',0);
+            CREATE TABLE repository_lanes(repository TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL,max_in_flight INTEGER NOT NULL);
         """)
     return path
 
@@ -194,3 +198,73 @@ def test_queued_fenced_task_and_cutover_report_are_readonly(tmp_path):
     assert result["queued_task_sample"][0]["issue_number"] == 62
     assert result["maintenance_authorized"] is False
     assert before == _hash(db)
+
+
+
+def _seed_canonical_smoke(db: Path):
+    repository = "ericson-j-santos/codex-worker-pool-smoke"
+    issue = 1914
+    sha = "a05e64bbc58a15314b42cfa9314f1d415535b05b"
+    branch = f"smoke-{sha[:12]}"
+    request = hashlib.sha256(f"{repository}:{issue}:{branch}".encode()).hexdigest()[:24]
+    identity = hashlib.sha256(f"{repository}|{issue}|{request}".encode()).hexdigest()
+    with sqlite3.connect(db) as con:
+        con.execute("INSERT INTO repository_lanes VALUES (?, 0, 1)", (repository,))
+        con.execute(
+            "INSERT INTO tasks(task_id,repository,issue_number,state,"
+            "fencing_required,lease_generation,request_id,idempotency_key,"
+            "base_sha,priority,max_attempts) VALUES(?,?,?,'queued',0,0,?,?,?,?,?)",
+            ("cwp-" + identity[:24], repository, issue, request, identity, sha, 10, 3))
+    return "cwp-" + identity[:24]
+
+
+def test_smoke_source_identity_and_disabled_lane_are_read_only(tmp_path):
+    db = fixture_db(tmp_path)
+    task_id = _seed_canonical_smoke(db)
+    digest = _hash(db)
+    result = probe.inspect_database(db, now=NOW)
+    assert result["result"] == "READ_ONLY_QUEUE_AUDIT_OK"
+    assert result["synthetic_smoke_lane_found"] is True
+    assert result["synthetic_smoke_lane_disabled"] is True
+    assert result["synthetic_smoke_count"] == 1
+    assert result["synthetic_smoke_identity_consistent"] is True
+    assert result["synthetic_smoke_never_claim"] is True
+    assert result["queued_task_sample"][0]["task_id"] == task_id
+    assert result["fenced_cutover_enabled"] is False
+    assert result["registered_workers"] == 0
+    assert _hash(db) == digest
+
+
+def test_smoke_lane_wrongly_enabled_does_not_become_safe(tmp_path):
+    db = fixture_db(tmp_path)
+    _seed_canonical_smoke(db)
+    with sqlite3.connect(db) as con:
+        con.execute("UPDATE repository_lanes SET enabled=1")
+    state = probe.inspect_database(db, now=NOW)
+    assert state["result"] == "READ_ONLY_QUEUE_AUDIT_OK"
+    assert state["synthetic_smoke_lane_disabled"] is False
+    assert state["synthetic_smoke_never_claim"] is True
+    assert state["maintenance_authorized"] is False
+
+
+def test_modified_smoke_request_breaks_identity_consistency(tmp_path):
+    db = fixture_db(tmp_path)
+    _seed_canonical_smoke(db)
+    with sqlite3.connect(db) as con:
+        con.execute("UPDATE tasks SET request_id='changed'")
+    state = probe.inspect_database(db, now=NOW)
+    assert state["result"] == "READ_ONLY_QUEUE_AUDIT_OK"
+    assert state["synthetic_smoke_identity_consistent"] is False
+    assert state["synthetic_smoke_never_claim"] is True
+
+
+def test_multiple_smokes_block_before_false_verification(tmp_path):
+    db = fixture_db(tmp_path)
+    _seed_canonical_smoke(db)
+    with sqlite3.connect(db) as con:
+        con.execute("INSERT INTO tasks(task_id,repository,issue_number,state) VALUES("
+                    "'cwp-000000000000000000000001',"
+                    "'ericson-j-santos/codex-worker-pool-smoke',1914,'queued')")
+    state = probe.inspect_database(db, now=NOW)
+    assert state["result"] == "BLOCKED_SMOKE_DUPLICATE"
+    assert state["maintenance_authorized"] is False
