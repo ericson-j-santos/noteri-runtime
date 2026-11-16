@@ -102,3 +102,15 @@ def test_workflow_structure_does_not_duplicate_jobs_or_split_powershell():
     assert raw.count("\n  upgrade_preflight_readback:") == 1
     assert "if ($targetDigest -notmatch '^[0-9a-f]{64}$') {" in raw
     assert raw.count("NOTERI_WATCHDOG_INVENTORY_INDEPENDENT_READBACK_OK_NO_INSTALL") == 1
+
+
+def test_preflight_failure_diagnostic_is_allowlisted_and_never_raw():
+    doc = data()
+    step = next(s for s in doc["jobs"]["inventory"]["steps"]
+                if s.get("id") == "upgrade_preflight")["run"]
+    assert "GATEWAY_OR_COMMAND_BLOCKED" in step
+    assert "blocked.reason -cmatch '^[A-Z][A-Z0-9_]{3,80}$'" in step
+    assert "envelope.stdout | ConvertFrom-Json" in step
+    assert "throw \"NOTERI_WATCHDOG_UPGRADE_PREFLIGHT_$reason\"" in step
+    assert "Write-Output $envelope" not in step
+    assert "Write-Output $envelope.stderr" not in step

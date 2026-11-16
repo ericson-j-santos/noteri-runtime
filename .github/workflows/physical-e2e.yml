@@ -235,10 +235,25 @@ jobs:
             '--target-sha', $env:GITHUB_SHA, '--target-digest', $targetDigest,
             '--correlation-id', $env:CORRELATION_ID, '--mode', 'preflight')
           $raw = @(& python3 -B (Join-Path $rules 'scripts/command_gateway.py') @args)
-          if ($LASTEXITCODE -ne 0 -or -not $raw) {
-            throw 'NOTERI_WATCHDOG_UPGRADE_PREFLIGHT_GATEWAY_BLOCKED'
+          $gatewayExit = $LASTEXITCODE
+          if (-not $raw) {
+            throw 'NOTERI_WATCHDOG_UPGRADE_PREFLIGHT_GATEWAY_EMPTY'
           }
           $envelope = @($raw)[-1] | ConvertFrom-Json
+          if ($gatewayExit -ne 0 -or $envelope.result -ne 'ok' -or
+              $envelope.gateway_exit_code -ne 0 -or $envelope.command_exit_code -ne 0) {
+            # Nunca publicar a saida bruta do Gateway, stderr ou caminhos locais.
+            $reason = 'GATEWAY_OR_COMMAND_BLOCKED'
+            try {
+              $blocked = $envelope.stdout | ConvertFrom-Json
+              if ($blocked.result -eq 'BLOCKED' -and
+                  $blocked.reason -is [string] -and
+                  $blocked.reason -cmatch '^[A-Z][A-Z0-9_]{3,80}$') {
+                $reason = $blocked.reason
+              }
+            } catch { }
+            throw "NOTERI_WATCHDOG_UPGRADE_PREFLIGHT_$reason"
+          }
           if ($envelope.result -ne 'ok' -or
               $envelope.gateway_exit_code -ne 0 -or
               $envelope.command_exit_code -ne 0 -or
