@@ -103,7 +103,7 @@ def operate(*, source: Path, release: Path, quarantine: Path, profile: str,
     base = dict(BASE)
     if hostname.casefold() != "noteri" or platform != "nt" or profile != "NORMAL":
         return {**base, "result": "BLOCKED_HOST_PROFILE", "state_changed": False}
-    if not inactive:
+    if mode != "plan" and not inactive:
         return {**base, "result": "BLOCKED_SERVICE_NOT_ATTESTED_IDLE", "state_changed": False}
     if mode not in ("plan", "quarantine", "restore"):
         return {**base, "result": "BLOCKED_MODE", "state_changed": False}
