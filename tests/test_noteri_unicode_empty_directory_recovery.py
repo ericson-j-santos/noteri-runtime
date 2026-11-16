@@ -139,6 +139,51 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(m.Blocked, "QUARANTINE_LOCATION_DENIED"):
             m._safe_quarantine(self.root, self.root / "anything")
 
+    def test_typed_request_is_bounded_but_never_self_authorizing(self):
+        request = {
+            "schema_version": "noteri-capability-request/v1",
+            "capability": m.CAPABILITY,
+            "target_host": "Noteri",
+            "environment": "DEV",
+            "source_sha": "a" * 40,
+            "correlation_id": "rules213-unicode-typed-20261116",
+            "idempotency_key": "rules213-unicode-idempotent-20261116",
+            "confirmation": m.CONFIRM,
+            "params": {
+                "target": self.target,
+                "original_head": m.EXPECTED_HEAD,
+                "warning_name_sha256": m.NAME_SHA256,
+            },
+        }
+        data = m.admit_typed_request(
+            request, controller_source_sha="a" * 40
+        )
+        self.assertFalse(data["apply_authorized"])
+        self.assertFalse(data["exclusive_lease_proven"])
+        self.assertEqual(data["target"], self.target)
+        with self.assertRaisesRegex(m.Blocked, "AUTHORITY_NOT_INSTALLED"):
+            m.recover_typed_request(
+                request, controller_source_sha="a" * 40,
+                trusted_quarantine=self.quarantine, authority=None,
+            )
+        self.assertTrue(self.source.exists())
+        for change in (
+            {"target_host": "wrong"},
+            {"environment": "PROD"},
+            {"source_sha": "b" * 40},
+            {"confirmation": "invalid"},
+            {"params": {**request["params"], "unknown": True}},
+            {"params": {**request["params"], "target": "other"}},
+            {"params": {**request["params"], "original_head": "b" * 40}},
+            {"params": {**request["params"], "warning_name_sha256": "0" * 64}},
+        ):
+            with self.subTest(change=change):
+                with self.assertRaises(m.Blocked):
+                    m.admit_typed_request(
+                        {**request, **change},
+                        controller_source_sha="a" * 40,
+                    )
+
     def test_binary_git_executable_is_not_shell(self):
         with patch.object(m.subprocess, "run", return_value=SimpleNamespace(
             returncode=0, stderr=b"", stdout=b"",
