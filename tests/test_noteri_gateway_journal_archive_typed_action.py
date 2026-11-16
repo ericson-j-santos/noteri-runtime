@@ -1,7 +1,9 @@
 """Typed archive execution admission: positive, denial, replay and exact source."""
 from __future__ import annotations
 
+import base64
 import copy
+import json
 from pathlib import Path
 import sys
 import unittest
@@ -58,6 +60,25 @@ class ActionGateTests(unittest.TestCase):
         p = mock.patch.object(action.archive, "recover", return_value=recovered())
         self.recovery = p.start()
         self.addCleanup(p.stop)
+
+    def test_base64_roundtrip_and_duplicate_keys_blocked(self):
+        original = json.dumps(request(), separators=(",", ":")).encode()
+        encoded = base64.b64encode(original).decode("ascii")
+        self.assertEqual(action.decode_closed_request(encoded), request())
+        invalid = base64.b64encode(b'{"host":"Noteri","host":"Other"}').decode()
+        with self.assertRaisesRegex(action.AdmissionBlocked, "DUPLICATE_REQUEST_KEY"):
+            action.decode_closed_request(invalid)
+        for value in ("", "%not-base64%", base64.b64encode(b"null").decode()):
+            with self.subTest(value=value):
+                with self.assertRaises(action.AdmissionBlocked):
+                    action.decode_closed_request(value)
+        self.recovery.assert_not_called()
+
+    def test_apply_must_return_verified_archived_state(self):
+        self.recovery.return_value = recovered(archived=False)
+        with self.assertRaisesRegex(action.AdmissionBlocked,
+                                    "ARCHIVE_EXECUTION_POSTCONDITION_INVALID"):
+            action.run_typed(request(), apply=True)
 
     def test_exact_action_admitted_once(self):
         result = action.run_typed(request(), apply=True)
