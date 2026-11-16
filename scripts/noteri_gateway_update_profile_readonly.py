@@ -26,6 +26,16 @@ def require(v: bool, why: str) -> None:
     if not v:
         raise Blocked(why)
 
+def validated_wsl_profile(policy: dict) -> bool:
+    """Omitted opt-in is strictly disabled per command-gateway.md; null is invalid."""
+    require(type(policy) is dict, "INSTALLED_POLICY_NOT_OBJECT")
+    if "noteri_wsl_running_inventory" not in policy:
+        return False
+    value = policy["noteri_wsl_running_inventory"]
+    require(type(value) is bool, "WSL_PROFILE_NOT_BOOLEAN")
+    return value
+
+
 def inspect() -> dict:
     require(os.name == "nt" and socket.gethostname().casefold() == "noteri",
             "HOST_NOTERI_WINDOWS_REQUIRED")
@@ -42,9 +52,9 @@ def inspect() -> dict:
     require(rec.get("result") == "HOST_UPDATE_OK"
             and rec.get("source_commit") == "11e2e86d0283e83247d8058d05bbabe3dd7cc2c2",
             "RECEIPT_IDENTITY_DRIFT")
-    profile = pol.get("noteri_wsl_running_inventory")
+    profile = validated_wsl_profile(pol)
     receipt_profile = rec.get("noteri_wsl_inventory_profile")
-    require(type(profile) is bool and type(receipt_profile) is bool
+    require(type(receipt_profile) is bool
             and profile == receipt_profile, "INSTALLED_PROFILE_MISMATCH")
     require(rec.get("rules_version") == "1.6.20",
             "INSTALLED_RULES_VERSION_DRIFT")
