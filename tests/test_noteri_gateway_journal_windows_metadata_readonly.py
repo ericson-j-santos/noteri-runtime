@@ -141,7 +141,7 @@ class MetadataAuditTests(unittest.TestCase):
 
     def test_current_receipt_drift_blocks(self):
         (self.root / "update-receipt.json").write_bytes(b"tampered")
-        with self.assertRaises(audit.Blocked):
+        with self.assertRaises((audit.Blocked, audit.safe.Blocked)):
             audit.inspect(self.root, helper_loader=FakeMetadata)
 
     def test_exclusive_lock_denies_simultaneous_open(self):
