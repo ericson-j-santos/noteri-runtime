@@ -80,7 +80,22 @@ def pinned_sha(source: str) -> str:
             for target in statement.targets
         )
     ]
-    if len(bindings) != 1 or len(bindings[0].targets) != 1:
+    # Reject any secondary or nested reassignment; a syntactically valid
+    # literal pin must not be silently overwritten at runtime.
+    writes = [
+        node for node in ast.walk(tree)
+        if (
+            isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "RULES_SHA"
+                    for t in node.targets)
+        ) or (
+            isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr))
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "RULES_SHA"
+        )
+    ]
+    if (len(bindings) != 1 or len(bindings[0].targets) != 1
+            or writes != bindings):
         raise SyncBlocked("BLOCKED_RUNNER_PIN")
     statement = bindings[0]
     if (not isinstance(statement.targets[0], ast.Name)
