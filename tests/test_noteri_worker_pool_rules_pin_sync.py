@@ -197,3 +197,49 @@ def test_drift_probe_never_touches_installed_runner(tmp_path):
     assert "uvicorn.run(" not in source
     assert ".github/workflows" not in source
     assert "subprocess.Popen" not in source
+
+
+
+def test_ci_reuses_existing_tests_job_without_new_paid_runner_or_trigger():
+    text = (Path(__file__).resolve().parents[1] / ".github" / "workflows" /
+            "ci.yml").read_text(encoding="utf-8")
+    assert text.count(
+        "python -B -m scripts.noteri_worker_pool_rules_pin_sync --mode check"
+    ) == 1
+    assert text.index("Run tests") < text.index(
+        "Check canonical Worker Pool rules SHA (read-only, no install)"
+    )
+    assert "runs-on: ubuntu-latest" in text
+    assert "workflow_dispatch:" not in text
+    assert "schedule:" not in text
+
+
+def test_check_mode_exit_code_fails_on_future_drift_without_writing(monkeypatch, capsys):
+    import sys
+    from scripts import noteri_worker_pool_rules_pin_sync as module
+
+    target = Path(module.__file__).resolve().parents[1] / module.RUNNER_REL
+    before = target.read_bytes()
+    monkeypatch.setattr(module, "canonical_rules_sha", lambda: OLD_RULES)
+    monkeypatch.setattr(sys, "argv", ["rules-pin-sync", "--mode", "check"])
+    assert module.main() == 2
+    outcome = json.loads(capsys.readouterr().out)
+    assert outcome["result"] == "RULES_SHA_DRIFT"
+    assert outcome["change_required"] is True
+    assert outcome["service_changed"] is False
+    assert target.read_bytes() == before
+
+
+def test_check_mode_success_on_canonical_and_no_file_change(monkeypatch, capsys):
+    import sys
+    from scripts import noteri_worker_pool_rules_pin_sync as module
+
+    target = Path(module.__file__).resolve().parents[1] / module.RUNNER_REL
+    before = target.read_bytes()
+    monkeypatch.setattr(module, "canonical_rules_sha", lambda: CURRENT_RULES)
+    monkeypatch.setattr(sys, "argv", ["rules-pin-sync", "--mode", "check"])
+    assert module.main() == 0
+    outcome = json.loads(capsys.readouterr().out)
+    assert outcome["result"] == "RULES_SHA_ALIGNED"
+    assert outcome["change_required"] is False
+    assert target.read_bytes() == before
