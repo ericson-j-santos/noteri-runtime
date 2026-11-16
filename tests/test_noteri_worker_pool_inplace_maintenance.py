@@ -383,3 +383,76 @@ def test_registered_identity_blocks_changed_com_or_unverified_listener(
     monkeypatch.setattr(m.activation, "listener_owned_by_task", lambda *_: False)
     with pytest.raises(m.MaintenanceBlocked, match="task_listener_identity_unproved"):
         m.verify_registered_identity(XML, paths)
+
+
+
+def test_post_restart_attestation_failure_restarts_exact_original(
+    tmp_path, monkeypatch,
+):
+    """Proven candidate may be re-stopped ONLY to restore prior runner."""
+    proof, events = simulate(monkeypatch, tmp_path, failure="attestation")
+    monkeypatch.setattr(m.activation, "verify_api", lambda *_: True)
+    result = m.apply(local=tmp_path, expected_sha=SHA, confirm=m.CONFIRM)
+    assert result["result"] == "MAINTENANCE_ROLLED_BACK"
+    assert result["rollback_verified"] is True
+    assert proof["paths"]["runner"].read_bytes() == OLD
+    assert events.count(("stop",)) == 2
+    assert events.count(("start",)) == 2
+    assert events.index(("replace", m.sha(NEW))) < events.index(("replace", m.sha(OLD)))
+    assert (proof["paths"]["maintenance"] / SHA / "runner-before.py").read_bytes() == OLD
+    assert not (proof["paths"]["maintenance"] /
+                ".maintenance-exclusive.lock").exists()
+
+
+def test_failed_initial_stop_does_not_retry_if_original_still_healthy(
+    tmp_path, monkeypatch,
+):
+    """No second Stop of the old service on an unsuccessful initial stop."""
+    proof, events = simulate(monkeypatch, tmp_path)
+    def unable_to_stop(_):
+        events.append(("stop_failed",))
+        raise m.MaintenanceBlocked("task_stop_failed")
+    monkeypatch.setattr(m, "_stop", unable_to_stop)
+    monkeypatch.setattr(m, "_zero_instances", lambda _: False)
+    monkeypatch.setattr(m.activation, "verify_api", lambda *_: True)
+    result = m.apply(local=tmp_path, expected_sha=SHA, confirm=m.CONFIRM)
+    assert result["result"] == "MAINTENANCE_ROLLED_BACK"
+    assert result["rollback_verified"] is True
+    assert proof["paths"]["runner"].read_bytes() == OLD
+    assert events.count(("stop_failed",)) == 1
+    assert ("quarantine",) not in events
+    assert ("start",) not in events
+
+
+def test_unknown_runner_hash_never_stops_or_overwrites_during_rollback(
+    tmp_path, monkeypatch,
+):
+    proof = plan_fixture(tmp_path)
+    base = proof["paths"]["maintenance"] / SHA
+    base.mkdir(parents=True)
+    (base / "runner-before.py").write_bytes(OLD)
+    proof["paths"]["runner"].write_bytes(b"tampered-runner")
+    monkeypatch.setattr(m, "_zero_instances", lambda _: False)
+    stop_calls = []
+    monkeypatch.setattr(m, "_stop", lambda *_: stop_calls.append("stopped"))
+    assert m._safe_rollback(tmp_path, proof, base, stopped=True) is False
+    assert proof["paths"]["runner"].read_bytes() == b"tampered-runner"
+    assert stop_calls == []
+
+
+def test_unattributed_candidate_never_restarted_or_terminated_on_rollback(
+    tmp_path, monkeypatch,
+):
+    proof = plan_fixture(tmp_path)
+    base = proof["paths"]["maintenance"] / SHA
+    base.mkdir(parents=True)
+    (base / "runner-before.py").write_bytes(OLD)
+    proof["paths"]["runner"].write_bytes(NEW)
+    monkeypatch.setattr(m, "_zero_instances", lambda _: False)
+    monkeypatch.setattr(m, "_task_xml_stable", lambda _: None)
+    monkeypatch.setattr(m.activation, "listener_owned_by_task", lambda *_: False)
+    stop_calls = []
+    monkeypatch.setattr(m, "_stop", lambda *_: stop_calls.append("stopped"))
+    assert m._safe_rollback(tmp_path, proof, base, stopped=True) is False
+    assert proof["paths"]["runner"].read_bytes() == NEW
+    assert stop_calls == []
