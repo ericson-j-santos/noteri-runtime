@@ -194,13 +194,16 @@ def recover_with_authority(root: Path, target: str, quarantine: Path, *,
         src, _ = _probe(root, expect_warning=True)
         assert src is not None
         original_stat = src.stat(follow_symlinks=False)
-        if not stat.S_ISDIR(original_stat.st_mode):
-            raise Blocked("DIRECTORY_STATE_CHANGED")
+        if (not stat.S_ISDIR(original_stat.st_mode) or src.is_symlink()
+                or any(src.iterdir())):
+            raise Blocked("SOURCE_NOT_EMPTY_OR_CHANGED")
         if quarantine.parent.is_symlink():
             raise Blocked("QUARANTINE_PARENT_LINK")
         quarantine.mkdir(parents=True, exist_ok=True)
         _safe_quarantine(root, quarantine)
-        if destination.exists() or src.stat(follow_symlinks=False).st_ino != original_stat.st_ino:
+        if (destination.exists() or src.is_symlink()
+                or src.stat(follow_symlinks=False).st_ino != original_stat.st_ino
+                or any(src.iterdir())):
             raise Blocked("PREMOVE_STATE_CHANGED")
         src.rename(destination)
         try:
