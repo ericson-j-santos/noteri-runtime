@@ -14,6 +14,7 @@ import json
 import os
 import re
 import socket
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 
@@ -27,7 +28,7 @@ CACHE_LABEL = CACHE_RELATIVE.as_posix()
 QUARANTINE_FOLDER = Path("ReqSys") / "NoteriWorkerPool" / "quarantine" / SOURCE_SHA
 CONFIRM = "QUARANTINE-NOTERI-WORKER-POOL-PYC"
 RESTORE_CONFIRM = "RESTORE-NOTERI-WORKER-POOL-PYC"
-BACKUP_RE = re.compile(r"secure_file[.]cpython-314[.]pyc[.]([0-9a-f]{64})[.]quarantined\\Z")
+BACKUP_RE = re.compile(r"secure_file[.]cpython-314[.]pyc[.]([0-9a-f]{64})[.]quarantined\Z")
 BASE = {"schema_version": "1", "source_sha": SOURCE_SHA,
         "cache_relative": CACHE_LABEL, "service_changed": False,
         "activated": False, "secrets_read": False}
@@ -35,6 +36,22 @@ BASE = {"schema_version": "1", "source_sha": SOURCE_SHA,
 
 class Blocked(RuntimeError):
     pass
+
+
+@contextmanager
+def _exclusive(quarantine: Path):
+    """Persistent lock is outside the immutable release; no shell or lease bypass."""
+    parent = quarantine.parent
+    stage.ensure_no_link_components(parent)
+    parent.mkdir(parents=True, exist_ok=True)
+    stage.ensure_no_link_components(parent)
+    lock = parent / ".cache-quarantine.lock"
+    fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        yield
+    finally:
+        os.close(fd)
+        lock.unlink(missing_ok=True)
 
 
 def _backups(folder: Path) -> list[tuple[Path, str]]:
@@ -109,9 +126,11 @@ def operate(*, source: Path, release: Path, quarantine: Path, profile: str,
                         "state_changed": False}
             if mode == "restore":
                 backup, digest = backups[0]
-                if cache.exists() or stage.is_link(cache):
-                    raise Blocked("cache_conflict")
-                if mode == "restore":
+                with _exclusive(quarantine):
+                    if cache.exists() or stage.is_link(cache):
+                        raise Blocked("cache_conflict")
+                    if _backups(quarantine) != backups:
+                        raise Blocked("quarantine_concurrent")
                     os.rename(backup, cache)
                     after = _expected_audit(source, release, inspect_git)
                     if after.get("extra") != [CACHE_LABEL]:
@@ -119,8 +138,8 @@ def operate(*, source: Path, release: Path, quarantine: Path, profile: str,
                         if not backup.exists() and cache.exists():
                             os.rename(cache, backup)
                         raise Blocked("restore_readback_failed")
-                    return {**base, "result": "CACHE_RESTORED", "state_changed": True,
-                            "cache_sha256": digest, "backup_preserved": False}
+                return {**base, "result": "CACHE_RESTORED", "state_changed": True,
+                        "cache_sha256": digest, "backup_preserved": False}
             return {**base, "result": "ALREADY_QUARANTINED",
                     "state_changed": False, "cache_sha256": backups[0][1],
                     "backup_preserved": True}
@@ -132,8 +151,9 @@ def operate(*, source: Path, release: Path, quarantine: Path, profile: str,
             raise Blocked("cache_not_regular")
         if not 1 <= cache.stat().st_size <= stage.MAX_FILE_SIZE:
             raise Blocked("cache_size")
-        if cache.open("rb").read(4) != importlib.util.MAGIC_NUMBER:
-            raise Blocked("cache_magic_mismatch")
+        with cache.open("rb") as handle:
+            if handle.read(4) != importlib.util.MAGIC_NUMBER:
+                raise Blocked("cache_magic_mismatch")
         digest = stage.file_sha256(cache)
         if stage.file_sha256(cache) != digest:
             raise Blocked("cache_changed_during_preflight")
@@ -145,28 +165,31 @@ def operate(*, source: Path, release: Path, quarantine: Path, profile: str,
             raise Blocked("restore_requires_quarantined_cache")
         # The move itself is the lossless backup. Never overwrite or remove a
         # cache or backup and never copy the content to an unvalidated location.
-        quarantine.mkdir(parents=True, exist_ok=True)
-        stage.ensure_no_link_components(quarantine)
-        if _backups(quarantine):
-            raise Blocked("quarantine_concurrent")
-        dest = quarantine / f"{CACHE_RELATIVE.name}.{digest}.quarantined"
-        if dest.exists() or stage.is_link(dest):
-            raise Blocked("destination_exists")
-        if stage.file_sha256(cache) != digest:
-            raise Blocked("cache_changed_before_move")
-        os.rename(cache, dest)
-        try:
-            if stage.file_sha256(dest) != digest:
-                raise Blocked("quarantine_readback_hash")
-            after = _expected_audit(source, release, inspect_git)
-            if after.get("result") != "RELEASE_INTACT":
-                raise Blocked("release_readback_not_intact")
-        except Exception:
-            if (not cache.exists() and not stage.is_link(cache)
-                    and dest.is_file() and not stage.is_link(dest)
-                    and stage.file_sha256(dest) == digest):
-                os.rename(dest, cache)
-            raise
+        with _exclusive(quarantine):
+            quarantine.mkdir(parents=True, exist_ok=True)
+            stage.ensure_no_link_components(quarantine)
+            if _backups(quarantine):
+                raise Blocked("quarantine_concurrent")
+            dest = quarantine / f"{CACHE_RELATIVE.name}.{digest}.quarantined"
+            if dest.exists() or stage.is_link(dest):
+                raise Blocked("destination_exists")
+            if stage.file_sha256(cache) != digest:
+                raise Blocked("cache_changed_before_move")
+            if _expected_audit(source, release, inspect_git).get("extra") != [CACHE_LABEL]:
+                raise Blocked("release_changed_before_move")
+            os.rename(cache, dest)
+            try:
+                if stage.file_sha256(dest) != digest:
+                    raise Blocked("quarantine_readback_hash")
+                after = _expected_audit(source, release, inspect_git)
+                if after.get("result") != "RELEASE_INTACT":
+                    raise Blocked("release_readback_not_intact")
+            except Exception:
+                if (not cache.exists() and not stage.is_link(cache)
+                        and dest.is_file() and not stage.is_link(dest)
+                        and stage.file_sha256(dest) == digest):
+                    os.rename(dest, cache)
+                raise
         return {**base, "result": "CACHE_QUARANTINED",
                 "state_changed": True, "cache_sha256": digest,
                 "backup_preserved": True, "release_intact": True}
