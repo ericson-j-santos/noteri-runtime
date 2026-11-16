@@ -42,7 +42,7 @@ SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 ALLOWED_ORIGIN = {"https://github.com/ericson-j-santos/noteri-runtime",
                   "https://github.com/ericson-j-santos/noteri-runtime.git"}
 OLD_RULES_SHA = "4e6091a133f8d7d157abe6f83c31ca597812e0a4"
-CACHE_SHA256 = "3f4032ec92f939eb96d6c6eb869613c6cc30f5cba4ecee880215511e34058c6e"
+CACHE_SHA256 = cache.KNOWN_CACHE_SHA256
 RUNNER = "noteri_worker_pool_api_runner.py"
 MAX_XML = 131072
 MAX_DB = 1_073_741_824
@@ -445,6 +445,16 @@ def apply(*, local: Path, expected_sha: str, confirm: str) -> dict[str, Any]:
         need(_zero_instances(local), "service_restarted_during_runner_update")
         _task_xml_stable(plan["xml"])
         _start(local, paths)
+        # Independent installed-source, task XML/COM, 401 control and authenticated
+        # contract replay. A healthy GET /health alone is not acceptance.
+        verified = authenticated.attest(
+            local=local, host=socket.gethostname(), platform=os.name,
+            user=__import__("getpass").getuser(),
+        )
+        need(verified.get("result") == "AUTHENTICATED_READBACK_OK"
+             and verified.get("contract_replay_verified") is True
+             and verified.get("negative_auth_verified") is True,
+             "authenticated_installation_readback_failed")
         started = True
         need(stage.file_sha256(paths["runner"]) == plan["new_sha"],
              "runner_final_hash_wrong")
@@ -500,7 +510,7 @@ def main() -> int:
             result.update(applied)
             result["state_changed"] = bool(applied.get("changed"))
     except (MaintenanceBlocked, OSError, ValueError, TypeError, KeyError,
-            stage.StageBlocked, sqlite3.Error) as exc:
+            stage.StageBlocked, rules_pin.SyncBlocked, sqlite3.Error) as exc:
         result["result"] = str(exc) if isinstance(exc, MaintenanceBlocked) else "BLOCKED_PREFLIGHT"
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0 if result["result"] in (
