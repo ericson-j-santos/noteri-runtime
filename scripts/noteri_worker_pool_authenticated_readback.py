@@ -177,11 +177,18 @@ def attest(*, local: Path, host: str, platform: str, user: str) -> dict:
             return _fail(result, "BLOCKED_TASK_COM")
         result["task_com_verified"] = True
         if not xml_matches:
-            result["xml_difference_fields"] = xml_difference_fields(
-                task.stdout, python, runner, user_id)
-            result["xml_field_states"] = xml_optional_field_states(
-                task.stdout, result["xml_difference_fields"])
-            return _fail(result, "BLOCKED_TASK_XML")
+            fields = xml_difference_fields(task.stdout, python, runner, user_id)
+            states = xml_optional_field_states(task.stdout, fields)
+            # schtasks /XML may omit three default-valued elements that the
+            # independent COM task definition explicitly attests. Never accept
+            # an explicit conflicting XML value or another missing field.
+            implicit = {"run_level", "boot_trigger", "task_enabled"}
+            if (not fields or not set(fields).issubset(implicit)
+                    or any(states.get(field) != "missing" for field in fields)):
+                result["xml_difference_fields"] = fields
+                result["xml_field_states"] = states
+                return _fail(result, "BLOCKED_TASK_XML")
+            result["task_defaults_attested_by_com"] = sorted(fields)
         result["task_s4u_verified"] = True
         if not activation.listener_owned_by_task(python, runner):
             return _fail(result, "BLOCKED_PROCESS_ATTRIBUTION")
