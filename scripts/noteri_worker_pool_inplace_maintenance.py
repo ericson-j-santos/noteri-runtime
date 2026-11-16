@@ -93,6 +93,38 @@ def task_xml() -> bytes:
     return bytes(result.stdout)
 
 
+def verify_registered_identity(xml: bytes, paths: dict[str, Path]) -> None:
+    """Use the existing proven readback semantics for omitted XML defaults.
+
+    COM checks the actual task definition. schtasks /XML may omit DEFAULT
+    values for enabled, boot trigger and least-privilege run level; only the
+    verified COM values may attest those missing elements. Conflicting values
+    or changed principal/action are NEVER allowed.
+    """
+    user = f"{socket.gethostname()}\\{__import__('getpass').getuser()}"
+    package = paths["runtime"] / "control" / control.TARGET_NAME
+    need(control.verify(package), "task_control_package_unverified")
+    differences = activation.task_com_mismatches(
+        paths["python"], paths["runner"], user, package,
+    )
+    need(differences == [], "task_com_identity_unproved")
+    xml_matches = activation.task_matches(
+        xml, paths["python"], paths["runner"], user,
+    )
+    if not xml_matches:
+        fields = authenticated.xml_difference_fields(
+            xml, paths["python"], paths["runner"], user,
+        )
+        states = authenticated.xml_optional_field_states(xml, fields)
+        implicit = {"run_level", "boot_trigger", "task_enabled"}
+        need(bool(fields) and set(fields).issubset(implicit)
+             and all(states.get(name) == "missing" for name in fields),
+             "task_xml_identity_unproved")
+    need(activation.listener_owned_by_task(
+        paths["python"], paths["runner"]) is True,
+        "task_listener_identity_unproved")
+
+
 def stopped_task_registered(local: Path) -> bool:
     """Task must STILL EXIST, have zero instances, and port must be absent.
 
@@ -212,15 +244,7 @@ def preflight(*, local: Path, expected_sha: str, live: bool = True) -> dict[str,
          "cache_not_expected_hash")
     need(cache._backups(paths["quarantine"]) == [], "cache_backup_collision")
     xml = task_xml()
-    user = f"{socket.gethostname()}\\{__import__('getpass').getuser()}"
-    need(authenticated.xml_difference_fields(
-             xml, paths["python"], paths["runner"], user) == []
-         and activation.task_com_mismatches(
-             paths["python"], paths["runner"], user,
-             paths["runtime"] / "control" / control.TARGET_NAME) == []
-         and activation.listener_owned_by_task(
-             paths["python"], paths["runner"]) is True,
-         "task_identity_unproved")
+    verify_registered_identity(xml, paths)
     idle = queue_safe(local)
     need(paths["database"].is_file()
          and 0 < paths["database"].stat().st_size <= MAX_DB,
