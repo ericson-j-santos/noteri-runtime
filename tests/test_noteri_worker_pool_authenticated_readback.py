@@ -210,3 +210,23 @@ def test_xml_mismatch_with_matching_com_still_blocks_secret(tmp_path, monkeypatc
     assert result["result"] == "BLOCKED_TASK_XML"
     assert result["task_com_verified"] is True
     assert secure.opened is False
+
+
+def test_xml_difference_fields_never_exposes_task_values(tmp_path):
+    python = tmp_path / "python.exe"
+    runner = tmp_path / "noteri_worker_pool_api_runner.py"
+    principal = "Noteri\\synthetic-user"
+    xml = activation.task_xml(python, runner, principal)
+    assert probe.xml_difference_fields(xml, python, runner, principal) == []
+    changed = xml.replace(b"S4U", b"InteractiveToken")
+    assert probe.xml_difference_fields(changed, python, runner, principal) == ["logon_type"]
+    sensitive = changed.replace(b"Noteri\\synthetic-user", b"Noteri\\secret-account")
+    labels = probe.xml_difference_fields(sensitive, python, runner, principal)
+    assert "principal" in labels
+    assert "secret-account" not in json.dumps(labels)
+
+
+def test_unparseable_xml_only_emits_generic_classification(tmp_path):
+    assert probe.xml_difference_fields(
+        b"\x00bad-private-name\x00", tmp_path / "python.exe",
+        tmp_path / "runner.py", "Noteri\\user") == ["xml_parse"]
