@@ -329,3 +329,57 @@ def test_unverifiable_rules_lookup_uses_no_backup_or_stop(tmp_path, monkeypatch)
     with pytest.raises(m.rules_pin.SyncBlocked):
         m.apply(local=tmp_path, expected_sha=SHA, confirm=m.CONFIRM)
     assert not (tmp_path / "ReqSys").exists()
+
+
+
+def test_registered_identity_accepts_only_com_attested_omitted_defaults(
+    tmp_path, monkeypatch,
+):
+    proof = plan_fixture(tmp_path)
+    paths = proof["paths"]
+    monkeypatch.setattr(m.control, "verify", lambda _: True)
+    monkeypatch.setattr(m.activation, "task_com_mismatches", lambda *_: [])
+    monkeypatch.setattr(m.activation, "task_matches", lambda *_: False)
+    monkeypatch.setattr(m.authenticated, "xml_difference_fields", lambda *_:
+                        ["run_level", "boot_trigger"])
+    monkeypatch.setattr(m.authenticated, "xml_optional_field_states", lambda *_:
+                        {"run_level": "missing", "boot_trigger": "missing"})
+    monkeypatch.setattr(m.activation, "listener_owned_by_task", lambda *_: True)
+    m.verify_registered_identity(XML, paths)  # Registered but XML omits defaults.
+
+
+@pytest.mark.parametrize("fields,states,code", [
+    (["run_level"], {"run_level": "different"}, "task_xml_identity_unproved"),
+    (["action_path"], {"action_path": "missing"}, "task_xml_identity_unproved"),
+    ([], {}, "task_xml_identity_unproved"),
+])
+def test_registered_identity_refuses_unauthorized_xml_drift(
+    tmp_path, monkeypatch, fields, states, code,
+):
+    proof = plan_fixture(tmp_path)
+    paths = proof["paths"]
+    monkeypatch.setattr(m.control, "verify", lambda _: True)
+    monkeypatch.setattr(m.activation, "task_com_mismatches", lambda *_: [])
+    monkeypatch.setattr(m.activation, "task_matches", lambda *_: False)
+    monkeypatch.setattr(m.authenticated, "xml_difference_fields", lambda *_: fields)
+    monkeypatch.setattr(m.authenticated, "xml_optional_field_states", lambda *_: states)
+    monkeypatch.setattr(m.activation, "listener_owned_by_task", lambda *_: True)
+    with pytest.raises(m.MaintenanceBlocked, match=code):
+        m.verify_registered_identity(XML, paths)
+
+
+def test_registered_identity_blocks_changed_com_or_unverified_listener(
+    tmp_path, monkeypatch,
+):
+    paths = plan_fixture(tmp_path)["paths"]
+    monkeypatch.setattr(m.control, "verify", lambda _: True)
+    monkeypatch.setattr(m.activation, "task_matches", lambda *_: True)
+    monkeypatch.setattr(m.activation, "listener_owned_by_task", lambda *_: True)
+    monkeypatch.setattr(m.activation, "task_com_mismatches", lambda *_:
+                        ["principal"])
+    with pytest.raises(m.MaintenanceBlocked, match="task_com_identity_unproved"):
+        m.verify_registered_identity(XML, paths)
+    monkeypatch.setattr(m.activation, "task_com_mismatches", lambda *_: [])
+    monkeypatch.setattr(m.activation, "listener_owned_by_task", lambda *_: False)
+    with pytest.raises(m.MaintenanceBlocked, match="task_listener_identity_unproved"):
+        m.verify_registered_identity(XML, paths)
