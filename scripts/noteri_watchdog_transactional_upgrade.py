@@ -184,6 +184,12 @@ def transact(adapter: Adapter, req: Request, backup_root: Path, *,
              authorized: bool = False, confirm: str = "") -> dict[str, object]:
     if not authorized:
         return _transact_core(adapter, req, backup_root, authorized=False, confirm=confirm)
+    # Rejeitar admissao, SHA e falta de privilegio ANTES de criar lock ou backup.
+    req.validate()
+    if confirm != CONFIRM:
+        raise UpgradeBlocked("EXPLICIT_CONFIRMATION_REQUIRED")
+    if isinstance(adapter, WindowsAdapter):
+        adapter.require_upgrade_privilege()
     with _exclusive_upgrade_lease(backup_root):
         return _transact_core(adapter, req, backup_root, authorized=True, confirm=confirm)
 
@@ -271,10 +277,15 @@ class WindowsAdapter:
         if cleanliness:
             raise UpgradeBlocked("WORKTREE_TRACKED_CHANGES")
 
-    def install(self, req: Request) -> None:
+    def require_upgrade_privilege(self) -> None:
+        # Preflight antecipado evita deixar lock/backup se o runner nao e admin.
         import ctypes
         if not ctypes.windll.shell32.IsUserAnAdmin():
             raise UpgradeBlocked("ADMINISTRATIVE_APPROVAL_REQUIRED")
+
+    def install(self, req: Request) -> None:
+        # Checar novamente caso o token mude apos o preflight.
+        self.require_upgrade_privilege()
         meta = json.loads(self.metadata_path.read_bytes())
         result = self.watchdog.install(self.repo, Path(meta["runner_home"]), req.target_sha,
                                        self.watchdog.INSTALL_CONFIRM)

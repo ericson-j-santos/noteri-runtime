@@ -111,6 +111,28 @@ def test_wrong_confirm_does_not_mutate(tmp_path):
     assert a.install_calls==0 and not list(tmp_path.iterdir())
 
 
+def test_admin_gate_blocks_before_lock_backup_or_inspection(tmp_path, monkeypatch):
+    # Reproduz o caso real de runner sem token administrativo. Nao inspeciona
+    # nem modifica a tarefa do Windows, nem inicia rollback sem mutacao.
+    adapter = object.__new__(m.WindowsAdapter)
+    def deny_admin(self):
+        raise m.UpgradeBlocked("ADMINISTRATIVE_APPROVAL_REQUIRED")
+    monkeypatch.setattr(m.WindowsAdapter, "require_upgrade_privilege", deny_admin)
+    with pytest.raises(m.UpgradeBlocked, match="ADMINISTRATIVE_APPROVAL_REQUIRED"):
+        m.transact(adapter, req(), tmp_path, authorized=True, confirm=m.CONFIRM)
+    assert not list(tmp_path.iterdir())
+
+
+def test_rejected_confirmation_precedes_admin_gate(tmp_path, monkeypatch):
+    adapter = object.__new__(m.WindowsAdapter)
+    calls = []
+    monkeypatch.setattr(m.WindowsAdapter, "require_upgrade_privilege",
+                        lambda self: calls.append("admin_probe"))
+    with pytest.raises(m.UpgradeBlocked, match="EXPLICIT_CONFIRMATION_REQUIRED"):
+        m.transact(adapter, req(), tmp_path, authorized=True, confirm="invalid")
+    assert calls == [] and not list(tmp_path.iterdir())
+
+
 def test_existing_backup_is_not_overwritten(tmp_path):
     a=Fake();m.transact(a,req(),tmp_path,authorized=True,confirm=m.CONFIRM)
     a.snap=a.before
