@@ -27,6 +27,7 @@ from scripts import noteri_worker_pool_release_audit as audit
 SOURCE_SHA = reference.SOURCE_SHA
 CACHE_RELATIVE = Path("app") / "__pycache__" / "secure_file.cpython-314.pyc"
 CACHE_LABEL = CACHE_RELATIVE.as_posix()
+KNOWN_CACHE_SHA256 = "3f4032ec92f939eb96d6c6eb869613c6cc30f5cba4ecee880215511e34058c6e"
 QUARANTINE_FOLDER = Path("ReqSys") / "NoteriWorkerPool" / "quarantine" / SOURCE_SHA
 CONFIRM = "QUARANTINE-NOTERI-WORKER-POOL-PYC"
 RESTORE_CONFIRM = "RESTORE-NOTERI-WORKER-POOL-PYC"
