@@ -73,6 +73,27 @@ def native_idle_status(*, hostname: str, platform: str,
             "native_idle_attested": listener_absent and task_absent}
 
 
+def detailed_service_status(*, hostname: str, platform: str,
+                            socket_probe: Callable, schtasks_probe: Callable) -> dict:
+    """Bounded second readback: neither result is proof of native service identity."""
+    socket_state, task_state = "unknown", "unknown"
+    if hostname.casefold() == "noteri" and platform == "nt":
+        try:
+            observed = socket_probe()
+            if observed in ("not_listening", "listening_unverified", "unknown"):
+                socket_state = observed
+        except (OSError, ValueError, AttributeError):
+            pass
+        try:
+            observed = schtasks_probe()
+            if observed in ("present_unverified", "absent_or_unreadable", "unknown"):
+                task_state = observed
+        except (OSError, ValueError, AttributeError):
+            pass
+    return {"native_socket_status": socket_state,
+            "native_schtasks_status": task_state}
+
+
 def _backups(folder: Path) -> list[tuple[Path, str]]:
     if not folder.exists():
         return []
@@ -240,6 +261,11 @@ def main() -> int:
             listener_probe=activation.listener_absent,
             task_probe=lambda: activation.task_absent(
                 Path(os.environ.get("WINDIR", "C:\\Windows"))))
+        from scripts import noteri_worker_pool_activation_preflight as preflight
+        observed = detailed_service_status(
+            hostname=socket.gethostname(), platform=os.name,
+            socket_probe=preflight.listener_status,
+            schtasks_probe=preflight.task_status)
         source = (root / "ReqSys" / "NoteriRuntimeRunner" / "_work" /
                   "noteri-runtime" / "noteri-runtime" / "_worker_pool")
         release = root / reference.RELEASES_RELATIVE / SOURCE_SHA
@@ -249,6 +275,7 @@ def main() -> int:
                          mode=args.mode, confirm=args.confirm,
                          inactive=native["native_idle_attested"])
         result.update(native)
+        result.update(observed)
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0 if result["result"] in (
         "QUARANTINE_PLAN_READY", "CACHE_QUARANTINED",
