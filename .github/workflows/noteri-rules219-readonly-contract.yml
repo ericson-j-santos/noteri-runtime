@@ -1,0 +1,109 @@
+name: Noteri Rules 219 SHA-bound read-only admission contract
+
+# Hosted source and schema checks ONLY. No self-hosted/physical jobs, no
+# workflow_dispatch, no install, no Gateway invocation, no Qwen inference.
+on:
+  push:
+    branches:
+      - feat/issue42-rules219-readonly-preflight-20261117
+    paths:
+      - scripts/noteri_rules219_readonly_admission.py
+      - tests/test_noteri_rules219_readonly_admission.py
+      - .github/workflows/noteri-rules219-readonly-contract.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: noteri-rules219-source-contract-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.repository == 'ericson-j-santos/noteri-runtime' && github.ref == 'refs/heads/feat/issue42-rules219-readonly-preflight-20261117'
+    name: SHA-bound source check and negative admission controls (host NOT used)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      RULES_SHA: 40e3db3ef8b1fe367d79b878b8d9d91930d2337b
+      POOL_SHA: 87885bb8eab5c694b8d206a709b9a8c213cf5500
+      NOTERI_MAIN: e10b3a00a9b3ec803ed4a4cc8f4f8c62b06c8928
+    steps:
+      - name: Checkout exact untrusted feature SHA (read-only)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify feature identity, ancestry and 3-file scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_REF" = "refs/heads/feat/issue42-rules219-readonly-preflight-20261117"
+          git merge-base --is-ancestor "$NOTERI_MAIN" "$GITHUB_SHA"
+          python3 -B - <<'PY'
+          import subprocess
+          scope = set(subprocess.check_output(
+              ["git", "diff", "--name-only",
+               "e10b3a00a9b3ec803ed4a4cc8f4f8c62b06c8928", "HEAD"], text=True,
+          ).splitlines())
+          expected = {
+              "scripts/noteri_rules219_readonly_admission.py",
+              "tests/test_noteri_rules219_readonly_admission.py",
+              ".github/workflows/noteri-rules219-readonly-contract.yml",
+          }
+          if scope != expected:
+              raise SystemExit("NOTERI_219_SCOPE_MISMATCH")
+          print("NOTERI_219_SCOPE_OK", len(scope))
+          PY
+      - name: Checkout reviewed immutable Rules source (NOT the host)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: 40e3db3ef8b1fe367d79b878b8d9d91930d2337b
+          path: _rules
+          persist-credentials: false
+      - name: Checkout reviewed immutable Worker Pool (NOT the host)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/engineering-worker-pool
+          ref: 87885bb8eab5c694b8d206a709b9a8c213cf5500
+          path: _worker_pool
+          persist-credentials: false
+      - name: Read all pinned source objects and validate exact script bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C _rules rev-parse HEAD)" = "$RULES_SHA"
+          test "$(git -C _worker_pool rev-parse HEAD)" = "$POOL_SHA"
+          python3 -B - <<'PY'
+          import os
+          from pathlib import Path
+          from scripts.noteri_rules219_readonly_admission import verify_pins
+          result = verify_pins(
+              host=Path.cwd().resolve(),
+              rules=(Path.cwd() / "_rules").resolve(),
+              pool=(Path.cwd() / "_worker_pool").resolve(),
+              host_sha=os.environ["GITHUB_SHA"],
+          )
+          if result["source_pins_verified"] is not True:
+              raise SystemExit("NOTERI_219_SOURCE_PINS_NOT_VERIFIED")
+          print("NOTERI_219_SOURCE_PINS_OK", result["script_count"])
+          PY
+      - name: Positive, negative, forged receipt and replay tests
+        run: python3 -B -m unittest discover -v -s tests -p 'test_noteri_rules219_readonly_admission.py'
+      - name: Assert only two independent checkout directories are untracked
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import subprocess
+          observed = subprocess.check_output(
+              ["git", "status", "--porcelain", "--untracked-files=normal"],
+              text=True,
+          ).splitlines()
+          if sorted(observed) != ["?? _rules/", "?? _worker_pool/"]:
+              raise SystemExit("NOTERI_219_CI_WORKTREE_DRIFT")
+          print("NOTERI_219_HOST_NOT_TOUCHED_READY_FALSE")
+          PY
