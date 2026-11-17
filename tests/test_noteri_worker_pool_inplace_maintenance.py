@@ -58,6 +58,9 @@ def plan_fixture(tmp_path):
 
 def allow(monkeypatch):
     monkeypatch.setenv("NOTERI_POOL_MAINTENANCE_APPROVED_SHA", SHA)
+    # Synthetic mutation tests use an explicit verified-fence fixture.
+    # Production apply() always executes the real read-only sink verifier.
+    monkeypatch.setattr(m, "require_fence", lambda: None)
 
 
 def simulate(monkeypatch, tmp_path, *, failure=None):
@@ -107,6 +110,17 @@ def simulate(monkeypatch, tmp_path, *, failure=None):
     )])
     allow(monkeypatch)
     return proof, events
+
+
+def test_missing_destination_fence_blocks_before_preflight(tmp_path, monkeypatch):
+    monkeypatch.setenv("NOTERI_POOL_MAINTENANCE_APPROVED_SHA", SHA)
+    monkeypatch.delenv("NOTERI_POOL_MAINTENANCE_FENCE_SEQUENCE", raising=False)
+    called = []
+    monkeypatch.setattr(m, "preflight", lambda **_:
+                        called.append("unsafe") or {})
+    with pytest.raises(m.MaintenanceBlocked, match="fence_sink_not_verified"):
+        m.apply(local=tmp_path, expected_sha=SHA, confirm=m.CONFIRM)
+    assert called == []
 
 
 def test_no_approval_never_reaches_preflight(tmp_path, monkeypatch):
