@@ -277,6 +277,19 @@ class WorkflowBindingTests(unittest.TestCase):
         self.assertIn('"activation_authorized": False', independent)
         self.assertIn('"state_changed": False', independent)
 
+    def test_ci_runs_when_physical_workflow_changes(self):
+        contract = (Path(__file__).resolve().parents[1] /
+                    ".github/workflows/noteri-rules219-readonly-contract.yml").read_text(
+                        encoding="utf-8")
+        trigger_paths = contract.split("\n    paths:\n", 1)[1].split(
+            "\n\npermissions:\n", 1)[0].splitlines()
+        self.assertIn(
+            "      - .github/workflows/noteri-control-plane-probe.yml",
+            trigger_paths,
+        )
+        self.assertEqual(trigger_paths.count(
+            "      - .github/workflows/noteri-control-plane-probe.yml"), 1)
+
     def test_no_automatic_physical_dispatch(self):
         header = self.workflow.split("\njobs:", 1)[0]
         self.assertIn("workflow_dispatch:", header)

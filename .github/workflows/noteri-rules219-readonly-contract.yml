@@ -10,6 +10,7 @@ on:
       - scripts/noteri_rules219_readonly_admission.py
       - tests/test_noteri_rules219_readonly_admission.py
       - .github/workflows/noteri-rules219-readonly-contract.yml
+      - .github/workflows/noteri-control-plane-probe.yml
 
 permissions:
   contents: read
@@ -36,7 +37,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify feature identity, ancestry and 3-file scope
+      - name: Verify feature identity, ancestry and 4-file scope
         shell: bash
         run: |
           set -euo pipefail
