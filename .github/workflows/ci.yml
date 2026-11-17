@@ -87,6 +87,8 @@ jobs:
           python-version: "3.12"
       - name: Install isolated test dependencies
         run: python -m pip install --disable-pip-version-check pytest
+      - name: Verify Noteri sink fencing in hosted Windows (synthetic only)
+        run: python -m unittest -v tests.test_noteri_worker_pool_fence_sink
       - name: Validate Windows ACL API and SQL admin guards (no elevation or SQL)
         run: |
           python -m pytest -q tests/test_noteri_sql_admin_bundle_gate.py tests/test_noteri_sql_admin_errorlog_read.py tests/test_noteri_sql_certificate_errorlog.py
