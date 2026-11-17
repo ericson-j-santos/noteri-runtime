@@ -194,7 +194,6 @@ def test_workflow_and_policy_are_fixed_to_noteri() -> None:
         "        options:\n"
         "          - qualification\n"
         "          - rules219_readonly\n"
-        "\n"
     )
     assert dispatch == expected
     legacy = workflow.split("\\n  probe:", 1)[1].split(

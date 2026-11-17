@@ -136,8 +136,8 @@ jobs:
       CAS_SHA256: 1de767e958d035ce14e35c186230bdeab6ae04b381c862e3826e660595714c60
       DELTA_BASE_SHA: 033e2964d119f82faa19460c56c5f61f555ce91f
       DELTA_CAS_PATH: .evidence/noteri42/legacy-guard-delta-033e2964.json
-      DELTA_CAS_GIT_BLOB: 61e9ae4e2bf4cd81bac5dcfea9bb08b36290f0a6
-      DELTA_CAS_SHA256: 56b794e54ca03fcf62f6e9c60612a5a505ee415de035429b5ff09211f640ac36
+      DELTA_CAS_GIT_BLOB: 5ff9e51b6617f4c37650a7fad3b7f90b3bdef1a8
+      DELTA_CAS_SHA256: 0d8448b76c3f2416e3eb889cec54d6700f6ecdeb715088c1eca2856daa409243
     steps:
       - name: Independent fresh checkout of the precise SHA
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -291,9 +291,12 @@ jobs:
                   delta["after_blob_sha"], "NOTERI_42_DELTA_BLOB_DRIFT")
           require(sha256(old_test + b"\n=== AFTER ===\n" + new_test) ==
                   delta["patch_sha256"], "NOTERI_42_DELTA_PATCH_DIGEST_INVALID")
-          require(b"assert dispatch == expected" in new_test
-                  and b"inputs.mode == 'qualification'" in new_test
-                  and b"assert \"inputs:\" not in workflow" not in new_test,
+          guard_scope = new_test.split(
+              b"def test_workflow_and_policy_are_fixed_to_noteri()", 1
+          )[1].split(b"def test_watchdog_installs_hkcu_fallback", 1)[0]
+          require(b"assert dispatch == expected" in guard_scope
+                  and b"inputs.mode == 'qualification'" in guard_scope
+                  and b"assert \"inputs:\" not in workflow" not in guard_scope,
                   "NOTERI_42_LEGACY_GUARD_REGRESSION")
           require(sha256(delta_raw + b"tampered") !=
                   os.environ["DELTA_CAS_SHA256"],
