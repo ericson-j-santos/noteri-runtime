@@ -230,5 +230,60 @@ class ReadonlyContextTests(unittest.TestCase):
                 gate.main()
 
 
+
+class WorkflowBindingTests(unittest.TestCase):
+    """Static regression guards for the existing owner-only physical entrypoint."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = (Path(__file__).resolve().parents[1] /
+                        ".github/workflows/noteri-control-plane-probe.yml").read_text(
+                            encoding="utf-8")
+
+    def test_legacy_mode_still_explicit_and_default(self):
+        self.assertIn("default: qualification", self.workflow)
+        self.assertIn("inputs.mode == 'qualification'", self.workflow)
+        self.assertIn("PROBE-NOTERI-CONTROL-PLANE", self.workflow)
+
+    def test_physical_mode_owner_main_manual_only(self):
+        path = self.workflow.split("\n  rules219_probe:", 1)[1].split(
+            "\n  rules219_independent:", 1)[0]
+        for required in (
+            "github.actor == 'ericson-j-santos'",
+            "github.ref == 'refs/heads/main'",
+            "github.event_name == 'workflow_dispatch'",
+            "inputs.mode == 'rules219_readonly'",
+            "runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]",
+            "'SESSION_LAUNCH_OK'", "'--risk', '1'",
+            "'--require-runner-version-preflight'",
+            "noteri_rules219_readonly_admission.py",
+            "NOTERI_219_PHYSICAL_READONLY_RECEIPT_OK",
+        ):
+            self.assertIn(required, path)
+        self.assertNotIn("'--risk', '2'", path)
+        self.assertNotIn("upload-artifact", path)
+        self.assertNotIn("ollama run", path)
+
+    def test_pinned_sources_and_independent_readback(self):
+        for sha in (gate.RULES_SHA, gate.POOL_SHA,
+                    "58dcd4200f412a866278027ba9e433439a03f3b3"):
+            self.assertIn(sha, self.workflow)
+        independent = self.workflow.split("\n  rules219_independent:", 1)[1]
+        self.assertIn("needs: rules219_probe", independent)
+        self.assertIn("runner_name !== 'Noteri-runtime'", independent)
+        self.assertIn("NOTERI_219_INDEPENDENT_READBACK_OK_READY_FALSE", independent)
+        self.assertIn('"ready_for_builder": False', independent)
+        self.assertIn('"cost_zero_attested": False', independent)
+        self.assertIn('"activation_authorized": False', independent)
+        self.assertIn('"state_changed": False', independent)
+
+    def test_no_automatic_physical_dispatch(self):
+        header = self.workflow.split("\njobs:", 1)[0]
+        self.assertIn("workflow_dispatch:", header)
+        self.assertNotIn("push:", header)
+        self.assertNotIn("schedule:", header)
+        self.assertNotIn("workflow_call:", header)
+
+
 if __name__ == "__main__":
     unittest.main()

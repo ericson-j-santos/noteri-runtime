@@ -53,6 +53,7 @@ jobs:
               "scripts/noteri_rules219_readonly_admission.py",
               "tests/test_noteri_rules219_readonly_admission.py",
               ".github/workflows/noteri-rules219-readonly-contract.yml",
+              ".github/workflows/noteri-control-plane-probe.yml",
           }
           if scope != expected:
               raise SystemExit("NOTERI_219_SCOPE_MISMATCH")
