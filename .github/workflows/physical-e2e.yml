@@ -10,7 +10,7 @@ on:
         required: true
         default: e2e
         type: choice
-        options: [e2e, inventory, upgrade-preflight]
+        options: [e2e, inventory, upgrade-preflight, python-compat]
 
 permissions:
   contents: read
@@ -80,7 +80,7 @@ jobs:
 
   inventory:
     name: Governed Noteri watchdog physical inventory (read only)
-    if: github.actor == 'ericson-j-santos' && ((github.event_name == 'workflow_dispatch' && (inputs.mode == 'inventory' || inputs.mode == 'upgrade-preflight')) || (github.event_name == 'push' && (contains(github.event.head_commit.message, '[risk1-inventory-once]') || contains(github.event.head_commit.message, '[risk1-upgrade-preflight-once]'))))
+    if: github.actor == 'ericson-j-santos' && ((github.event_name == 'workflow_dispatch' && (inputs.mode == 'inventory' || inputs.mode == 'upgrade-preflight' || inputs.mode == 'python-compat')) || (github.event_name == 'push' && (contains(github.event.head_commit.message, '[risk1-inventory-once]') || contains(github.event.head_commit.message, '[risk1-upgrade-preflight-once]') || contains(github.event.head_commit.message, '[risk1-python-compat-once]'))))
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 7
     outputs:
@@ -88,6 +88,8 @@ jobs:
       receipt_sha256: ${{ steps.inventory.outputs.receipt_sha256 }}
       preflight_receipt_b64: ${{ steps.upgrade_preflight.outputs.preflight_receipt_b64 }}
       preflight_receipt_sha256: ${{ steps.upgrade_preflight.outputs.preflight_receipt_sha256 }}
+      python_receipt_b64: ${{ steps.python_compat.outputs.python_receipt_b64 }}
+      python_receipt_sha256: ${{ steps.python_compat.outputs.python_receipt_sha256 }}
     env:
       RULES_SHA: 58dcd4200f412a866278027ba9e433439a03f3b3
       CORRELATION_ID: noteri-watchdog-inventory-${{ github.run_id }}-${{ github.run_attempt }}
@@ -191,6 +193,74 @@ jobs:
           "receipt_b64=$([System.Convert]::ToBase64String($bytes))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
           "receipt_sha256=$digest" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
           Write-Output 'NOTERI_WATCHDOG_RISK1_INVENTORY_COMPLETE_NON_PROMOTING'
+
+
+      - name: Probe scheduled watchdog Python using existing Risk1 Gateway
+        id: python_compat
+        if: (github.event_name == 'workflow_dispatch' && inputs.mode == 'python-compat') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[risk1-python-compat-once]'))
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $args = @('--policy', (Join-Path $rules 'config/command-gateway.policy.json'),
+            '--correlation-id', $env:CORRELATION_ID,
+            'run', '--cwd', $env:TARGET_PATH,
+            '--session-id', $env:SESSION_ID, '--risk', '1', '--timeout', '60',
+            '--expected-head', $env:GITHUB_SHA, '--',
+            'python3', '-B', (Join-Path $env:TARGET_PATH 'scripts/noteri_watchdog_python_compat_readonly.py'),
+            '--expected-head', $env:GITHUB_SHA,
+            '--correlation-id', $env:CORRELATION_ID,
+            '--confirm', 'CHECK-NOTERI-TASK-PYTHON-READONLY')
+          $raw = @(& python3 -B (Join-Path $rules 'scripts/command_gateway.py') @args)
+          $code = $LASTEXITCODE
+          if ($code -ne 0 -or -not $raw) {
+            if ($raw) {
+              try {
+                $reply = @($raw)[-1] | ConvertFrom-Json
+                $blocked = $reply.stdout | ConvertFrom-Json
+                if ($blocked.result -eq 'BLOCKED' -and $blocked.reason -cmatch '^[A-Z][A-Z0-9_]{3,79}$') {
+                  throw "NOTERI_TASK_PYTHON_$($blocked.reason)"
+                }
+              } catch {
+                if ([string]$_.Exception.Message -cmatch '^NOTERI_TASK_PYTHON_[A-Z0-9_]+$') { throw }
+              }
+            }
+            throw 'NOTERI_TASK_PYTHON_GATEWAY_BLOCKED'
+          }
+          $envelope = @($raw)[-1] | ConvertFrom-Json
+          if ($envelope.result -ne 'ok' -or $envelope.gateway_exit_code -ne 0 -or
+              $envelope.command_exit_code -ne 0 -or $envelope.state_changed -ne $false) {
+            throw 'NOTERI_TASK_PYTHON_GATEWAY_INVALID'
+          }
+          $result = $envelope.stdout | ConvertFrom-Json
+          if ($result.result -notin @('PYWIN32_READY', 'PYWIN32_NOT_IMPORTABLE') -or
+              $result.expected_sha -ne $env:GITHUB_SHA -or
+              $result.correlation_id -ne $env:CORRELATION_ID -or
+              $result.state_changed -ne $false -or
+              $result.installation_authorized -ne $false -or
+              $result.task_s4u_verified -ne $true -or
+              $result.task_python_sha256 -notmatch '^[0-9a-f]{64}$' -or
+              $result.gateway_python_sha256 -notmatch '^[0-9a-f]{64}$') {
+            throw 'NOTERI_TASK_PYTHON_RECEIPT_INVALID'
+          }
+          $result | Add-Member -NotePropertyName run_id -NotePropertyValue $env:GITHUB_RUN_ID
+          $result | Add-Member -NotePropertyName run_attempt -NotePropertyValue $env:GITHUB_RUN_ATTEMPT
+          $json = [string]($result | ConvertTo-Json -Depth 6 -Compress)
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+          if ($bytes.Length -lt 180 -or $bytes.Length -gt 4096) {
+            throw 'NOTERI_TASK_PYTHON_RECEIPT_SIZE_INVALID'
+          }
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          try { $digest = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
+          finally { $sha.Dispose() }
+          "python_receipt_b64=$([Convert]::ToBase64String($bytes))" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          "python_receipt_sha256=$digest" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          Write-Output 'NOTERI_TASK_PYTHON_INVENTORY_COMPLETE_NO_INSTALL'
 
       - name: Preflight exact installed-to-candidate upgrade through existing Risk1 Gateway
         id: upgrade_preflight
@@ -382,3 +452,44 @@ jobs:
             (.run_id | tostring) == env.GITHUB_RUN_ID and
             (.run_attempt | tostring) == env.GITHUB_RUN_ATTEMPT' >/dev/null
           echo 'NOTERI_WATCHDOG_UPGRADE_PREFLIGHT_INDEPENDENT_READBACK_OK_NO_INSTALL'
+
+  python_compat_readback:
+    name: Independent Python compatibility receipt check
+    needs: inventory
+    if: needs.inventory.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'python-compat') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[risk1-python-compat-once]')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    env:
+      RECEIPT_B64: ${{ needs.inventory.outputs.python_receipt_b64 }}
+      RECEIPT_SHA256: ${{ needs.inventory.outputs.python_receipt_sha256 }}
+    steps:
+      - name: Verify source SHA, receipt digest and non-mutation
+        run: |
+          set -euo pipefail
+          test -n "$RECEIPT_B64"
+          [[ "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(printf %s "$RECEIPT_B64" | wc -c)" -le 8192
+          observed="$(printf %s "$RECEIPT_B64" | base64 --decode | sha256sum | cut -d' ' -f1)"
+          test "$observed" = "$RECEIPT_SHA256"
+          printf %s "$RECEIPT_B64" | base64 --decode | jq -e \
+            --arg source "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" '
+              .schema == 1 and .expected_sha == $source and
+              .result == (if .task_pywin32_importable then "PYWIN32_READY" else "PYWIN32_NOT_IMPORTABLE" end) and
+              (.task_pywin32_importable | type) == "boolean" and
+              (.gateway_pywin32_importable | type) == "boolean" and
+              (.same_interpreter | type) == "boolean" and
+              (.task_sha256 | test("^[0-9a-f]{64}$")) and
+              (.task_python_sha256 | test("^[0-9a-f]{64}$")) and
+              (.gateway_python_sha256 | test("^[0-9a-f]{64}$")) and
+              .task_s4u_verified == true and
+              .state_changed == false and .installation_authorized == false and
+              .production_touched == false and
+              .run_id == $run and .run_attempt == $attempt' >/dev/null
+          printf %s "$RECEIPT_B64" | base64 --decode | jq -c '{
+            result, profile, task_pywin32_importable, gateway_pywin32_importable,
+            same_interpreter, task_python_sha256, gateway_python_sha256,
+            state_changed, installation_authorized
+          }'
+          echo NOTERI_PYTHON_COMPAT_INDEPENDENT_READBACK_OK

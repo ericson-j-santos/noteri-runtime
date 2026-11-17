@@ -114,3 +114,39 @@ def test_preflight_failure_diagnostic_is_allowlisted_and_never_raw():
     assert "throw \"NOTERI_WATCHDOG_UPGRADE_PREFLIGHT_$reason\"" in step
     assert "Write-Output $envelope" not in step
     assert "Write-Output $envelope.stderr" not in step
+
+
+def test_python_compat_only_owner_only_readonly_and_independent_readback():
+    doc = data()
+    events = doc.get("on", doc.get(True))
+    assert "python-compat" in events["workflow_dispatch"]["inputs"]["mode"]["options"]
+    job = doc["jobs"]["inventory"]
+    assert "github.actor == 'ericson-j-santos'" in job["if"]
+    assert "[risk1-python-compat-once]" in job["if"]
+    step = next(s for s in job["steps"] if s.get("id") == "python_compat")
+    command = step["run"]
+    assert "'--risk', '1'" in command
+    assert "'--expected-head', $env:GITHUB_SHA" in command
+    assert "noteri_watchdog_python_compat_readonly.py" in command
+    assert "state_changed -ne $false" in command
+    assert "installation_authorized -ne $false" in command
+    assert "'--risk', '2'" not in command
+    assert "pip install" not in command
+    readback = doc["jobs"]["python_compat_readback"]
+    assert readback["needs"] == "inventory"
+    assert readback["runs-on"] == "ubuntu-latest"
+    verify = readback["steps"][0]["run"]
+    assert "sha256sum" in verify and "jq -e" in verify
+    assert ".state_changed == false" in verify
+    assert ".installation_authorized == false" in verify
+
+
+def test_python_compat_does_not_duplicate_jobs_or_change_upgrade_gate():
+    raw = WORKFLOW.read_text(encoding="utf-8")
+    assert raw.count("\n  inventory_readback:") == 1
+    assert raw.count("\n  upgrade_preflight_readback:") == 1
+    assert raw.count("\n  python_compat_readback:") == 1
+    assert raw.count("id: python_compat") == 1
+    upgrade = next(s for s in data()["jobs"]["inventory"]["steps"] if s.get("id") == "upgrade_preflight")
+    assert "inputs.mode == 'upgrade-preflight'" in upgrade["if"]
+    assert "'--mode', 'preflight'" in upgrade["run"]
