@@ -201,6 +201,57 @@ def probe_prerequisites(*, source_sha: str, session_id: str, host: str,
     }
 
 
+
+def probe_source_layout(*, source_sha: str, session_id: str, host: str,
+                        platform: str, source_path: Path = SOURCE_CONFIG) -> dict:
+    """Inventario local restrito; nao abre arquivo, segredo ou rede e nao altera o disco.
+
+    Somente estados discretos dos ancestrais fixos. A existencia de uma pasta
+    NAO comprova permissoes/ACL para criacao segura ou integridade da origem.
+    """
+    guard(platform == "nt" and host.casefold() == HOST.casefold(),
+          "NOTERI_WINDOWS_REQUIRED")
+    guard(len(source_sha) == 40 and all(c in "0123456789abcdef" for c in source_sha),
+          "INVALID_SOURCE_SHA")
+    guard(3 <= len(session_id) <= 80 and all(c.isalnum() or c in "-_." for c in session_id),
+          "INVALID_SESSION_ID")
+
+    def state(path: Path, *, directory: bool) -> str:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            return "MISSING"
+        except PermissionError:
+            return "ACCESS_DENIED"
+        except OSError:
+            return "INDETERMINATE"
+        if (stat.S_ISLNK(info.st_mode) or
+            bool(getattr(info, "st_file_attributes", 0) &
+                 getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))):
+            return "REPARSE_REJECTED"
+        ok = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+        return "EXPECTED_TYPE" if ok else "UNEXPECTED_TYPE"
+
+    ancestors = source_path.parents
+    guard(len(ancestors) >= 3, "SOURCE_LAYOUT_PATH_INVALID")
+    result = {
+        "programdata": state(ancestors[2], directory=True),
+        "reqsys": state(ancestors[1], directory=True),
+        "store": state(ancestors[0], directory=True),
+        "source_config": state(source_path, directory=False),
+    }
+    return {
+        "schema_version": SCHEMA,
+        "status": "SOURCE_LAYOUT_OBSERVED_UNVERIFIED",
+        "host": HOST, "environment": "DEV", "source_sha": source_sha,
+        "session_id": session_id, "correlation_id": CORRELATION,
+        "idempotency_key": IDEMPOTENCY, "layout": result,
+        "acl_verified": False, "credential_metadata_checked": False,
+        "mutations_performed": False, "independent_effect_verified": False,
+        "transport_ready": False, "powerbi_opened": False, "data_refreshed": False,
+    }
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise Blocked("REDIRECT_REJECTED")
@@ -349,11 +400,19 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Ingestao tipada PBIX STORE Noteri DEV")
     parser.add_argument("--confirm", default="")
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--layout-only", action="store_true")
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--session-id", required=True)
     args = parser.parse_args(argv)
     try:
-        if args.preflight_only:
+        guard(not (args.preflight_only and args.layout_only), "AMBIGUOUS_PREFLIGHT")
+        if args.layout_only:
+            guard(not args.confirm, "AMBIGUOUS_PREFLIGHT")
+            result = probe_source_layout(
+                source_sha=args.source_sha, session_id=args.session_id,
+                host=socket.gethostname(), platform=os.name,
+            )
+        elif args.preflight_only:
             guard(not args.confirm, "AMBIGUOUS_PREFLIGHT")
             result = probe_prerequisites(
                 source_sha=args.source_sha, session_id=args.session_id,
@@ -375,7 +434,7 @@ def main(argv=None) -> int:
     print(json.dumps(result, ensure_ascii=True, sort_keys=True))
     return 0 if result["status"] in (
         "INGESTED_AND_VERIFIED", "ALREADY_PRESENT_AND_VERIFIED",
-        "PREREQUISITES_PRESENT_UNVERIFIED",
+        "PREREQUISITES_PRESENT_UNVERIFIED", "SOURCE_LAYOUT_OBSERVED_UNVERIFIED",
     ) else 2
 
 if __name__ == "__main__":

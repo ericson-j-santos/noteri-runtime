@@ -57,6 +57,47 @@ class IngestTests(unittest.TestCase):
             credential_presence_provider=kwargs.get("cred", lambda: True),
         )
 
+    def layout(self, *, host="Noteri", platform="nt", source_path=None):
+        return mod.probe_source_layout(
+            source_sha=self.source_sha, session_id=self.session,
+            host=host, platform=platform,
+            source_path=source_path or (Path(self.tmp.name) / "ProgramData" /
+                "ReqSys" / "PowerBIStore" / "source-file-id.txt"),
+        )
+
+    def test_source_layout_no_write_or_credential_call(self):
+        path = Path(self.tmp.name) / "ProgramData" / "ReqSys" / "PowerBIStore"
+        path.parent.mkdir(parents=True)
+        before = sorted(x.as_posix() for x in Path(self.tmp.name).rglob("*"))
+        with patch.object(mod, "_credential_present_windows", side_effect=AssertionError("token checked")):
+            r = self.layout()
+        self.assertEqual(r["layout"], {
+            "programdata": "EXPECTED_TYPE", "reqsys": "EXPECTED_TYPE",
+            "store": "MISSING", "source_config": "MISSING"})
+        self.assertFalse(r["acl_verified"])
+        self.assertFalse(r["credential_metadata_checked"])
+        self.assertFalse(r["transport_ready"])
+        self.assertFalse(r["mutations_performed"])
+        self.assertEqual(before, sorted(x.as_posix() for x in Path(self.tmp.name).rglob("*")))
+        self.assertEqual(r, self.layout())
+
+    def test_source_layout_wrong_host_denied(self):
+        self.blocked("NOTERI_WINDOWS_REQUIRED",lambda:self.layout(host="other"))
+        self.blocked("NOTERI_WINDOWS_REQUIRED",lambda:self.layout(platform="posix"))
+
+    def test_source_layout_rejects_reparse(self):
+        basedir=Path(self.tmp.name)/"ProgramData"
+        basedir.mkdir()
+        (basedir/"ReqSys").symlink_to(basedir, target_is_directory=True)
+        result=self.layout()
+        self.assertEqual(result["layout"]["reqsys"],"REPARSE_REJECTED")
+
+    def test_source_layout_no_secret_data_in_receipt(self):
+        r=json.dumps(self.layout())
+        self.assertNotIn(FAKE_ID, r)
+        self.assertNotIn(mod.CRED_TARGET, r)
+        self.assertNotIn(str(mod.SOURCE_CONFIG), r)
+
     def test_preflight_read_only_success_not_transport_ready(self):
         before = list(Path(self.tmp.name).rglob("*"))
         r = self.preflight()
