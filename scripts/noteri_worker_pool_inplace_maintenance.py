@@ -35,6 +35,7 @@ from scripts import noteri_worker_pool_queue_readonly as queue
 from scripts import noteri_worker_pool_rules_pin_sync as rules_pin
 from scripts import noteri_worker_pool_authenticated_readback as authenticated
 from scripts import noteri_worker_pool_control_package as control
+from scripts import noteri_worker_pool_fence_sink as sink_fence
 
 CONFIRM = "MAINTAIN-EXISTING-NOTERI-WORKER-POOL-API"
 SCHEMA = "1"
@@ -196,6 +197,14 @@ def approval_required(expected_sha: str, *, confirm: str) -> None:
          and type(expected_sha) is str and bool(SHA40.fullmatch(expected_sha))
          and os.environ.get("NOTERI_POOL_MAINTENANCE_APPROVED_SHA") == expected_sha,
          "new_sha_authorization_required")
+
+
+def require_fence() -> None:
+    """Verify live target-wide fencing at the destination before any mutation."""
+    try:
+        sink_fence.require_active_fence()
+    except sink_fence.SinkFenceBlocked:
+        raise MaintenanceBlocked("fence_sink_not_verified") from None
 
 
 def preflight(*, local: Path, expected_sha: str, live: bool = True) -> dict[str, Any]:
@@ -456,6 +465,7 @@ def _safe_rollback(local: Path, plan: dict, base: Path, *, stopped: bool) -> boo
 
 def apply(*, local: Path, expected_sha: str, confirm: str) -> dict[str, Any]:
     approval_required(expected_sha, confirm=confirm)
+    require_fence()  # before any backup, stop, or physical state change
     plan = preflight(local=local, expected_sha=expected_sha)
     paths = plan["paths"]
     folder = paths["maintenance"] / expected_sha
@@ -476,6 +486,7 @@ def apply(*, local: Path, expected_sha: str, confirm: str) -> dict[str, Any]:
         need(backups == {"runner": plan["old_sha"], "task_xml": sha(plan["xml"])},
              "backup_hash_mismatch")
         _task_xml_stable(plan["xml"])
+        require_fence()  # recheck after backup, immediately before stopping
         stopped = True  # Stop may partially succeed before returning.
         _stop(local)
         _task_xml_stable(plan["xml"])
@@ -483,11 +494,14 @@ def apply(*, local: Path, expected_sha: str, confirm: str) -> dict[str, Any]:
         dbhash = sqlite_consistent_backup(paths["database"], folder / "pool-consistent.db")
         need(_zero_instances(local), "service_restarted_during_backup")
         queue_safe(local)
+        require_fence()  # before quarantine and file movement
         _quarantine(paths)
         need(_zero_instances(local), "service_restarted_during_quarantine")
+        require_fence()  # before mutating the installed runner
         _atomic_runner(paths["runner"], plan["new_runner"])
         need(_zero_instances(local), "service_restarted_during_runner_update")
         _task_xml_stable(plan["xml"])
+        require_fence()  # before starting the new task instance
         _start(local, paths)
         # Independent installed-source, task XML/COM, 401 control and authenticated
         # contract replay. A healthy GET /health alone is not acceptance.
