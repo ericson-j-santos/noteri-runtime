@@ -2,7 +2,7 @@
 
 Issue: [Noteri #42](https://github.com/ericson-j-santos/noteri-runtime/issues/42), related to [Rules #217](https://github.com/ericson-j-santos/chatgpt-operational-rules/issues/217).
 
-Base source: `noteri-runtime@fd07d0742ad345efe934c7b800145765aaba6462` (historical, 67 commits behind `main` at inspection). This candidate **does not preserve the previously authorised code SHA**. It is not eligible for direct installation, release, merge, or maintenance.
+Base source: `noteri-runtime@fd07d0742ad345efe934c7b800145765aaba6462` (67 commits **ahead** of `main`, zero behind, verified via GitHub compare in both directions). This candidate **does not preserve the previously authorised code SHA**. It is not eligible for direct installation, release, merge, or maintenance.
 
 ## Exact destination contract
 
@@ -27,6 +27,8 @@ All values must match the persistent state from the Gateway; missing, mismatched
 ## Isolated verification
 
 `python -m unittest -v tests.test_noteri_worker_pool_fence_sink` — 14 filesystem tests, including valid proof, missing selectors, wrong host/process, stale sequence, digest changes, forged nonce, duplicates, symlinks and oversized evidence. These can run on POSIX with OS identity mocked, but Windows native and whole-service E2E remain required.
+
+The original maintenance tests use explicit synthetic fence fixtures; rollback tests added for loss of ownership before restore/restart must also pass independently. The CI's push trigger was extended only for this exact repair branch.
 
 The original maintenance tests use explicit synthetic fence fixtures; this never changes the deployed `require_fence()` gate. Noteri host must remain unchanged while CI/readback and authorisation are missing.
 
