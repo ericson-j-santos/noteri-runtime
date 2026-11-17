@@ -1,0 +1,161 @@
+name: Noteri STORE - Identity Preflight (read only)
+
+on:
+  push:
+    branches:
+      - feature/noteri-private-powerbi-store-ingest-issue92
+    paths:
+      - .github/workflows/noteri-powerbi-store-identity-preflight.yml
+      - scripts/noteri_powerbi_store_ingest.py
+      - tests/test_noteri_powerbi_store_ingest.py
+      - tests/test_noteri_powerbi_store_entrypoint.py
+  pull_request:
+    paths:
+      - .github/workflows/noteri-powerbi-store-identity-preflight.yml
+      - scripts/noteri_powerbi_store_ingest.py
+      - tests/test_noteri_powerbi_store_ingest.py
+      - tests/test_noteri_powerbi_store_entrypoint.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: noteri-store-identity-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+  RULES_SHA: 58dcd4200f412a866278027ba9e433439a03f3b3
+  APPROVED_INGEST_BLOB: 0cdeed7cf94ab187157b44b43cc2bc2d11221cc1
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  contract:
+    name: Test scoped entrypoint on standard public runner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact evaluated SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Confirm code identity and no unauthorized executable change
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git hash-object scripts/noteri_powerbi_store_ingest.py)" = "$APPROVED_INGEST_BLOB"
+      - name: Run scoped positive and negative controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -B -m unittest -v tests/test_noteri_powerbi_store_ingest.py tests/test_noteri_powerbi_store_entrypoint.py
+
+  physical:
+    name: Noteri identity presence - governed and read only
+    needs: contract
+    if: >-
+      github.event_name == 'push' &&
+      github.actor == 'ericson-j-santos' &&
+      github.ref == 'refs/heads/feature/noteri-private-powerbi-store-ingest-issue92' &&
+      needs.contract.result == 'success'
+    runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
+    timeout-minutes: 8
+    concurrency:
+      group: noteri-store-identity-physical
+      cancel-in-progress: false
+    steps:
+      - name: Checkout exact evaluated Noteri source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout immutable canonical rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: 58dcd4200f412a866278027ba9e433439a03f3b3
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Bootstrap and invoke one read-only capability through Command Gateway
+        shell: powershell
+        env:
+          CORRELATION_ID: noteri-store-identity-${{ github.run_id }}-${{ github.run_attempt }}
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:COMPUTERNAME -ine 'Noteri' -or
+              -not $env:RUNNER_NAME.ToLowerInvariant().StartsWith('noteri') -or
+              $env:GITHUB_REPOSITORY -ne 'ericson-j-santos/noteri-runtime' -or
+              $env:GITHUB_SHA -ne $env:SOURCE_SHA -or
+              $env:GITHUB_REF -ne 'refs/heads/feature/noteri-private-powerbi-store-ingest-issue92') {
+            throw 'NOTERI_STORE_HOST_OR_SHA_REJECTED'
+          }
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $policy = Join-Path $rules 'config/command-gateway.policy.json'
+          $launcher = Join-Path $rules 'scripts/session_launcher.py'
+          $gateway = Join-Path $rules 'scripts/command_gateway.py'
+          # The launcher validates both Git remote and exact source SHA. A transient
+          # GitHub checkout cannot itself be used as the Gateway working directory.
+          $launchArgs = @('--policy', $policy, '--repo', $env:GITHUB_WORKSPACE,
+            '--session-prefix', 'pbix-store-id', '--correlation-id', $env:CORRELATION_ID,
+            '--expected-head', $env:SOURCE_SHA,
+            '--sync-ref', 'origin/feature/noteri-private-powerbi-store-ingest-issue92',
+            '--require-runner-version-preflight')
+          $raw = @(& python3 -B $launcher @launchArgs)
+          $launchExit = $LASTEXITCODE
+          if ($launchExit -ne 0 -or -not $raw) { throw 'NOTERI_STORE_SESSION_BLOCKED' }
+          $session = @($raw)[-1] | ConvertFrom-Json
+          if ($session.result -ne 'SESSION_LAUNCH_OK' -or
+              $session.state_validated -ne $true -or
+              $session.head -ne $env:SOURCE_SHA -or
+              $session.rules_version -ne '1.6.21' -or
+              $session.runner_version_preflight.ok -ne $true -or
+              $session.session_id -notmatch '^[a-z0-9_.-]{3,64}$') {
+            throw 'NOTERI_STORE_SESSION_INTEGRITY_BLOCKED'
+          }
+          $codePath = Join-Path $session.target_path 'scripts/noteri_powerbi_store_ingest.py'
+          $gatewayArgs = @('--policy', $policy, '--correlation-id', $env:CORRELATION_ID,
+            'run', '--cwd', $session.target_path, '--session-id', $session.session_id,
+            '--risk', '1', '--timeout', '30', '--expected-head', $env:SOURCE_SHA,
+            '--', 'python3', '-B', $codePath, '--preflight-only',
+            '--source-sha', $env:SOURCE_SHA, '--session-id', $session.session_id)
+          $raw = @(& python3 -B $gateway @gatewayArgs)
+          $gatewayExit = $LASTEXITCODE
+          if (-not $raw) { throw 'NOTERI_STORE_GATEWAY_NO_RECEIPT' }
+          $envelope = @($raw)[-1] | ConvertFrom-Json
+          if ($envelope.state_changed -ne $false -or
+              $envelope.before.head -ne $env:SOURCE_SHA -or
+              $envelope.after.head -ne $env:SOURCE_SHA) {
+            throw 'NOTERI_STORE_GATEWAY_STATE_MISMATCH'
+          }
+          $report = $envelope.stdout | ConvertFrom-Json
+          if ($report.status -eq 'BLOCKED') {
+            if ($report.reason -notin @('SOURCE_CONFIG_UNAVAILABLE',
+                'SOURCE_ID_UNAPPROVED', 'CREDENTIAL_UNAVAILABLE',
+                'NOTERI_WINDOWS_REQUIRED')) {
+              throw 'NOTERI_STORE_UNEXPECTED_PREFLIGHT_REJECTION'
+            }
+            Write-Output "NOTERI_STORE_PREFLIGHT_BLOCKED=$($report.reason)"
+            throw 'NOTERI_STORE_PREREQUISITES_NOT_READY'
+          }
+          if ($gatewayExit -ne 0 -or $envelope.result -ne 'ok' -or
+              $envelope.gateway_exit_code -ne 0 -or
+              $envelope.command_exit_code -ne 0 -or
+              $report.status -ne 'PREREQUISITES_PRESENT_UNVERIFIED' -or
+              $report.source_sha -ne $env:SOURCE_SHA -or
+              $report.session_id -ne $session.session_id -or
+              $report.mutations_performed -ne $false -or
+              $report.transport_ready -ne $false -or
+              $report.credential_scope_validated -ne $false -or
+              $report.credential_freshness_validated -ne $false -or
+              $report.powerbi_opened -ne $false) {
+            throw 'NOTERI_STORE_PREFLIGHT_RECEIPT_REJECTED'
+          }
+          Write-Output 'NOTERI_STORE_IDENTITY_PRESENCE_ONLY_OK'
+          Write-Output "NOTERI_STORE_SOURCE_SHA=$env:SOURCE_SHA"
