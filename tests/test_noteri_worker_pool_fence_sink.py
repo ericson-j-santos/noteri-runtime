@@ -114,37 +114,40 @@ class SinkFenceTests(unittest.TestCase):
         self.rejects("redirected_state_path")
 
     def test_file_swap_during_read_rejected_even_if_same_size(self):
-        original_stat = os.stat
-        called = [0]
-        def swap_on_third_stat(path, *args, **kwargs):
-            if (Path(path) == self.counter and kwargs.get("follow_symlinks") is False):
-                called[0] += 1
-                if called[0] == 3:
-                    contents = self.counter.read_text()
-                    self.counter.rename(self.local / "old-counter.json")
-                    self.counter.write_text(contents)
-            return original_stat(path, *args, **kwargs)
-        with mock.patch.object(sink.os, "stat", side_effect=swap_on_third_stat):
+        # Replace the leaf after bytes have been read but before final
+        # descriptor/entry verification. Never rely on os.stat call counts.
+        from contextlib import contextmanager
+        original_fdopen = os.fdopen
+        original = self.counter.read_text()
+        @contextmanager
+        def fdopen_with_swap(fd, *args, **kwargs):
+            with original_fdopen(fd, *args, **kwargs) as handle:
+                class Reader:
+                    def read(_, size=-1):
+                        data = handle.read(size)
+                        self.counter.rename(self.local / "old-counter.json")
+                        self.counter.write_text(original)
+                        return data
+                yield Reader()
+        with mock.patch.object(sink.os, "fdopen", side_effect=fdopen_with_swap):
             self.rejects("state_replaced_during_read")
-        self.assertEqual(called[0], 3)
+        self.assertEqual(self.counter.read_text(), original)
 
     def test_parent_swap_after_file_entry_read_rejected(self):
-        original_stat = os.stat
-        called = [0]
-        def swap_parent_after_leaf_validation(path, *args, **kwargs):
-            if (Path(path) == self.counter and kwargs.get("follow_symlinks") is False):
-                called[0] += 1
-                if called[0] == 3:
-                    old = original_stat(path, *args, **kwargs)
-                    data = self.counter.read_text()
-                    self.root.rename(self.local / "old-state-dir")
-                    self.root.mkdir()
-                    self.counter.write_text(data)
-                    return old
-            return original_stat(path, *args, **kwargs)
-        with mock.patch.object(sink.os, "stat", side_effect=swap_parent_after_leaf_validation):
+        # Swap ancestor immediately after descriptor closure, which occurs
+        # after the leaf entry has passed its post-read identity check.
+        original_close = os.close
+        called = []
+        def close_with_parent_swap(fd):
+            original_close(fd)
+            called.append("closed")
+            data = self.counter.read_text()
+            self.root.rename(self.local / "old-state-dir")
+            self.root.mkdir()
+            self.counter.write_text(data)
+        with mock.patch.object(sink.os, "close", side_effect=close_with_parent_swap):
             self.rejects("parent_or_entry_replaced")
-        self.assertEqual(called[0], 3)
+        self.assertEqual(called, ["closed"])
 
     def test_large_file_rejected(self):
         self.counter.write_text(" "*(sink.MAX_READ + 1))
