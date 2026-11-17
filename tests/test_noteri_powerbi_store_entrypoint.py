@@ -49,7 +49,7 @@ class EntryPointTests(unittest.TestCase):
         self.assertEqual(t.count('actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09'), 3)
         self.assertEqual(t.count('persist-credentials: false'), 3)
         self.assertIn('58dcd4200f412a866278027ba9e433439a03f3b3', t)
-        self.assertIn('APPROVED_INGEST_BLOB: 6d62866951c044c16ca0bc2ef03c05f871fa4021', t)
+        self.assertIn('APPROVED_INGEST_BLOB: 71d0baa654ffd074aa0a2ebc10e9962bada7317d', t)
         self.assertIn('git hash-object scripts/noteri_powerbi_store_ingest.py', t)
         self.assertIn('--expected-head', t)
         self.assertIn('origin/feature/noteri-private-powerbi-store-ingest-issue92', t)

@@ -27,7 +27,7 @@ concurrency:
 env:
   SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
   RULES_SHA: 58dcd4200f412a866278027ba9e433439a03f3b3
-  APPROVED_INGEST_BLOB: 6d62866951c044c16ca0bc2ef03c05f871fa4021
+  APPROVED_INGEST_BLOB: 71d0baa654ffd074aa0a2ebc10e9962bada7317d
   PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
