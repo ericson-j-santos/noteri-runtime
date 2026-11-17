@@ -114,15 +114,20 @@ def upgrade_preflight_using_task_python(repo: Path, exe: Path, executable_sha: s
         value = json.loads(finished.stdout.strip())
     except ValueError as exc:
         raise Blocked("UPGRADE_PREFLIGHT_RESPONSE_INVALID") from exc
-    if not isinstance(value, dict) or value.get("state_changed") is not False:
+    if not isinstance(value, dict):
         raise Blocked("UPGRADE_PREFLIGHT_RESPONSE_INVALID")
     if sha256(exe) != executable_sha or sha256(script) != script_sha or sha256(source) != source_sha:
         raise Blocked("UPGRADE_PREFLIGHT_BYTES_CHANGED")
     if finished.returncode == 0 and value.get("result") == "PREFLIGHT_OK_NOT_AUTHORIZED":
-        if value.get("target_sha") != expected_head or value.get("old_sha") != OLD_SHA:
+        if (value.get("state_changed") is not False or
+            value.get("target_sha") != expected_head or value.get("old_sha") != OLD_SHA):
             raise Blocked("UPGRADE_PREFLIGHT_RESPONSE_INVALID")
         return "PREFLIGHT_OK_NOT_AUTHORIZED"
     if finished.returncode != 0 and value.get("result") == "BLOCKED":
+        # Contrato de recusa do updater: nao tem state_changed, pois nao efetuou
+        # operacao, mas declara state_verified=false e production_touched=false.
+        if value.get("state_verified") is not False or value.get("production_touched") is not False:
+            raise Blocked("UPGRADE_PREFLIGHT_RESPONSE_INVALID")
         reason = value.get("reason")
         if isinstance(reason, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{3,75}", reason):
             return "BLOCKED_" + reason
@@ -194,6 +199,10 @@ def check(expected_head: str, correlation: str, confirmation: str, *, probe_upgr
             upgrade_preflight_using_task_python(repo, resolved, binary_sha, expected_head, correlation, safe_env)
             if available else "SKIPPED_PYWIN32_UNAVAILABLE"
         )
+        # Releitura independente do agendamento depois do preflight.
+        _, post_task_sha = read_task(watchdog, inventory)
+        if post_task_sha != task_digest:
+            raise Blocked("TASK_CHANGED_DURING_PREFLIGHT")
     return {
         "schema": 1, "result": "PYWIN32_READY" if available else "PYWIN32_NOT_IMPORTABLE",
         "expected_sha": expected_head, "correlation_id": correlation,

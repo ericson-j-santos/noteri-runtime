@@ -118,3 +118,39 @@ def test_fixed_upgrade_preflight_rejects_mutated_result(monkeypatch, tmp_path):
     monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: Completed())
     with pytest.raises(m.Blocked, match="UPGRADE_PREFLIGHT_RESPONSE_INVALID"):
         m.upgrade_preflight_using_task_python(tmp_path, exe, m.sha256(exe), "a"*40, "test-1234", {})
+
+
+def test_fixed_upgrade_preflight_rejects_safely_without_mutation(monkeypatch, tmp_path):
+    import json
+    exe = tmp_path / "python.exe"
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    exe.write_bytes(b"python")
+    (scripts / "noteri_watchdog_transactional_upgrade.py").write_bytes(b"upgrade")
+    (scripts / "noteri_control_plane_watchdog.py").write_bytes(b"watchdog")
+    class Completed:
+        returncode = 2
+        stdout = json.dumps({"result": "BLOCKED", "reason": "ADMINISTRATIVE_APPROVAL_REQUIRED",
+                             "state_verified": False, "production_touched": False})
+    monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: Completed())
+    assert m.upgrade_preflight_using_task_python(
+        tmp_path, exe, m.sha256(exe), "a"*40, "test-1234", {}
+    ) == "BLOCKED_ADMINISTRATIVE_APPROVAL_REQUIRED"
+
+
+def test_fixed_upgrade_preflight_rejects_unsafe_error_receipt(monkeypatch, tmp_path):
+    import json
+    exe = tmp_path / "python.exe"
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    exe.write_bytes(b"python")
+    (scripts / "noteri_watchdog_transactional_upgrade.py").write_bytes(b"upgrade")
+    (scripts / "noteri_control_plane_watchdog.py").write_bytes(b"watchdog")
+    class Completed:
+        returncode = 2
+        stdout = json.dumps({"result": "BLOCKED", "reason": "C:/Private/Path",
+                             "state_verified": False, "production_touched": False})
+    monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: Completed())
+    assert m.upgrade_preflight_using_task_python(
+        tmp_path, exe, m.sha256(exe), "a"*40, "test-1234", {}
+    ) == "BLOCKED_UNEXPECTED_RESPONSE"
