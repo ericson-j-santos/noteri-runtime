@@ -2,6 +2,15 @@ name: Noteri Control Plane Fallback Probe
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Governed qualification or Rules219 read-only inventory'
+        required: true
+        type: choice
+        default: qualification
+        options:
+          - qualification
+          - rules219_readonly
 
 permissions:
   contents: read
@@ -18,7 +27,7 @@ env:
 jobs:
   probe:
     name: Qualify Noteri through Command Gateway
-    if: github.actor == 'ericson-j-santos' && github.event_name == 'workflow_dispatch'
+    if: github.repository == 'ericson-j-santos/noteri-runtime' && github.ref == 'refs/heads/main' && github.actor == 'ericson-j-santos' && github.event_name == 'workflow_dispatch' && inputs.mode == 'qualification'
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 5
     steps:
@@ -56,7 +65,7 @@ jobs:
   independent_readback:
     name: Independently verify qualification and select transport
     needs: probe
-    if: always() && github.actor == 'ericson-j-santos' && github.event_name == 'workflow_dispatch'
+    if: always() && github.repository == 'ericson-j-santos/noteri-runtime' && github.ref == 'refs/heads/main' && github.actor == 'ericson-j-santos' && github.event_name == 'workflow_dispatch' && inputs.mode == 'qualification'
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -91,3 +100,223 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
+
+  # Read-only mode reuses this owner's existing physical entrypoint. It is
+  # disabled on push and on feature branches. No host install or model call.
+  rules219_probe:
+    name: Rules219 Noteri physical read-only inventory
+    if: >-
+      github.repository == 'ericson-j-santos/noteri-runtime' &&
+      github.ref == 'refs/heads/main' &&
+      github.actor == 'ericson-j-santos' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.mode == 'rules219_readonly'
+    runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
+    timeout-minutes: 5
+    env:
+      CONTROL_RULES_SHA: 58dcd4200f412a866278027ba9e433439a03f3b3
+      SOURCE_RULES_SHA: 40e3db3ef8b1fe367d79b878b8d9d91930d2337b
+      SOURCE_POOL_SHA: 87885bb8eab5c694b8d206a709b9a8c213cf5500
+      CORRELATION_ID: noteri42-readonly-${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      receipt_b64: ${{ steps.readonly.outputs.receipt_b64 }}
+      receipt_sha256: ${{ steps.readonly.outputs.receipt_sha256 }}
+    steps:
+      - name: Checkout immutable Noteri main for the current dispatch
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout pinned canonical Session Launcher and Command Gateway
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.CONTROL_RULES_SHA }}
+          path: _control_rules
+          persist-credentials: false
+      - name: Checkout pinned Rules219 source (read-only)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.SOURCE_RULES_SHA }}
+          path: _rules
+          persist-credentials: false
+      - name: Checkout pinned Worker Pool61 source (read-only)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/engineering-worker-pool
+          ref: ${{ env.SOURCE_POOL_SHA }}
+          path: _worker_pool
+          persist-credentials: false
+      - name: Admit isolated Session Launcher worktree and runner
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:COMPUTERNAME -ine 'Noteri' -or $env:RUNNER_NAME -cne 'Noteri-runtime') { throw 'NOTERI_219_WRONG_HOST' }
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_control_rules'
+          $launcher = Join-Path $rules 'scripts/session_launcher.py'
+          $policy = Join-Path $rules 'config/command-gateway.policy.json'
+          $a = @('--policy', $policy, '--repo', $env:GITHUB_WORKSPACE,
+            '--session-prefix', 'noteri42-readonly', '--correlation-id', $env:CORRELATION_ID,
+            '--expected-head', $env:GITHUB_SHA, '--sync-ref', 'origin/main',
+            '--require-runner-version-preflight')
+          $raw = & python3 -B $launcher @a
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'NOTERI_219_SESSION_BLOCKED' }
+          $s = @($raw)[-1] | ConvertFrom-Json -ErrorAction Stop
+          if ($s.result -cne 'SESSION_LAUNCH_OK' -or $s.state_validated -ne $true -or
+              $s.head -cne $env:GITHUB_SHA -or $s.snapshot_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+              -not $s.session_id -or -not $s.target_path) { throw 'NOTERI_219_SESSION_INVALID' }
+          "target=$($s.target_path)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding ascii
+          "session=$($s.session_id)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding ascii
+          "snapshot=$($s.snapshot_sha256)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding ascii
+      - name: Invoke pinned source and local Ollama GET through Gateway Risk1
+        id: readonly
+        shell: powershell
+        env:
+          SESSION_TARGET_PATH: ${{ steps.session.outputs.target }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+          SESSION_SNAPSHOT_SHA256: ${{ steps.session.outputs.snapshot }}
+          SESSION_LAUNCH_RESULT: SESSION_LAUNCH_OK
+          SESSION_STATE_VALIDATED: 'true'
+          SESSION_GATEWAY_BOUND: 'true'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_control_rules'
+          $gateway = Join-Path $rules 'scripts/command_gateway.py'
+          $policy = Join-Path $rules 'config/command-gateway.policy.json'
+          $script = Join-Path $env:SESSION_TARGET_PATH 'scripts/noteri_rules219_readonly_admission.py'
+          $a = @('--policy', $policy, '--correlation-id', $env:CORRELATION_ID,
+            'run', '--cwd', $env:SESSION_TARGET_PATH, '--session-id', $env:SESSION_ID,
+            '--risk', '1', '--timeout', '45', '--expected-head', $env:GITHUB_SHA,
+            '--', 'python3', '-B', $script)
+          $raw = & python3 -B $gateway @a
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'NOTERI_219_GATEWAY_BLOCKED' }
+          $envelope = @($raw)[-1] | ConvertFrom-Json -ErrorAction Stop
+          if ($envelope.gateway_exit_code -ne 0 -or $envelope.state_changed -ne $false) { throw 'NOTERI_219_GATEWAY_INVALID' }
+          $observed = $envelope.stdout | ConvertFrom-Json -ErrorAction Stop
+          if ($observed.result -cne 'NOTERI_219_READONLY_OBSERVATIONS' -or
+              $observed.source_pins_verified -ne $true -or
+              $observed.session_schema_checked -ne $true -or
+              $observed.host_sha -cne $env:GITHUB_SHA -or
+              $observed.rules_sha -cne $env:SOURCE_RULES_SHA -or
+              $observed.worker_sha -cne $env:SOURCE_POOL_SHA -or
+              $observed.model -cne 'qwen2.5-coder:7b' -or
+              $observed.observed_model_digest -cnotmatch '^[0-9a-f]{64}$' -or
+              $observed.ready_for_builder -ne $false -or
+              $observed.gateway_execution_attested -ne $false -or
+              $observed.cost_zero_attested -ne $false -or
+              $observed.lease_attested -ne $false -or
+              $observed.artifact_cas_attested -ne $false -or
+              $observed.activation_authorized -ne $false -or
+              $observed.builder_executed -ne $false -or
+              $observed.secrets_read -ne $false -or $observed.state_changed -ne $false) {
+            throw 'NOTERI_219_READONLY_RECEIPT_INVALID'
+          }
+          # Cross-runner evidence is bounded and non-promoting. No artifact upload.
+          $safe = [ordered]@{
+            schema_version = 1; result = [string]$observed.result
+            repository = [string]$env:GITHUB_REPOSITORY; host_sha = [string]$env:GITHUB_SHA
+            rules_sha = [string]$observed.rules_sha; worker_sha = [string]$observed.worker_sha
+            model = [string]$observed.model; model_digest = [string]$observed.observed_model_digest
+            session_snapshot_sha256 = [string]$env:SESSION_SNAPSHOT_SHA256
+            runner_name = [string]$env:RUNNER_NAME; session_id = [string]$env:SESSION_ID
+            run_id = [string]$env:GITHUB_RUN_ID; attempt = [int]$env:GITHUB_RUN_ATTEMPT
+            source_pins_verified = $true; ready_for_builder = $false
+            cost_zero_attested = $false; activation_authorized = $false
+            state_changed = $false; secrets_read = $false
+          }
+          $body = [Text.Encoding]::UTF8.GetBytes(($safe | ConvertTo-Json -Depth 4 -Compress))
+          if ($body.Length -lt 200 -or $body.Length -gt 4096) { throw 'NOTERI_219_RECEIPT_SIZE_INVALID' }
+          $sha256 = [Security.Cryptography.SHA256]::Create()
+          try { $digest = [BitConverter]::ToString($sha256.ComputeHash($body)).Replace('-', '').ToLowerInvariant() }
+          finally { $sha256.Dispose() }
+          "receipt_b64=$([Convert]::ToBase64String($body))" | Out-File $env:GITHUB_OUTPUT -Append -Encoding ascii
+          "receipt_sha256=$digest" | Out-File $env:GITHUB_OUTPUT -Append -Encoding ascii
+          Write-Output 'NOTERI_219_PHYSICAL_READONLY_RECEIPT_OK'
+
+  rules219_independent:
+    name: Independent Rules219 Noteri physical receipt readback
+    needs: rules219_probe
+    if: >-
+      needs.rules219_probe.result == 'success' &&
+      github.repository == 'ericson-j-santos/noteri-runtime' &&
+      github.ref == 'refs/heads/main' &&
+      github.actor == 'ericson-j-santos' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.mode == 'rules219_readonly'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    env:
+      RECEIPT_B64: ${{ needs.rules219_probe.outputs.receipt_b64 }}
+      RECEIPT_SHA256: ${{ needs.rules219_probe.outputs.receipt_sha256 }}
+      EXPECTED_HOST_SHA: ${{ github.sha }}
+      EXPECTED_RUN_ID: ${{ github.run_id }}
+      EXPECTED_RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - name: Independently verify actual Noteri runner and exact run
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const {data} = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner, repo: context.repo.repo,
+              run_id: context.runId, per_page: 100
+            });
+            const jobs = data.jobs.filter(j => j.name === 'Rules219 Noteri physical read-only inventory');
+            if (jobs.length !== 1 || jobs[0].status !== 'completed' ||
+                jobs[0].conclusion !== 'success' ||
+                jobs[0].runner_name !== 'Noteri-runtime' ||
+                !Number.isInteger(jobs[0].runner_id) || jobs[0].runner_id <= 0 ||
+                context.repo.owner !== 'ericson-j-santos' ||
+                context.repo.repo !== 'noteri-runtime' ||
+                context.ref !== 'refs/heads/main') {
+              throw new Error('NOTERI_219_PHYSICAL_RUNNER_READBACK_BLOCKED');
+            }
+      - name: Independently verify receipt hash, run, SHA and non-promoting flags
+        shell: bash
+        run: |
+          python3 -B - <<'PY'
+          import base64, hashlib, json, os, re
+          def require(ok, code):
+              if not ok: raise SystemExit(code)
+          payload = os.environ.get("RECEIPT_B64", "")
+          digest = os.environ.get("RECEIPT_SHA256", "")
+          require(bool(re.fullmatch("[0-9a-f]{64}", digest)), "NOTERI_219_HASH_MISSING")
+          require(50 <= len(payload) <= 5500, "NOTERI_219_RECEIPT_MISSING")
+          try:
+              raw = base64.b64decode(payload, validate=True)
+              receipt = json.loads(raw)
+          except (ValueError, TypeError):
+              raise SystemExit("NOTERI_219_RECEIPT_CORRUPT")
+          require(200 <= len(raw) <= 4096, "NOTERI_219_RECEIPT_BAD_SIZE")
+          require(hashlib.sha256(raw).hexdigest() == digest, "NOTERI_219_RECEIPT_TAMPERED")
+          expected = {
+              "schema_version": 1, "result": "NOTERI_219_READONLY_OBSERVATIONS",
+              "repository": "ericson-j-santos/noteri-runtime",
+              "host_sha": os.environ["EXPECTED_HOST_SHA"],
+              "rules_sha": "40e3db3ef8b1fe367d79b878b8d9d91930d2337b",
+              "worker_sha": "87885bb8eab5c694b8d206a709b9a8c213cf5500",
+              "model": "qwen2.5-coder:7b", "runner_name": "Noteri-runtime",
+              "run_id": os.environ["EXPECTED_RUN_ID"],
+              "attempt": int(os.environ["EXPECTED_RUN_ATTEMPT"]),
+              "source_pins_verified": True, "ready_for_builder": False,
+              "cost_zero_attested": False, "activation_authorized": False,
+              "state_changed": False, "secrets_read": False,
+          }
+          require(type(receipt) is dict and set(receipt) ==
+              set(expected) | {"model_digest", "session_snapshot_sha256", "session_id"},
+              "NOTERI_219_RECEIPT_SCHEMA_INVALID")
+          require(all(type(receipt[k]) is type(v) and receipt[k] == v
+              for k, v in expected.items()), "NOTERI_219_RECEIPT_IDENTITY_INVALID")
+          require(bool(re.fullmatch("[0-9a-f]{64}", receipt["model_digest"])) and
+                  bool(re.fullmatch("[0-9a-f]{64}", receipt["session_snapshot_sha256"])) and
+                  type(receipt["session_id"]) is str and
+                  bool(re.fullmatch("[A-Za-z0-9_.-]{3,64}", receipt["session_id"])),
+                  "NOTERI_219_SESSION_OR_MODEL_INVALID")
+          require(expected["ready_for_builder"] is False, "NOTERI_219_FALSE_READY")
+          print("NOTERI_219_INDEPENDENT_READBACK_OK_READY_FALSE")
+          PY
