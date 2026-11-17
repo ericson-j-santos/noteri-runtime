@@ -79,7 +79,57 @@ def child(expected_source: str, expected_exe: str) -> int:
     return 0
 
 
-def check(expected_head: str, correlation: str, confirmation: str) -> dict:
+def upgrade_preflight_using_task_python(repo: Path, exe: Path, executable_sha: str,
+                                       expected_head: str, correlation: str,
+                                       safe_env: dict[str, str]) -> str:
+    """Roda somente o preflight do upgrade no Python S4U ja atestado.
+
+    Entrada, script e caminho sao fixados pelo checkout e pela Task XML.
+    Nao existe parametro de comando arbitrario nem modo de atualizacao.
+    """
+    script = repo / "scripts" / "noteri_watchdog_transactional_upgrade.py"
+    source = repo / "scripts" / "noteri_control_plane_watchdog.py"
+    if not script.is_file() or not source.is_file():
+        raise Blocked("UPGRADE_PREFLIGHT_SOURCE_MISSING")
+    script_sha = sha256(script)
+    source_sha = sha256(source)
+    args = [
+        str(exe), "-B", str(script),
+        "--repo-root", str(repo),
+        "--old-sha", OLD_SHA, "--old-digest", OLD_DIGEST,
+        "--target-sha", expected_head, "--target-digest", source_sha,
+        "--correlation-id", correlation, "--mode", "preflight",
+    ]
+    try:
+        finished = subprocess.run(
+            args, cwd=str(repo), env=safe_env, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=35, check=False,
+            shell=False, creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise Blocked("UPGRADE_PREFLIGHT_EXECUTION_FAILED") from exc
+    if len(finished.stdout) > 4096 or len(finished.stdout) == 0:
+        raise Blocked("UPGRADE_PREFLIGHT_RESPONSE_INVALID")
+    try:
+        value = json.loads(finished.stdout.strip())
+    except ValueError as exc:
+        raise Blocked("UPGRADE_PREFLIGHT_RESPONSE_INVALID") from exc
+    if not isinstance(value, dict) or value.get("state_changed") is not False:
+        raise Blocked("UPGRADE_PREFLIGHT_RESPONSE_INVALID")
+    if sha256(exe) != executable_sha or sha256(script) != script_sha or sha256(source) != source_sha:
+        raise Blocked("UPGRADE_PREFLIGHT_BYTES_CHANGED")
+    if finished.returncode == 0 and value.get("result") == "PREFLIGHT_OK_NOT_AUTHORIZED":
+        if value.get("target_sha") != expected_head or value.get("old_sha") != OLD_SHA:
+            raise Blocked("UPGRADE_PREFLIGHT_RESPONSE_INVALID")
+        return "PREFLIGHT_OK_NOT_AUTHORIZED"
+    if finished.returncode != 0 and value.get("result") == "BLOCKED":
+        reason = value.get("reason")
+        if isinstance(reason, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{3,75}", reason):
+            return "BLOCKED_" + reason
+    return "BLOCKED_UNEXPECTED_RESPONSE"
+
+
+def check(expected_head: str, correlation: str, confirmation: str, *, probe_upgrade: bool = False) -> dict:
     if confirmation != CONFIRM or not SHA_RE.fullmatch(expected_head):
         raise Blocked("ADMISSION_INVALID")
     if not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", correlation):
@@ -138,6 +188,12 @@ def check(expected_head: str, correlation: str, confirmation: str) -> dict:
     if after_digest != task_digest or sha256(resolved) != binary_sha:
         raise Blocked("TASK_OR_BINARY_CHANGED")
     available = value["pywin32_importable"]
+    preflight = "NOT_REQUESTED"
+    if probe_upgrade:
+        preflight = (
+            upgrade_preflight_using_task_python(repo, resolved, binary_sha, expected_head, correlation, safe_env)
+            if available else "SKIPPED_PYWIN32_UNAVAILABLE"
+        )
     return {
         "schema": 1, "result": "PYWIN32_READY" if available else "PYWIN32_NOT_IMPORTABLE",
         "expected_sha": expected_head, "correlation_id": correlation,
@@ -146,6 +202,7 @@ def check(expected_head: str, correlation: str, confirmation: str) -> dict:
         "same_interpreter": os.path.normcase(str(resolved)) == os.path.normcase(str(Path(sys.executable).resolve())),
         "task_pywin32_importable": available, "gateway_pywin32_importable": importable(),
         "profile": watchdog.runtime_profile(), "task_s4u_verified": True,
+        "upgrade_preflight": preflight,
         "state_changed": False, "installation_authorized": False,
         "production_touched": False,
     }
@@ -159,6 +216,7 @@ def main() -> int:
     p.add_argument("--child", action="store_true")
     p.add_argument("--child-source", default="")
     p.add_argument("--child-python", default="")
+    p.add_argument("--probe-upgrade", action="store_true")
     args = p.parse_args()
     try:
         if os.name != "nt" or socket.gethostname().casefold() != "noteri" or not sys.dont_write_bytecode:
@@ -167,7 +225,8 @@ def main() -> int:
             if not DIGEST_RE.fullmatch(args.child_source) or not DIGEST_RE.fullmatch(args.child_python):
                 raise Blocked("CHILD_DIGEST_INVALID")
             return child(args.child_source, args.child_python)
-        print(json.dumps(check(args.expected_head, args.correlation_id, args.confirm), sort_keys=True))
+        print(json.dumps(check(args.expected_head, args.correlation_id, args.confirm,
+                               probe_upgrade=args.probe_upgrade), sort_keys=True))
         return 0
     except Exception as exc:
         reason = str(exc) if isinstance(exc, Blocked) else "PYTHON_COMPAT_CHECK_FAILED"

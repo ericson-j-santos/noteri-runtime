@@ -71,3 +71,50 @@ def test_source_no_install_or_unrestricted_shell():
     assert '"state_changed": False' in source
     for forbidden in ("pip install", "RegisterTask(", "RegisterTaskDefinition(", "DeleteTask("):
         assert forbidden not in source
+
+
+def test_fixed_upgrade_preflight_command_is_readonly(monkeypatch, tmp_path):
+    import json
+    exe = tmp_path / "python.exe"
+    script_dir = tmp_path / "scripts"
+    script_dir.mkdir()
+    exe.write_bytes(b"python")
+    (script_dir / "noteri_watchdog_transactional_upgrade.py").write_bytes(b"upgrade")
+    (script_dir / "noteri_control_plane_watchdog.py").write_bytes(b"watchdog")
+    expected_binary = m.sha256(exe)
+    observed = []
+    class Completed:
+        returncode = 0
+        stdout = json.dumps({"result": "PREFLIGHT_OK_NOT_AUTHORIZED",
+                             "state_changed": False, "target_sha": "a"*40, "old_sha": m.OLD_SHA})
+    def fake_run(args, **kwargs):
+        observed.append((args,kwargs))
+        return Completed()
+    monkeypatch.setattr(m.subprocess, "run", fake_run)
+    result = m.upgrade_preflight_using_task_python(
+        tmp_path, exe, expected_binary, "a"*40, "read-only-1234", {}
+    )
+    assert result == "PREFLIGHT_OK_NOT_AUTHORIZED"
+    args, kwargs = observed[0]
+    assert args[0] == str(exe)
+    assert "--mode" in args and args[args.index("--mode")+1] == "preflight"
+    assert "upgrade" not in (args[args.index("--mode")+1],)
+    assert kwargs["shell"] is False
+    assert kwargs["timeout"] == 35
+
+
+def test_fixed_upgrade_preflight_rejects_mutated_result(monkeypatch, tmp_path):
+    import json
+    exe = tmp_path / "python.exe"
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    exe.write_bytes(b"python")
+    (scripts / "noteri_watchdog_transactional_upgrade.py").write_bytes(b"upgrade")
+    (scripts / "noteri_control_plane_watchdog.py").write_bytes(b"watchdog")
+    class Completed:
+        returncode = 0
+        stdout = json.dumps({"result": "PREFLIGHT_OK_NOT_AUTHORIZED", "state_changed": True,
+                             "target_sha": "a"*40, "old_sha": m.OLD_SHA})
+    monkeypatch.setattr(m.subprocess, "run", lambda *a, **k: Completed())
+    with pytest.raises(m.Blocked, match="UPGRADE_PREFLIGHT_RESPONSE_INVALID"):
+        m.upgrade_preflight_using_task_python(tmp_path, exe, m.sha256(exe), "a"*40, "test-1234", {})

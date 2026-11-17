@@ -150,3 +150,19 @@ def test_python_compat_does_not_duplicate_jobs_or_change_upgrade_gate():
     upgrade = next(s for s in data()["jobs"]["inventory"]["steps"] if s.get("id") == "upgrade_preflight")
     assert "inputs.mode == 'upgrade-preflight'" in upgrade["if"]
     assert "'--mode', 'preflight'" in upgrade["run"]
+
+
+def test_task_python_upgrade_preflight_remains_risk1_and_fixed():
+    doc = data()
+    job = doc["jobs"]["inventory"]
+    assert "[risk1-task-python-upgrade-preflight-once]" in job["if"]
+    step = next(s for s in job["steps"] if s.get("id") == "python_compat")
+    assert "[risk1-task-python-upgrade-preflight-once]" in step["if"]
+    assert "'--probe-upgrade'" in step["run"]
+    assert "'--risk', '1'" in step["run"]
+    assert "upgrade_preflight -notmatch" in step["run"]
+    assert "'--risk', '2'" not in step["run"]
+    verify = doc["jobs"]["python_compat_readback"]["steps"][0]["run"]
+    assert ".upgrade_preflight | type" in verify
+    assert "PREFLIGHT_OK_NOT_AUTHORIZED" in verify
+    assert ".state_changed == false" in verify

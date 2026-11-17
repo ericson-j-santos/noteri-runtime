@@ -80,7 +80,7 @@ jobs:
 
   inventory:
     name: Governed Noteri watchdog physical inventory (read only)
-    if: github.actor == 'ericson-j-santos' && ((github.event_name == 'workflow_dispatch' && (inputs.mode == 'inventory' || inputs.mode == 'upgrade-preflight' || inputs.mode == 'python-compat')) || (github.event_name == 'push' && (contains(github.event.head_commit.message, '[risk1-inventory-once]') || contains(github.event.head_commit.message, '[risk1-upgrade-preflight-once]') || contains(github.event.head_commit.message, '[risk1-python-compat-once]'))))
+    if: github.actor == 'ericson-j-santos' && ((github.event_name == 'workflow_dispatch' && (inputs.mode == 'inventory' || inputs.mode == 'upgrade-preflight' || inputs.mode == 'python-compat')) || (github.event_name == 'push' && (contains(github.event.head_commit.message, '[risk1-inventory-once]') || contains(github.event.head_commit.message, '[risk1-upgrade-preflight-once]') || (contains(github.event.head_commit.message, '[risk1-python-compat-once]') || contains(github.event.head_commit.message, '[risk1-task-python-upgrade-preflight-once]')))))
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 7
     outputs:
@@ -197,7 +197,7 @@ jobs:
 
       - name: Probe scheduled watchdog Python using existing Risk1 Gateway
         id: python_compat
-        if: (github.event_name == 'workflow_dispatch' && inputs.mode == 'python-compat') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[risk1-python-compat-once]'))
+        if: (github.event_name == 'workflow_dispatch' && inputs.mode == 'python-compat') || (github.event_name == 'push' && (contains(github.event.head_commit.message, '[risk1-python-compat-once]') || contains(github.event.head_commit.message, '[risk1-task-python-upgrade-preflight-once]')))
         shell: powershell
         env:
           TARGET_PATH: ${{ steps.session.outputs.target }}
@@ -215,7 +215,7 @@ jobs:
             'python3', '-B', (Join-Path $env:TARGET_PATH 'scripts/noteri_watchdog_python_compat_readonly.py'),
             '--expected-head', $env:GITHUB_SHA,
             '--correlation-id', $env:CORRELATION_ID,
-            '--confirm', 'CHECK-NOTERI-TASK-PYTHON-READONLY')
+            '--confirm', 'CHECK-NOTERI-TASK-PYTHON-READONLY', '--probe-upgrade')
           $raw = @(& python3 -B (Join-Path $rules 'scripts/command_gateway.py') @args)
           $code = $LASTEXITCODE
           if ($code -ne 0 -or -not $raw) {
@@ -244,6 +244,7 @@ jobs:
               $result.state_changed -ne $false -or
               $result.installation_authorized -ne $false -or
               $result.task_s4u_verified -ne $true -or
+              $result.upgrade_preflight -notmatch '^(PREFLIGHT_OK_NOT_AUTHORIZED|SKIPPED_PYWIN32_UNAVAILABLE|NOT_REQUESTED|BLOCKED_[A-Z0-9_]{4,78})$' -or
               $result.task_python_sha256 -notmatch '^[0-9a-f]{64}$' -or
               $result.gateway_python_sha256 -notmatch '^[0-9a-f]{64}$') {
             throw 'NOTERI_TASK_PYTHON_RECEIPT_INVALID'
@@ -456,7 +457,7 @@ jobs:
   python_compat_readback:
     name: Independent Python compatibility receipt check
     needs: inventory
-    if: needs.inventory.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'python-compat') || (github.event_name == 'push' && contains(github.event.head_commit.message, '[risk1-python-compat-once]')))
+    if: needs.inventory.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.mode == 'python-compat') || (github.event_name == 'push' && (contains(github.event.head_commit.message, '[risk1-python-compat-once]') || contains(github.event.head_commit.message, '[risk1-task-python-upgrade-preflight-once]'))))
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -480,6 +481,8 @@ jobs:
               (.task_pywin32_importable | type) == "boolean" and
               (.gateway_pywin32_importable | type) == "boolean" and
               (.same_interpreter | type) == "boolean" and
+              (.upgrade_preflight | type) == "string" and
+              (.upgrade_preflight | test("^(PREFLIGHT_OK_NOT_AUTHORIZED|SKIPPED_PYWIN32_UNAVAILABLE|NOT_REQUESTED|BLOCKED_[A-Z0-9_]{4,78})$")) and
               (.task_sha256 | test("^[0-9a-f]{64}$")) and
               (.task_python_sha256 | test("^[0-9a-f]{64}$")) and
               (.gateway_python_sha256 | test("^[0-9a-f]{64}$")) and
@@ -489,7 +492,7 @@ jobs:
               .run_id == $run and .run_attempt == $attempt' >/dev/null
           printf %s "$RECEIPT_B64" | base64 --decode | jq -c '{
             result, profile, task_pywin32_importable, gateway_pywin32_importable,
-            same_interpreter, task_python_sha256, gateway_python_sha256,
+            same_interpreter, upgrade_preflight, task_python_sha256, gateway_python_sha256,
             state_changed, installation_authorized
           }'
           echo NOTERI_PYTHON_COMPAT_INDEPENDENT_READBACK_OK
