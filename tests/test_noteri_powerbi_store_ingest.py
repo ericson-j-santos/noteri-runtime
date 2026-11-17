@@ -47,6 +47,71 @@ class IngestTests(unittest.TestCase):
             fn()
         self.assertEqual(code, exc.exception.code)
 
+    def preflight(self, **kwargs):
+        return mod.probe_prerequisites(
+            source_sha=kwargs.get("source_sha", self.source_sha),
+            session_id=kwargs.get("session_id", self.session),
+            host=kwargs.get("host", "Noteri"),
+            platform=kwargs.get("platform", "nt"),
+            source_id_provider=kwargs.get("source_id_provider", lambda: FAKE_ID),
+            credential_presence_provider=kwargs.get("cred", lambda: True),
+        )
+
+    def test_preflight_read_only_success_not_transport_ready(self):
+        before = list(Path(self.tmp.name).rglob("*"))
+        r = self.preflight()
+        self.assertEqual(r["status"], "PREREQUISITES_PRESENT_UNVERIFIED")
+        self.assertTrue(r["source_config_digest_verified"])
+        self.assertTrue(r["credential_metadata_present"])
+        self.assertFalse(r["credential_freshness_validated"])
+        self.assertFalse(r["credential_scope_validated"])
+        self.assertFalse(r["gateway_session_validated_by_probe"])
+        self.assertFalse(r["transport_ready"])
+        self.assertFalse(r["mutations_performed"])
+        self.assertEqual(list(Path(self.tmp.name).rglob("*")), before)
+
+    def test_preflight_missing_credential_blocks(self):
+        self.blocked("CREDENTIAL_UNAVAILABLE", lambda: self.preflight(cred=lambda: False))
+        self.assertFalse(self.root.exists())
+
+    def test_preflight_rejects_bad_config_without_reading_credential(self):
+        called = []
+        self.blocked("SOURCE_ID_UNAPPROVED", lambda: self.preflight(
+            source_id_provider=lambda: "X" * 32,
+            cred=lambda: called.append(True) or True))
+        self.assertEqual(called, [])
+
+    def test_preflight_wrong_host_blocks_before_secret_probe(self):
+        called = []
+        self.blocked("NOTERI_WINDOWS_REQUIRED", lambda: self.preflight(
+            host="Other", cred=lambda: called.append(True) or True))
+        self.assertEqual(called, [])
+
+    def test_preflight_missing_config_blocks_before_credential(self):
+        self.blocked("SOURCE_CONFIG_UNAVAILABLE", lambda: self.preflight(
+            source_id_provider=lambda: (_ for _ in ()).throw(mod.Blocked("SOURCE_CONFIG_UNAVAILABLE")),
+            cred=lambda: self.fail("credential probe must not run")))
+
+    def test_preflight_repeat_idempotent(self):
+        first = self.preflight()
+        second = self.preflight()
+        self.assertEqual(first, second)
+        self.assertFalse(self.root.exists())
+
+    def test_preflight_rejects_mixed_confirmation(self):
+        from contextlib import redirect_stdout
+        import io
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = mod.main(["--preflight-only", "--confirm", mod.CONFIRM,
+                             "--source-sha", self.source_sha, "--session-id", self.session])
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(buf.getvalue())["reason"], "AMBIGUOUS_PREFLIGHT")
+
+    def test_credential_probe_nonwindows_no_token(self):
+        with patch.object(mod.os, "name", "posix"):
+            self.assertFalse(mod._credential_present_windows())
+
     def test_positive_and_real_independent_readback(self):
         receipt=self.ingest()
         self.assertEqual(receipt["status"],"INGESTED_AND_VERIFIED")

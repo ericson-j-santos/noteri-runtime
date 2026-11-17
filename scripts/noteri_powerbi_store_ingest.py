@@ -134,6 +134,73 @@ def _fetch_credential_windows() -> str:
         raise Blocked("CREDENTIAL_UNAVAILABLE") from None
 
 
+def _credential_present_windows() -> bool:
+    """Somente metadado de presenca, sem dereferenciar ou copiar o segredo.
+
+    Esta consulta nao verifica validade, escopo OAuth nem identidade do executor.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        from ctypes import wintypes
+        api = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+        api.CredReadW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                                  wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
+        api.CredReadW.restype = wintypes.BOOL
+        api.CredFree.argtypes = [ctypes.c_void_p]
+        api.CredFree.restype = None
+        credential = ctypes.c_void_p()
+        found = bool(api.CredReadW(CRED_TARGET, 1, 0, ctypes.byref(credential)))
+        try:
+            return bool(found and credential.value)
+        finally:
+            if credential.value:
+                api.CredFree(credential)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
+def probe_prerequisites(*, source_sha: str, session_id: str, host: str,
+                        platform: str, source_id_provider: Callable[[], str],
+                        credential_presence_provider: Callable[[], bool]) -> dict:
+    """Somente leitura: resposta booleana sem token, I/O de rede ou escrita.
+
+    O recibo nunca promove transport_ready ou comprova a sessao real do Gateway.
+    """
+    guard(platform == "nt" and host.casefold() == HOST.casefold(),
+          "NOTERI_WINDOWS_REQUIRED")
+    guard(len(source_sha) == 40 and all(c in "0123456789abcdef" for c in source_sha),
+          "INVALID_SOURCE_SHA")
+    guard(3 <= len(session_id) <= 80 and all(c.isalnum() or c in "-_." for c in session_id),
+          "INVALID_SESSION_ID")
+    source_id = source_id_provider()
+    guard(isinstance(source_id, str) and
+          re.fullmatch(r"[A-Za-z0-9_-]{20,100}", source_id) is not None and
+          hashlib.sha256(source_id.encode("ascii")).hexdigest() == SOURCE_ID_SHA256,
+          "SOURCE_ID_UNAPPROVED")
+    guard(credential_presence_provider() is True, "CREDENTIAL_UNAVAILABLE")
+    return {
+        "schema_version": SCHEMA,
+        "status": "PREREQUISITES_PRESENT_UNVERIFIED",
+        "environment": "DEV", "host": HOST,
+        "source_config_digest_verified": True,
+        "credential_metadata_present": True,
+        "credential_scope_validated": False,
+        "credential_freshness_validated": False,
+        "gateway_session_validated_by_probe": False,
+        "disk_sha256_readback_verified": False,
+        "independent_effect_verified": False,
+        "transport_ready": False,
+        "powerbi_opened": False,
+        "data_refreshed": False,
+        "mutations_performed": False,
+        "source_sha": source_sha,
+        "session_id": session_id,
+        "correlation_id": CORRELATION,
+        "idempotency_key": IDEMPOTENCY,
+    }
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise Blocked("REDIRECT_REJECTED")
@@ -276,23 +343,36 @@ def ingest(*, source_sha: str, session_id: str, root: Path,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Ingestao tipada PBIX STORE Noteri DEV")
-    parser.add_argument("--confirm", required=True)
+    parser.add_argument("--confirm", default="")
+    parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--session-id", required=True)
     args = parser.parse_args(argv)
     try:
-        guard(args.confirm == CONFIRM, "CONFIRMATION_REJECTED")
-        result = ingest(source_sha=args.source_sha, session_id=args.session_id,
-                        root=_trusted_root(), credential_provider=_fetch_credential_windows,
-                        source_id_provider=_load_source_id, downloader=_download_private,
-                        host=socket.gethostname(), platform=os.name)
+        if args.preflight_only:
+            guard(not args.confirm, "AMBIGUOUS_PREFLIGHT")
+            result = probe_prerequisites(
+                source_sha=args.source_sha, session_id=args.session_id,
+                host=socket.gethostname(), platform=os.name,
+                source_id_provider=_load_source_id,
+                credential_presence_provider=_credential_present_windows,
+            )
+        else:
+            guard(args.confirm == CONFIRM, "CONFIRMATION_REJECTED")
+            result = ingest(source_sha=args.source_sha, session_id=args.session_id,
+                            root=_trusted_root(), credential_provider=_fetch_credential_windows,
+                            source_id_provider=_load_source_id, downloader=_download_private,
+                            host=socket.gethostname(), platform=os.name)
     except Blocked as exc:
         result = {"schema_version": SCHEMA, "status": "BLOCKED", "reason": exc.code,
                   "environment": "DEV", "host": HOST, "correlation_id": CORRELATION,
                   "disk_sha256_readback_verified": False, "independent_effect_verified": False,
                   "transport_ready": False, "powerbi_opened": False, "data_refreshed": False}
     print(json.dumps(result, ensure_ascii=True, sort_keys=True))
-    return 0 if result["status"] in ("INGESTED_AND_VERIFIED", "ALREADY_PRESENT_AND_VERIFIED") else 2
+    return 0 if result["status"] in (
+        "INGESTED_AND_VERIFIED", "ALREADY_PRESENT_AND_VERIFIED",
+        "PREREQUISITES_PRESENT_UNVERIFIED",
+    ) else 2
 
 if __name__ == "__main__":
     sys.exit(main())
