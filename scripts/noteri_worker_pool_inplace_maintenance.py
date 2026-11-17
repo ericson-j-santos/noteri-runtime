@@ -422,6 +422,9 @@ def _safe_rollback(local: Path, plan: dict, base: Path, *, stopped: bool) -> boo
         paths = plan["paths"]
         if not stopped:
             return False
+        # A recovery that modifies the host still needs current ownership.
+        # The old approval or a successful initial preflight is insufficient.
+        require_fence()
         runner_backup = checked(base / "runner-before.py").read_bytes()
         need(sha(runner_backup) == plan["old_sha"], "rollback_backup_drift")
         installed_hash = stage.file_sha256(paths["runner"])
@@ -444,18 +447,22 @@ def _safe_rollback(local: Path, plan: dict, base: Path, *, stopped: bool) -> boo
             # Only the exact authorized candidate can be restarted and then
             # re-stopped for recovery. No arbitrary process termination or
             # other Task Scheduler registration is permitted.
+            require_fence()
             _stop(local)
             need(_zero_instances(local), "rollback_stop_unproved")
         original_cache = checked(paths["release"] / cache.CACHE_RELATIVE)
         if original_cache.exists():
             need(stage.file_sha256(original_cache) == CACHE_SHA256,
                  "rollback_cache_untrusted")
+            require_fence()
             _quarantine(paths)
         old = checked(base / "runner-before.py").read_bytes()
         need(sha(old) == plan["old_sha"], "rollback_backup_drift")
         if sha(paths["runner"].read_bytes()) != sha(old):
+            require_fence()
             _atomic_runner(paths["runner"], old)
         _task_xml_stable(plan["xml"])
+        require_fence()
         _start(local, paths)
         _task_xml_stable(plan["xml"])
         return True
@@ -482,6 +489,7 @@ def apply(*, local: Path, expected_sha: str, confirm: str) -> dict[str, Any]:
         queue_safe(local)
         need(activation.listener_owned_by_task(paths["python"], paths["runner"]),
              "listener_identity_drift")
+        require_fence()  # again after preflight, before creating backups
         backups = _backup_before_stop(plan, folder)
         need(backups == {"runner": plan["old_sha"], "task_xml": sha(plan["xml"])},
              "backup_hash_mismatch")
@@ -491,6 +499,7 @@ def apply(*, local: Path, expected_sha: str, confirm: str) -> dict[str, Any]:
         _stop(local)
         _task_xml_stable(plan["xml"])
         queue_safe(local)
+        require_fence()  # still owned after stop, before writing SQLite backup
         dbhash = sqlite_consistent_backup(paths["database"], folder / "pool-consistent.db")
         need(_zero_instances(local), "service_restarted_during_backup")
         queue_safe(local)
