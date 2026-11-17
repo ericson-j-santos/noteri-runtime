@@ -165,7 +165,7 @@ def check(expected_head: str, correlation: str, confirmation: str, *, probe_upgr
         raise Blocked("TASK_PYTHON_UNTRUSTED")
     binary_sha = sha256(resolved)
     source_sha = sha256(Path(__file__))
-    safe_env = {k: os.environ[k] for k in ("SystemRoot", "WINDIR", "PATH", "TEMP", "TMP") if k in os.environ}
+    safe_env = {k: os.environ[k] for k in ("SystemRoot", "WINDIR", "PATH", "TEMP", "TMP", "LOCALAPPDATA", "APPDATA") if k in os.environ}
     safe_env["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
         proc = subprocess.run(

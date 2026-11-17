@@ -154,3 +154,11 @@ def test_fixed_upgrade_preflight_rejects_unsafe_error_receipt(monkeypatch, tmp_p
     assert m.upgrade_preflight_using_task_python(
         tmp_path, exe, m.sha256(exe), "a"*40, "test-1234", {}
     ) == "BLOCKED_UNEXPECTED_RESPONSE"
+
+
+def test_preflight_passes_required_windows_runtime_profile_environment():
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert '"LOCALAPPDATA", "APPDATA"' in source
+    assert 'safe_env["PYTHONDONTWRITEBYTECODE"] = "1"' in source
+    assert '"GH_TOKEN"' not in source
+    assert '"GITHUB_TOKEN"' not in source
