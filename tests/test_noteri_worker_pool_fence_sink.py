@@ -114,23 +114,43 @@ class SinkFenceTests(unittest.TestCase):
         self.rejects("redirected_state_path")
 
     def test_file_swap_during_read_rejected_even_if_same_size(self):
-        # Replace the leaf after bytes have been read but before final
-        # descriptor/entry verification. Never rely on os.stat call counts.
+        # POSIX allows renaming an open file. Windows intentionally denies it,
+        # so simulate the same post-read file identity change in os.stat.
+        # In both cases, the sink must reject the original descriptor as stale.
         from contextlib import contextmanager
+        from types import SimpleNamespace
         original_fdopen = os.fdopen
+        original_stat = os.stat
         original = self.counter.read_text()
+        read_finished = [False]
+
         @contextmanager
         def fdopen_with_swap(fd, *args, **kwargs):
             with original_fdopen(fd, *args, **kwargs) as handle:
                 class Reader:
                     def read(_, size=-1):
                         data = handle.read(size)
-                        self.counter.rename(self.local / "old-counter.json")
-                        self.counter.write_text(original)
+                        read_finished[0] = True
+                        if os.name != "nt":
+                            self.counter.rename(self.local / "old-counter.json")
+                            self.counter.write_text(original)
                         return data
                 yield Reader()
+
+        def stat_with_windows_replacement(path, *args, **kwargs):
+            result = original_stat(path, *args, **kwargs)
+            if (os.name == "nt" and read_finished[0]
+                and Path(path) == self.counter
+                and kwargs.get("follow_symlinks") is False):
+                return SimpleNamespace(st_dev=result.st_dev,
+                                       st_ino=result.st_ino + 1)
+            return result
+
         with mock.patch.object(sink.os, "fdopen", side_effect=fdopen_with_swap):
-            self.rejects("state_replaced_during_read")
+            with mock.patch.object(sink.os, "stat",
+                                   side_effect=stat_with_windows_replacement):
+                self.rejects("state_replaced_during_read")
+        self.assertTrue(read_finished[0])
         self.assertEqual(self.counter.read_text(), original)
 
     def test_parent_swap_after_file_entry_read_rejected(self):
