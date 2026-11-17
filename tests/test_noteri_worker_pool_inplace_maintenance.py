@@ -438,6 +438,67 @@ def test_failed_initial_stop_does_not_retry_if_original_still_healthy(
     assert ("start",) not in events
 
 
+
+def _recovery_fixture(tmp_path, monkeypatch):
+    proof = plan_fixture(tmp_path)
+    base = proof["paths"]["maintenance"] / SHA
+    base.mkdir(parents=True)
+    (base / "runner-before.py").write_bytes(OLD)
+    runner = proof["paths"]["runner"]
+    runner.write_bytes(NEW)
+    # The test explicitly removes the cache artifact; recovery then reaches
+    # the runner mutation/readback stage without touching a real host.
+    (proof["paths"]["release"] / m.cache.CACHE_RELATIVE).unlink()
+    events = []
+    monkeypatch.setattr(m, "_zero_instances", lambda _: True)
+    monkeypatch.setattr(m, "_task_xml_stable", lambda *_: None)
+    monkeypatch.setattr(m, "_atomic_runner",
+                        lambda path, data: (events.append("replace"),
+                                           path.write_bytes(data)))
+    monkeypatch.setattr(m, "_start",
+                        lambda *_: events.append("start"))
+    return proof, base, runner, events
+
+
+def test_rollback_without_current_fence_never_mutates(tmp_path, monkeypatch):
+    proof, base, runner, events = _recovery_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(m, "require_fence",
+        lambda: (_ for _ in ()).throw(m.MaintenanceBlocked("fence_revoked")))
+    assert m._safe_rollback(tmp_path, proof, base, stopped=True) is False
+    assert runner.read_bytes() == NEW
+    assert events == []
+    assert (base / "runner-before.py").read_bytes() == OLD
+
+
+def test_rollback_revocation_before_runner_write_blocks(tmp_path, monkeypatch):
+    proof, base, runner, events = _recovery_fixture(tmp_path, monkeypatch)
+    calls = []
+    def fence():
+        calls.append("check")
+        if len(calls) == 2:
+            raise m.MaintenanceBlocked("fence_revoked")
+    monkeypatch.setattr(m, "require_fence", fence)
+    assert m._safe_rollback(tmp_path, proof, base, stopped=True) is False
+    assert len(calls) == 2
+    assert runner.read_bytes() == NEW
+    assert events == []
+
+
+def test_rollback_revocation_before_start_preserves_backup(tmp_path, monkeypatch):
+    proof, base, runner, events = _recovery_fixture(tmp_path, monkeypatch)
+    calls = []
+    def fence():
+        calls.append("check")
+        if len(calls) == 3:
+            raise m.MaintenanceBlocked("fence_revoked")
+    monkeypatch.setattr(m, "require_fence", fence)
+    assert m._safe_rollback(tmp_path, proof, base, stopped=True) is False
+    assert len(calls) == 3
+    assert runner.read_bytes() == OLD
+    assert events == ["replace"]
+    assert (base / "runner-before.py").read_bytes() == OLD
+
+
 def test_unknown_runner_hash_never_stops_or_overwrites_during_rollback(
     tmp_path, monkeypatch,
 ):
@@ -446,6 +507,7 @@ def test_unknown_runner_hash_never_stops_or_overwrites_during_rollback(
     base.mkdir(parents=True)
     (base / "runner-before.py").write_bytes(OLD)
     proof["paths"]["runner"].write_bytes(b"tampered-runner")
+    monkeypatch.setattr(m, "require_fence", lambda: None)
     monkeypatch.setattr(m, "_zero_instances", lambda _: False)
     stop_calls = []
     monkeypatch.setattr(m, "_stop", lambda *_: stop_calls.append("stopped"))
@@ -462,6 +524,7 @@ def test_unattributed_candidate_never_restarted_or_terminated_on_rollback(
     base.mkdir(parents=True)
     (base / "runner-before.py").write_bytes(OLD)
     proof["paths"]["runner"].write_bytes(NEW)
+    monkeypatch.setattr(m, "require_fence", lambda: None)
     monkeypatch.setattr(m, "_zero_instances", lambda _: False)
     monkeypatch.setattr(m, "_task_xml_stable", lambda _: None)
     monkeypatch.setattr(m.activation, "listener_owned_by_task", lambda *_: False)
