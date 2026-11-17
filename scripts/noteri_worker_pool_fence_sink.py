@@ -108,10 +108,14 @@ def _expected_counter(sequence: int, host: str) -> dict[str, Any]:
     return {**base, "sha256": hashlib.sha256(serialized).hexdigest()}
 
 
+def _is_noteri() -> bool:
+    return os.name == "nt" and socket.gethostname().casefold() == "noteri"
+
+
 def require_active_fence() -> int:
     """Reject any caller that cannot prove the live Gateway claim on Noteri."""
     host = socket.gethostname()
-    if os.name != "nt" or host.casefold() != "noteri":
+    if not _is_noteri():
         raise SinkFenceBlocked("fence_wrong_host")
     env = os.environ
     raw_seq = env.get("NOTERI_POOL_MAINTENANCE_FENCE_SEQUENCE", "")
