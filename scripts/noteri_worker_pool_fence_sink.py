@@ -65,13 +65,19 @@ def _read_private_json(path: Path) -> dict[str, Any]:
     if not path.is_absolute():
         raise SinkFenceBlocked("fence_path_not_absolute")
     components = list(reversed([path, *path.parents]))
-    for component in components:
-        if component.is_symlink() or (
-            hasattr(component, "is_junction") and component.is_junction()
-        ):
-            raise SinkFenceBlocked("fence_redirected_state_path")
     try:
-        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        identities = []
+        for component in components:
+            if component.is_symlink() or (
+                hasattr(component, "is_junction") and component.is_junction()
+            ):
+                raise SinkFenceBlocked("fence_redirected_state_path")
+            identity = os.stat(component, follow_symlinks=False)
+            identities.append((component, identity.st_dev, identity.st_ino))
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
         try:
             before = os.fstat(descriptor)
             entry = os.stat(path, follow_symlinks=False)
@@ -86,8 +92,22 @@ def _read_private_json(path: Path) -> dict[str, Any]:
                 or (after.st_dev, after.st_ino, after.st_size)
                     != (before.st_dev, before.st_ino, before.st_size)):
                 raise SinkFenceBlocked("fence_state_changed_during_read")
+            # A replacement may preserve size and the original descriptor.
+            # Independently pin the current directory entry after the read.
+            current_entry = os.stat(path, follow_symlinks=False)
+            if ((current_entry.st_dev, current_entry.st_ino)
+                    != (before.st_dev, before.st_ino)):
+                raise SinkFenceBlocked("fence_state_replaced_during_read")
         finally:
             os.close(descriptor)
+        # Recheck every ancestor; replacing a parent directory with another
+        # tree can otherwise satisfy a single leaf inode inspection.
+        for component, device, inode in identities:
+            current = os.stat(component, follow_symlinks=False)
+            if (component.is_symlink()
+                or (hasattr(component, "is_junction") and component.is_junction())
+                or (current.st_dev, current.st_ino) != (device, inode)):
+                raise SinkFenceBlocked("fence_parent_or_entry_replaced")
         data = json.loads(raw.decode("utf-8"), object_pairs_hook=_json_unique)
     except SinkFenceBlocked:
         raise
