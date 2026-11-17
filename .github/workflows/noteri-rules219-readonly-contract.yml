@@ -11,6 +11,7 @@ on:
       - tests/test_noteri_rules219_readonly_admission.py
       - .github/workflows/noteri-rules219-readonly-contract.yml
       - .github/workflows/noteri-control-plane-probe.yml
+      - .evidence/noteri42/prepr-source-cas-8c9d7944.json
 
 permissions:
   contents: read
@@ -37,7 +38,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify feature identity, ancestry and 4-file scope
+      - name: Verify immutable feature identity, ancestry and 5-file scope
         shell: bash
         run: |
           set -euo pipefail
@@ -55,6 +56,7 @@ jobs:
               "tests/test_noteri_rules219_readonly_admission.py",
               ".github/workflows/noteri-rules219-readonly-contract.yml",
               ".github/workflows/noteri-control-plane-probe.yml",
+              ".evidence/noteri42/prepr-source-cas-8c9d7944.json",
           }
           if scope != expected:
               raise SystemExit("NOTERI_219_SCOPE_MISMATCH")
@@ -108,4 +110,180 @@ jobs:
           if sorted(observed) != ["?? _rules/", "?? _worker_pool/"]:
               raise SystemExit("NOTERI_219_CI_WORKTREE_DRIFT")
           print("NOTERI_219_HOST_NOT_TOUCHED_READY_FALSE")
+          PY
+
+  independent_restore_validator:
+    name: Independent CAS restore and source-equivalence validator (not physical)
+    needs: verify
+    if: >-
+      needs.verify.result == 'success' &&
+      github.repository == 'ericson-j-santos/noteri-runtime' &&
+      github.ref == 'refs/heads/feat/issue42-rules219-readonly-preflight-20261117'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    permissions:
+      contents: read
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      BASE_SHA: e10b3a00a9b3ec803ed4a4cc8f4f8c62b06c8928
+      PRODUCED_SHA: 8c9d79440efcf5c75c02f078c6e8c9d6c62b083e
+      CAS_PATH: .evidence/noteri42/prepr-source-cas-8c9d7944.json
+      CAS_GIT_BLOB: c3582a672ee9160ae30d3f083f5e616cc36f5c4c
+      CAS_SHA256: 1de767e958d035ce14e35c186230bdeab6ae04b381c862e3826e660595714c60
+    steps:
+      - name: Independent fresh checkout of the precise SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify durable CAS, restore on detached base, and rerun tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -B - <<'PY'
+          import hashlib
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          def sha256(data: bytes) -> str:
+              return hashlib.sha256(data).hexdigest()
+
+          def require(ok, code):
+              if not ok:
+                  raise SystemExit(code)
+
+          def git(*args, cwd=None, input=None):
+              return subprocess.check_output(
+                  ["git", *args], cwd=cwd, input=input, stderr=subprocess.PIPE
+              )
+
+          base = os.environ["BASE_SHA"]
+          produced = os.environ["PRODUCED_SHA"]
+          current = os.environ["GITHUB_SHA"]
+          artifact_path = os.environ["CAS_PATH"]
+          expected_paths = [
+              ".github/workflows/noteri-control-plane-probe.yml",
+              ".github/workflows/noteri-rules219-readonly-contract.yml",
+              "scripts/noteri_rules219_readonly_admission.py",
+              "tests/test_noteri_rules219_readonly_admission.py",
+          ]
+          require(re.fullmatch("[0-9a-f]{40}", current) is not None,
+                  "NOTERI_42_CURRENT_SHA_INVALID")
+          require(git("rev-parse", "HEAD").decode().strip() == current,
+                  "NOTERI_42_WRONG_VALIDATED_SHA")
+          require(git("rev-parse", "HEAD:" + artifact_path).decode().strip() ==
+                  os.environ["CAS_GIT_BLOB"], "NOTERI_42_CAS_GIT_OBJECT_UNBOUND")
+          raw = Path(artifact_path).read_bytes()
+          require(10000 < len(raw) < 250000, "NOTERI_42_CAS_WRONG_SIZE")
+          require(sha256(raw) == os.environ["CAS_SHA256"],
+                  "NOTERI_42_CAS_SHA256_MISMATCH")
+          archive = json.loads(raw)
+          require(archive.get("format") == "noteri42-prepr-source-cas-v1"
+                  and archive.get("repository") == os.environ["GITHUB_REPOSITORY"]
+                  and archive.get("issue") == 42
+                  and archive.get("kind") == "feature"
+                  and archive.get("source_mode") == "assisted"
+                  and archive.get("model_calls") == 0
+                  and archive.get("base_sha") == base
+                  and archive.get("produced_sha") == produced
+                  and archive.get("source_sha") == produced
+                  and archive.get("physical_execution") is False
+                  and archive.get("ready_for_builder") is False,
+                  "NOTERI_42_CAS_IDENTITY_INVALID")
+          require(git("merge-base", base, produced).decode().strip() == base
+                  and git("merge-base", produced, current).decode().strip() == produced,
+                  "NOTERI_42_GIT_ANCESTRY_INVALID")
+          files = archive["files"]
+          require([f["path"] for f in files] == expected_paths,
+                  "NOTERI_42_CAS_SCOPE_INVALID")
+          changed = git("diff", "--name-only", base, produced).decode().splitlines()
+          require(changed == expected_paths, "NOTERI_42_SOURCE_SCOPE_DRIFT")
+          later = git("diff", "--name-only", produced, current).decode().splitlines()
+          require(later == [artifact_path,
+              ".github/workflows/noteri-rules219-readonly-contract.yml"],
+              "NOTERI_42_POST_CAS_CODE_DRIFT")
+          patch_bytes = "".join(f["path"] + "\n" + f["patch"] + "\n"
+                                for f in files).encode()
+          require(sha256(patch_bytes) == archive["patch_sha256"],
+                  "NOTERI_42_PATCH_SHA256_INVALID")
+          before_summary = ""
+          after_summary = ""
+          for f in files:
+              path = f["path"]
+              content = f["content"].encode("utf-8")
+              require(sha256(content) == f["after_sha256"],
+                      "NOTERI_42_CONTENT_SHA256_INVALID")
+              require(git("rev-parse", produced + ":" + path).decode().strip() ==
+                      f["after_blob_sha"], "NOTERI_42_COMMIT_BLOB_INVALID")
+              require(git("hash-object", "--stdin", input=content).decode().strip() ==
+                      f["after_blob_sha"], "NOTERI_42_RECOVERY_BLOB_INVALID")
+              if path != ".github/workflows/noteri-rules219-readonly-contract.yml":
+                  require(git("show", current + ":" + path) == content,
+                          "NOTERI_42_IMPLEMENTATION_CHANGED_AFTER_CAS")
+              if f["status"] == "modified":
+                  original = git("show", base + ":" + path)
+                  require(sha256(original) == f["before_sha256"]
+                          and git("rev-parse", base + ":" + path).decode().strip() ==
+                          f["before_blob_sha"], "NOTERI_42_BASE_INVALID")
+              else:
+                  require(f["status"] == "added" and f["before_blob_sha"] is None
+                          and f["before_sha256"] is None,
+                          "NOTERI_42_BASE_ADDITION_INVALID")
+                  r = subprocess.run(["git", "cat-file", "-e", base + ":" + path],
+                                     capture_output=True)
+                  require(r.returncode != 0, "NOTERI_42_FALSE_NEW_FILE")
+              before_summary += path + "\0" + (f["before_sha256"] or "none") + "\n"
+              after_summary += path + "\0" + f["after_sha256"] + "\n"
+          require(sha256(before_summary.encode()) == archive["before_sha256"]
+                  and sha256(after_summary.encode()) == archive["after_sha256"],
+                  "NOTERI_42_ARCHIVE_SUMMARY_INVALID")
+          print("NOTERI_42_CAS_READBACK_OK", len(files))
+
+          # Reconstruct on an isolated, detached checkout of the BASE, not a mock.
+          with tempfile.TemporaryDirectory(prefix="noteri42-cas-restore-") as tmp:
+              target = Path(tmp) / "restored"
+              git("worktree", "add", "--detach", str(target), base)
+              try:
+                  for f in files:
+                      file = target / f["path"]
+                      file.parent.mkdir(parents=True, exist_ok=True)
+                      file.write_bytes(f["content"].encode("utf-8"))
+                      require(git("hash-object", "--", str(file), cwd=target).decode().strip() ==
+                              f["after_blob_sha"], "NOTERI_42_RESTORED_BYTES_INVALID")
+                  git("add", "-N", "--", *expected_paths, cwd=target)
+                  restored_paths = git("diff", "--name-only", cwd=target).decode().splitlines()
+                  require(restored_paths == expected_paths,
+                          "NOTERI_42_RESTORED_SCOPE_INVALID")
+                  actual_patch = git("diff", "--binary", "--no-ext-diff",
+                                     "--no-renames", cwd=target)
+                  committed_patch = git("diff", "--binary", "--no-ext-diff",
+                                        "--no-renames", base, produced)
+                  require(actual_patch == committed_patch,
+                          "NOTERI_42_RESTORED_DIFF_INVALID")
+                  validation = subprocess.run(
+                      [sys.executable, "-B", "-m", "unittest", "discover", "-v",
+                       "-s", "tests", "-p", "test_noteri_rules219_readonly_admission.py"],
+                      cwd=target, text=True, capture_output=True, check=False,
+                      env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                  )
+                  print(validation.stderr[-5000:])
+                  require(validation.returncode == 0
+                          and "Ran 25 tests" in validation.stderr
+                          and "\nOK" in validation.stderr,
+                          "NOTERI_42_RESTORED_TESTS_FAILED")
+                  # Negative: fake content, source identity, and duplicate paths
+                  # cannot satisfy the same content-addressed contract.
+                  require(sha256(actual_patch + b"tampered") !=
+                          sha256(committed_patch), "NOTERI_42_TAMPER_FALSE_ACCEPT")
+                  require(produced != base and len(set(expected_paths)) == 4,
+                          "NOTERI_42_IDENTITY_OR_DUPLICATE_FALSE_ACCEPT")
+                  print("NOTERI_42_INDEPENDENT_RESTORE_25_TESTS_OK")
+              finally:
+                  git("worktree", "remove", "--force", str(target))
           PY
