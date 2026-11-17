@@ -180,7 +180,34 @@ def test_workflow_and_policy_are_fixed_to_noteri() -> None:
     assert "shell: powershell" in workflow
     assert "shell: pwsh" not in workflow
     assert "workflow_dispatch:" in workflow
-    assert "inputs:" not in workflow
+    # Exact owner-only choice: preserving the previous default while refusing
+    # arbitrary user-supplied command arguments or additional modes.
+    dispatch = workflow.split("on:\n", 1)[1].split("\npermissions:", 1)[0]
+    expected = (
+        "  workflow_dispatch:\n"
+        "    inputs:\n"
+        "      mode:\n"
+        "        description: 'Governed qualification or Rules219 read-only inventory'\n"
+        "        required: true\n"
+        "        type: choice\n"
+        "        default: qualification\n"
+        "        options:\n"
+        "          - qualification\n"
+        "          - rules219_readonly\n"
+        "\n"
+    )
+    assert dispatch == expected
+    legacy = workflow.split("\\n  probe:", 1)[1].split(
+        "\\n  independent_readback:", 1
+    )[0]
+    for required in (
+        "github.repository == 'ericson-j-santos/noteri-runtime'",
+        "github.ref == 'refs/heads/main'",
+        "github.actor == 'ericson-j-santos'",
+        "github.event_name == 'workflow_dispatch'",
+        "inputs.mode == 'qualification'",
+    ):
+        assert required in legacy
 
 
 def test_watchdog_installs_hkcu_fallback_when_startup_task_denied(monkeypatch, tmp_path: Path) -> None:

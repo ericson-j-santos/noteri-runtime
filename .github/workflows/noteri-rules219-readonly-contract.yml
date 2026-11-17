@@ -12,6 +12,8 @@ on:
       - .github/workflows/noteri-rules219-readonly-contract.yml
       - .github/workflows/noteri-control-plane-probe.yml
       - .evidence/noteri42/prepr-source-cas-8c9d7944.json
+      - .evidence/noteri42/legacy-guard-delta-033e2964.json
+      - tests/test_noteri_control_plane_fallback.py
 
 permissions:
   contents: read
@@ -38,7 +40,7 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify immutable feature identity, ancestry and 5-file scope
+      - name: Verify immutable feature identity, ancestry and 7-file scope
         shell: bash
         run: |
           set -euo pipefail
@@ -57,6 +59,8 @@ jobs:
               ".github/workflows/noteri-rules219-readonly-contract.yml",
               ".github/workflows/noteri-control-plane-probe.yml",
               ".evidence/noteri42/prepr-source-cas-8c9d7944.json",
+              ".evidence/noteri42/legacy-guard-delta-033e2964.json",
+              "tests/test_noteri_control_plane_fallback.py",
           }
           if scope != expected:
               raise SystemExit("NOTERI_219_SCOPE_MISMATCH")
@@ -130,6 +134,10 @@ jobs:
       CAS_PATH: .evidence/noteri42/prepr-source-cas-8c9d7944.json
       CAS_GIT_BLOB: c3582a672ee9160ae30d3f083f5e616cc36f5c4c
       CAS_SHA256: 1de767e958d035ce14e35c186230bdeab6ae04b381c862e3826e660595714c60
+      DELTA_BASE_SHA: 033e2964d119f82faa19460c56c5f61f555ce91f
+      DELTA_CAS_PATH: .evidence/noteri42/legacy-guard-delta-033e2964.json
+      DELTA_CAS_GIT_BLOB: 61e9ae4e2bf4cd81bac5dcfea9bb08b36290f0a6
+      DELTA_CAS_SHA256: 56b794e54ca03fcf62f6e9c60612a5a505ee415de035429b5ff09211f640ac36
     steps:
       - name: Independent fresh checkout of the precise SHA
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -205,9 +213,12 @@ jobs:
           changed = git("diff", "--name-only", base, produced).decode().splitlines()
           require(changed == expected_paths, "NOTERI_42_SOURCE_SCOPE_DRIFT")
           later = git("diff", "--name-only", produced, current).decode().splitlines()
-          require(later == [artifact_path,
-              ".github/workflows/noteri-rules219-readonly-contract.yml"],
-              "NOTERI_42_POST_CAS_CODE_DRIFT")
+          require(later == [
+              os.environ["DELTA_CAS_PATH"],
+              artifact_path,
+              ".github/workflows/noteri-rules219-readonly-contract.yml",
+              "tests/test_noteri_control_plane_fallback.py",
+          ], "NOTERI_42_POST_CAS_CODE_DRIFT")
           patch_bytes = "".join(f["path"] + "\n" + f["patch"] + "\n"
                                 for f in files).encode()
           require(sha256(patch_bytes) == archive["patch_sha256"],
@@ -244,6 +255,50 @@ jobs:
                   and sha256(after_summary.encode()) == archive["after_sha256"],
                   "NOTERI_42_ARCHIVE_SUMMARY_INVALID")
           print("NOTERI_42_CAS_READBACK_OK", len(files))
+          # A second SHA-addressed CAS covers the legacy CI regression fix,
+          # which was actually reproduced in PR #94 before the correction.
+          delta_path = os.environ["DELTA_CAS_PATH"]
+          delta_raw = Path(delta_path).read_bytes()
+          require(1000 < len(delta_raw) < 100000 and
+                  sha256(delta_raw) == os.environ["DELTA_CAS_SHA256"],
+                  "NOTERI_42_DELTA_CAS_DIGEST_INVALID")
+          require(git("rev-parse", "HEAD:" + delta_path).decode().strip() ==
+                  os.environ["DELTA_CAS_GIT_BLOB"],
+                  "NOTERI_42_DELTA_CAS_NOT_REACHABLE")
+          delta = json.loads(delta_raw)
+          delta_source = os.environ["DELTA_BASE_SHA"]
+          test_path = "tests/test_noteri_control_plane_fallback.py"
+          require(delta.get("format") == "noteri42-legacy-guard-delta-cas-v1"
+                  and delta.get("base_sha") == delta_source
+                  and delta.get("source_sha") == delta_source
+                  and delta.get("path") == test_path
+                  and delta.get("baseline_pr_run_id") == 44142142331
+                  and delta.get("baseline_job_id") == 134247477858
+                  and delta.get("model_calls") == 0
+                  and delta.get("physical_execution") is False,
+                  "NOTERI_42_DELTA_CAS_IDENTITY_INVALID")
+          require(git("merge-base", delta_source, current).decode().strip() ==
+                  delta_source, "NOTERI_42_DELTA_ANCESTRY_INVALID")
+          old_test = git("show", delta_source + ":" + test_path)
+          new_test = git("show", current + ":" + test_path)
+          require(sha256(old_test) == delta["before_sha256"]
+                  and sha256(new_test) == delta["after_sha256"]
+                  and new_test == delta["after_content"].encode("utf-8"),
+                  "NOTERI_42_DELTA_TEST_CONTENT_INVALID")
+          require(git("rev-parse", delta_source + ":" + test_path).decode().strip() ==
+                  delta["before_blob_sha"]
+                  and git("rev-parse", current + ":" + test_path).decode().strip() ==
+                  delta["after_blob_sha"], "NOTERI_42_DELTA_BLOB_DRIFT")
+          require(sha256(old_test + b"\n=== AFTER ===\n" + new_test) ==
+                  delta["patch_sha256"], "NOTERI_42_DELTA_PATCH_DIGEST_INVALID")
+          require(b"assert dispatch == expected" in new_test
+                  and b"inputs.mode == 'qualification'" in new_test
+                  and b"assert \"inputs:\" not in workflow" not in new_test,
+                  "NOTERI_42_LEGACY_GUARD_REGRESSION")
+          require(sha256(delta_raw + b"tampered") !=
+                  os.environ["DELTA_CAS_SHA256"],
+                  "NOTERI_42_DELTA_TAMPER_FALSE_ACCEPT")
+          print("NOTERI_42_LEGACY_GUARD_DELTA_CAS_VERIFIED")
 
           # Reconstruct on an isolated, detached checkout of the BASE, not a mock.
           with tempfile.TemporaryDirectory(prefix="noteri42-cas-restore-") as tmp:
