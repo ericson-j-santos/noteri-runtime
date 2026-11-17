@@ -51,10 +51,19 @@ jobs:
           persist-credentials: false
       - name: Verify exact installed Worker Pool source SHA
         run: test "$(git -C _worker_pool_installed rev-parse HEAD)" = "21fd68dec6f0da92b3e7da201463401ac5429d64"
+      - name: Checkout pinned Rules fencing issuer for contract verification
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: 85bba14fac012127e5162aebb2d3875696bfb966
+          path: _rules_fence
+          persist-credentials: false
+      - name: Verify exact Rules issuer checkout
+        run: test "$(git -C _rules_fence rev-parse HEAD)" = "85bba14fac012127e5162aebb2d3875696bfb966"
       - name: Run tests
         env:
           PYTHONPATH: ${{ github.workspace }}/_worker_pool
-        run: python -m pytest -q --ignore=_worker_pool --ignore=_worker_pool_installed
+        run: python -m pytest -q --ignore=_worker_pool --ignore=_worker_pool_installed --ignore=_rules_fence
       - name: Verify native adapter against installed Worker Pool contract
         env:
           PYTHONPATH: ${{ github.workspace }}/_worker_pool_installed
