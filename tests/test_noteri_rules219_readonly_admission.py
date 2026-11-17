@@ -174,6 +174,19 @@ class ReadonlyContextTests(unittest.TestCase):
                     "builder_executed", "state_changed", "secrets_read"):
             self.assertIs(result[key], False)
 
+    def test_source_drift_prevents_even_local_ollama_read(self):
+        with mock.patch.object(gate, "verify_pins",
+                               side_effect=gate.Blocked("NOTERI_219_SOURCE_SHA_DRIFT")):
+            local_get = mock.Mock()
+            with self.assertRaisesRegex(gate.Blocked, "SOURCE_SHA_DRIFT"):
+                gate.inspect_readonly(
+                    env=self.ctx,
+                    host=Path("/fake-host"), rules=Path("/fake-rules"),
+                    pool=Path("/fake-pool"), tags=local_get,
+                    host_name="Noteri", platform="nt",
+                )
+            local_get.assert_not_called()
+
     def test_loopback_inventory_exact_get_no_proxy_or_redirect(self):
         class FakeResponse:
             status = 200

@@ -20,7 +20,7 @@ import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 NOTERI_REPO = "ericson-j-santos/noteri-runtime"
 RULES_REPO = "ericson-j-santos/chatgpt-operational-rules"
@@ -221,14 +221,17 @@ def context_observed(env: dict[str, str], *, host_name: str,
 
 def inspect_readonly(*, env: dict[str, str], host: Path,
                      rules: Path, pool: Path,
-                     tags: dict[str, Any], host_name: str,
-                     platform: str) -> dict[str, Any]:
+                     tags: dict[str, Any] | Callable[[], dict[str, Any]],
+                     host_name: str, platform: str) -> dict[str, Any]:
     """Never returns 'ready'; read-only data is insufficient to authorize Risk2."""
     host_sha = env.get("GITHUB_SHA", "")
     context_observed(env, host_name=host_name, platform=platform,
                      expected_host_sha=host_sha)
     pins = verify_pins(host=host, rules=rules, pool=pool, host_sha=host_sha)
-    digest = inspect_model_tags(tags)
+    # Even a local read-only Ollama request must wait for exact Git/source
+    # integrity. A bad checkout must not touch the model endpoint at all.
+    inventory = tags() if callable(tags) else tags
+    digest = inspect_model_tags(inventory)
     return {
         "result": "NOTERI_219_READONLY_OBSERVATIONS",
         **pins,
@@ -264,7 +267,7 @@ def main() -> int:
             env=dict(os.environ), host=host,
             rules=(root / "_rules").resolve(strict=True),
             pool=(root / "_worker_pool").resolve(strict=True),
-            tags=local_model_inventory(),
+            tags=local_model_inventory,
             host_name=socket.gethostname(), platform=os.name,
         )
         print(json.dumps(result, sort_keys=True))
