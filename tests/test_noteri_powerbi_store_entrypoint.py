@@ -31,7 +31,7 @@ class EntryPointTests(unittest.TestCase):
         self.assertNotIn('  schedule:', self.raw)
         self.assertNotIn('  workflow_dispatch:', self.raw)
         if self.doc is not None:
-            self.assertEqual(set(self.doc['jobs']), {'contract', 'physical'})
+            self.assertEqual(set(self.doc['jobs']), {'contract', 'physical', 'observe_push'})
             self.assertEqual(self.doc['jobs']['physical']['runs-on'],
                              ['self-hosted', 'Windows', 'X64', 'noteri', 'reqsys-dev'])
 
@@ -76,7 +76,7 @@ class EntryPointTests(unittest.TestCase):
         self.assertNotIn('docker', t.lower())
         self.assertNotIn('powershell -command', t.lower())
         self.assertNotIn('git push', t)
-        self.assertNotIn('gh api', t)
+        self.assertNotIn('gh api', t.split('\n  physical:', 1)[1].split('\n  observe_push:', 1)[0])
         self.assertNotIn('INGEST-POWERBI-STORE-NOTERI-DEV', t)
 
     def test_no_dynamic_path_command_or_url_inputs(self):
@@ -88,7 +88,48 @@ class EntryPointTests(unittest.TestCase):
         if self.doc is not None:
             jobs = self.doc['jobs']
             self.assertEqual(jobs['contract']['runs-on'], 'ubuntu-24.04')
-            self.assertEqual(self.doc['permissions'], {'contents': 'read'})
+            self.assertEqual(self.doc['permissions'], {'contents': 'read', 'actions': 'read'})
+
+
+    def test_push_observer_has_no_physical_or_mutation_route(self):
+        raw = self.raw.split('\n  observe_push:', 1)[1]
+        self.assertIn("github.event_name == 'pull_request'", raw)
+        self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", raw)
+        self.assertIn("github.event.pull_request.user.login == 'ericson-j-santos'", raw)
+        self.assertIn('runs-on: ubuntu-24.04', raw)
+        self.assertIn('GH_TOKEN: ${{ github.token }}', raw)
+        self.assertIn('gh api -X GET', raw)
+        self.assertIn('head_sha=${SOURCE_SHA}&per_page=100', raw)
+        self.assertIn('.event == "push"', raw)
+        self.assertIn('.head_sha == $sha', raw)
+        self.assertIn('NO_MATCHING_PUSH_RUN', raw)
+        self.assertIn('physical_effect_verified:false', raw)
+        self.assertIn('credentials_checked:false', raw)
+        self.assertNotIn('workflow_dispatch', raw)
+        self.assertNotIn('rerun', raw.lower())
+        self.assertNotIn('gh api -X POST', raw)
+        self.assertNotIn('set-secret', raw)
+        self.assertNotIn('download-artifact', raw)
+        if self.doc is not None:
+            self.assertEqual(self.doc['jobs']['observe_push']['runs-on'], 'ubuntu-24.04')
+
+    def test_push_observer_does_not_promote_absent_run_as_host_success(self):
+        from subprocess import run
+        import json
+        sample = {'workflow_runs': [
+          {'id': 2, 'head_sha': 'a'*40, 'event': 'pull_request', 'name': 'Noteri STORE - Identity Preflight (read only)', 'run_number': 2},
+          {'id': 3, 'head_sha': 'b'*40, 'event': 'push', 'name': 'Noteri STORE - Identity Preflight (read only)', 'run_number': 3},
+          {'id': 4, 'head_sha': 'a'*40, 'event': 'push', 'name': 'unrelated', 'run_number': 4},
+          {'id': 5, 'head_sha': 'a'*40, 'event': 'push', 'name': 'Noteri STORE - Identity Preflight (read only)', 'run_number': 5},
+        ]}
+        jq_expression = '([.workflow_runs[]? | select(.head_sha == $sha and .event == "push" and .name == "Noteri STORE - Identity Preflight (read only)")] | sort_by(.run_number) | last) // null'
+        import shutil
+        if not shutil.which('jq'):
+            self.skipTest('jq indisponivel no ambiente local; CI GitHub Ubuntu possui jq')
+        good = run(['jq','-c','--arg','sha','a'*40,jq_expression],input=json.dumps(sample),text=True,capture_output=True,check=True)
+        self.assertEqual(json.loads(good.stdout)['id'],5)
+        absent = run(['jq','-c','--arg','sha','c'*40,jq_expression],input=json.dumps(sample),text=True,capture_output=True,check=True)
+        self.assertIsNone(json.loads(absent.stdout))
 
 
 if __name__ == '__main__':

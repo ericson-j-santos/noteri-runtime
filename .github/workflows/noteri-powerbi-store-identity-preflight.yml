@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: noteri-store-identity-${{ github.ref }}
@@ -159,3 +160,48 @@ jobs:
           }
           Write-Output 'NOTERI_STORE_IDENTITY_PRESENCE_ONLY_OK'
           Write-Output "NOTERI_STORE_SOURCE_SHA=$env:SOURCE_SHA"
+
+
+  observe_push:
+    name: Classify exact-SHA push routing (read only, no host)
+    needs: contract
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == 'ericson-j-santos' &&
+      needs.contract.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Read GitHub Actions run and physical job metadata without re-running anything
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'ericson-j-santos/noteri-runtime'
+          test "${#SOURCE_SHA}" -eq 40
+          # Read-only query scoped to the evaluated PR head SHA, not a user-supplied URL.
+          runs="$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${SOURCE_SHA}&per_page=100")"
+          matched="$(jq -c --arg sha "$SOURCE_SHA" '
+            ([.workflow_runs[]? | select(
+              .head_sha == $sha and .event == "push" and
+              .name == "Noteri STORE - Identity Preflight (read only)")]
+              | sort_by(.run_number) | last) // null
+            ' <<<"$runs")"
+          if [ "$matched" = 'null' ]; then
+            jq -nc --arg sha "$SOURCE_SHA" '{type:"PUSH_OBSERVER",
+              result:"NO_MATCHING_PUSH_RUN", head_sha:$sha,
+              physical_effect_verified:false, credentials_checked:false}'
+            exit 0
+          fi
+          run_id="$(jq -er '.id | select(type == "number")' <<<"$matched")"
+          jobs="$(gh api -X GET "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100")"
+          jq -nc --arg sha "$SOURCE_SHA" --argjson run "$matched" --argjson jobs "$jobs" '
+            {type:"PUSH_OBSERVER", result:"RUN_SNAPSHOT", head_sha:$sha,
+              run_id:$run.id, actor:$run.actor.login, run_status:$run.status,
+              run_conclusion:$run.conclusion,
+              physical_job: (([$jobs.jobs[]? | select(
+                .name == "Noteri identity presence - governed and read only") |
+                {id,status,conclusion,runner_name}] | last) // null),
+              physical_effect_verified:false, credentials_checked:false}'
