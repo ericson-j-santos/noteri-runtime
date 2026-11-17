@@ -49,7 +49,7 @@ class EntryPointTests(unittest.TestCase):
         self.assertEqual(t.count('actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09'), 3)
         self.assertEqual(t.count('persist-credentials: false'), 3)
         self.assertIn('58dcd4200f412a866278027ba9e433439a03f3b3', t)
-        self.assertIn('APPROVED_INGEST_BLOB: 0cdeed7cf94ab187157b44b43cc2bc2d11221cc1', t)
+        self.assertIn('APPROVED_INGEST_BLOB: 6d62866951c044c16ca0bc2ef03c05f871fa4021', t)
         self.assertIn('git hash-object scripts/noteri_powerbi_store_ingest.py', t)
         self.assertIn('--expected-head', t)
         self.assertIn('origin/feature/noteri-private-powerbi-store-ingest-issue92', t)
@@ -66,6 +66,8 @@ class EntryPointTests(unittest.TestCase):
         self.assertIn('$report.mutations_performed -ne $false', t)
         self.assertIn('$report.transport_ready -ne $false', t)
         self.assertIn("NOTERI_STORE_PREFLIGHT_BLOCKED=$($report.reason)", t)
+        self.assertIn('SOURCE_CONFIG_MISSING', t)
+        self.assertIn('SOURCE_CONFIG_ACCESS_DENIED', t)
         self.assertNotIn("'--confirm'", t)
 
     def test_no_binary_transfer_secret_or_deployment(self):

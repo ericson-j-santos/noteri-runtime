@@ -88,8 +88,8 @@ class IngestTests(unittest.TestCase):
         self.assertEqual(called, [])
 
     def test_preflight_missing_config_blocks_before_credential(self):
-        self.blocked("SOURCE_CONFIG_UNAVAILABLE", lambda: self.preflight(
-            source_id_provider=lambda: (_ for _ in ()).throw(mod.Blocked("SOURCE_CONFIG_UNAVAILABLE")),
+        self.blocked("SOURCE_CONFIG_MISSING", lambda: self.preflight(
+            source_id_provider=lambda: (_ for _ in ()).throw(mod.Blocked("SOURCE_CONFIG_MISSING")),
             cred=lambda: self.fail("credential probe must not run")))
 
     def test_preflight_repeat_idempotent(self):
@@ -142,7 +142,11 @@ class IngestTests(unittest.TestCase):
 
     def test_source_config_absent_blocks_without_creds(self):
         with patch.object(mod, "SOURCE_CONFIG", Path(self.tmp.name) / "missing.cfg"):
-            self.blocked("SOURCE_CONFIG_UNAVAILABLE", mod._load_source_id)
+            self.blocked("SOURCE_CONFIG_MISSING", mod._load_source_id)
+
+    def test_source_config_access_denied_differentiated(self):
+        with patch.object(mod.Path, "open", side_effect=PermissionError("access denied")):
+            self.blocked("SOURCE_CONFIG_ACCESS_DENIED", mod._load_source_id)
 
     def test_wrong_size_rejects_file(self):
         self.blocked("SOURCE_SIZE_MISMATCH",lambda:self.ingest(downloader=lambda token, sid:b"bad"))

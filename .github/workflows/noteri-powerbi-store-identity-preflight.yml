@@ -27,7 +27,7 @@ concurrency:
 env:
   SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
   RULES_SHA: 58dcd4200f412a866278027ba9e433439a03f3b3
-  APPROVED_INGEST_BLOB: 0cdeed7cf94ab187157b44b43cc2bc2d11221cc1
+  APPROVED_INGEST_BLOB: 6d62866951c044c16ca0bc2ef03c05f871fa4021
   PYTHONDONTWRITEBYTECODE: '1'
 
 jobs:
@@ -137,7 +137,8 @@ jobs:
           }
           $report = $envelope.stdout | ConvertFrom-Json
           if ($report.status -eq 'BLOCKED') {
-            if ($report.reason -notin @('SOURCE_CONFIG_UNAVAILABLE',
+            if ($report.reason -notin @('SOURCE_CONFIG_MISSING',
+                'SOURCE_CONFIG_ACCESS_DENIED', 'SOURCE_CONFIG_UNAVAILABLE',
                 'SOURCE_ID_UNAPPROVED', 'CREDENTIAL_UNAVAILABLE',
                 'NOTERI_WINDOWS_REQUIRED')) {
               throw 'NOTERI_STORE_UNEXPECTED_PREFLIGHT_REJECTION'

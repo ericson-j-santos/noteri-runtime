@@ -208,10 +208,14 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def _load_source_id() -> str:
     # Configuracao local confiavel e pre-provisionada. Nenhuma fonte e passada por chat/CLI.
-    _no_reparse(SOURCE_CONFIG)
     try:
+        _no_reparse(SOURCE_CONFIG)
         with SOURCE_CONFIG.open("rb") as inp:
             data = inp.read(200)
+    except FileNotFoundError:
+        raise Blocked("SOURCE_CONFIG_MISSING") from None
+    except PermissionError:
+        raise Blocked("SOURCE_CONFIG_ACCESS_DENIED") from None
     except OSError:
         raise Blocked("SOURCE_CONFIG_UNAVAILABLE") from None
     try:
