@@ -1,4 +1,8 @@
 name: CI
+# The run list retains the evaluated SHA and unique run ID without email,
+# new jobs, artifacts, tokens, or issue comments. Pull requests use HEAD SHA,
+# not their ephemeral merge commit SHA.
+run-name: CI SHA=${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }} RUN=${{ github.run_id }} ATTEMPT=${{ github.run_attempt }}
 
 on:
   push:
