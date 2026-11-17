@@ -104,7 +104,7 @@ def upgrade_preflight_using_task_python(repo: Path, exe: Path, executable_sha: s
         finished = subprocess.run(
             args, cwd=str(repo), env=safe_env, stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=35, check=False,
-            shell=False, creationflags=subprocess.CREATE_NO_WINDOW,
+            shell=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise Blocked("UPGRADE_PREFLIGHT_EXECUTION_FAILED") from exc
@@ -168,7 +168,7 @@ def check(expected_head: str, correlation: str, confirmation: str, *, probe_upgr
              "--child", "--child-source", source_sha, "--child-python", binary_sha],
             cwd=str(repo), env=safe_env, stdin=subprocess.DEVNULL,
             capture_output=True, text=True, timeout=20, check=False,
-            shell=False, creationflags=subprocess.CREATE_NO_WINDOW,
+            shell=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         raise Blocked("TASK_PYTHON_PROBE_FAILED") from exc
