@@ -136,8 +136,8 @@ jobs:
       CAS_SHA256: 1de767e958d035ce14e35c186230bdeab6ae04b381c862e3826e660595714c60
       DELTA_BASE_SHA: 033e2964d119f82faa19460c56c5f61f555ce91f
       DELTA_CAS_PATH: .evidence/noteri42/legacy-guard-delta-033e2964.json
-      DELTA_CAS_GIT_BLOB: 5ff9e51b6617f4c37650a7fad3b7f90b3bdef1a8
-      DELTA_CAS_SHA256: 0d8448b76c3f2416e3eb889cec54d6700f6ecdeb715088c1eca2856daa409243
+      DELTA_CAS_GIT_BLOB: d193901c09962810328eae2f796a4c6e85a0413c
+      DELTA_CAS_SHA256: ea815228aea07ae56c09fe262242e7ddeb5cfe26b853aa93d18fd2444f4407ca
     steps:
       - name: Independent fresh checkout of the precise SHA
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09

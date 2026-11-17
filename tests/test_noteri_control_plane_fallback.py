@@ -196,8 +196,8 @@ def test_workflow_and_policy_are_fixed_to_noteri() -> None:
         "          - rules219_readonly\n"
     )
     assert dispatch == expected
-    legacy = workflow.split("\\n  probe:", 1)[1].split(
-        "\\n  independent_readback:", 1
+    legacy = workflow.split("\n  probe:", 1)[1].split(
+        "\n  independent_readback:", 1
     )[0]
     for required in (
         "github.repository == 'ericson-j-santos/noteri-runtime'",
