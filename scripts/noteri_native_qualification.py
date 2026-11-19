@@ -144,7 +144,9 @@ def rollback_readback(install: Path = INSTALL) -> dict:
         if previous["existed"] is False:
             if version == 2 and "previous_windows_state" in previous:
                 raise Blocked("rollback_entry_invalid")
-            if (backup / "files" / rel).exists() or (backup / "files" / rel).is_symlink():
+            if version == 2 and (
+                    (backup / "files" / rel).exists()
+                    or (backup / "files" / rel).is_symlink()):
                 raise Blocked("unexpected_backup_for_new_file")
             states[rel] = {"matches_previous": not target.exists() and not target.is_symlink()}
             continue
