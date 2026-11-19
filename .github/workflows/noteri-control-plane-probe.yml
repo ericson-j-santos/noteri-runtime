@@ -192,9 +192,34 @@ jobs:
             '--risk', '1', '--timeout', '45', '--expected-head', $env:GITHUB_SHA,
             '--', 'python3', '-B', $script)
           $raw = & python3 -B $gateway @a
-          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'NOTERI_219_GATEWAY_BLOCKED' }
-          $envelope = @($raw)[-1] | ConvertFrom-Json -ErrorAction Stop
-          if ($envelope.gateway_exit_code -ne 0 -or $envelope.state_changed -ne $false) { throw 'NOTERI_219_GATEWAY_INVALID' }
+          $gatewayExit = $LASTEXITCODE
+          if (-not $raw) { throw 'NOTERI_219_GATEWAY_ENVELOPE_MISSING' }
+          try { $envelope = @($raw)[-1] | ConvertFrom-Json -ErrorAction Stop }
+          catch { throw 'NOTERI_219_GATEWAY_ENVELOPE_INVALID' }
+          # Fail closed, but retain a bounded non-sensitive code from the trusted
+          # Gateway envelope; never print stdout, stderr, error, paths or tokens.
+          if ($gatewayExit -ne 0 -or $envelope.gateway_exit_code -ne 0) {
+            if ($envelope.result -ceq 'command_failed' -and $envelope.command_exit_code -ne 0) {
+              $blocked = $null
+              try { $blocked = $envelope.stdout | ConvertFrom-Json -ErrorAction Stop }
+              catch { throw 'NOTERI_219_COMMAND_FAILURE_UNCLASSIFIED' }
+              $code = [string]$blocked.reason_code
+              if ($blocked.result -ceq 'NOTERI_219_READONLY_BLOCKED' -and
+                  $code -cmatch '^NOTERI_219_[A-Z][A-Z0-9_]{4,70}$' -and
+                  $blocked.ready_for_builder -eq $false -and
+                  $blocked.state_changed -eq $false -and
+                  $blocked.secrets_read -eq $false) {
+                throw $code
+              }
+              throw 'NOTERI_219_COMMAND_FAILURE_UNCLASSIFIED'
+            }
+            if ($envelope.result -ceq 'blocked' -and
+                $envelope.gateway_exit_code -in @(20,21,22,23,24,25,26)) {
+              throw "NOTERI_219_GATEWAY_POLICY_EXIT_$($envelope.gateway_exit_code)"
+            }
+            throw 'NOTERI_219_GATEWAY_FAILURE_UNCLASSIFIED'
+          }
+          if ($envelope.state_changed -ne $false) { throw 'NOTERI_219_GATEWAY_INVALID' }
           $observed = $envelope.stdout | ConvertFrom-Json -ErrorAction Stop
           if ($observed.result -cne 'NOTERI_219_READONLY_OBSERVATIONS' -or
               $observed.source_pins_verified -ne $true -or

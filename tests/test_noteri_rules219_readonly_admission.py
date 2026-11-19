@@ -277,6 +277,34 @@ class WorkflowBindingTests(unittest.TestCase):
         self.assertIn('"activation_authorized": False', independent)
         self.assertIn('"state_changed": False', independent)
 
+    def test_gateway_failure_keeps_fail_closed_and_preserves_reason_code(self):
+        physical = self.workflow.split("\n  rules219_probe:", 1)[1].split(
+            "\n  rules219_independent:", 1)[0]
+        for required in (
+            "$gatewayExit = $LASTEXITCODE",
+            "NOTERI_219_GATEWAY_ENVELOPE_MISSING",
+            "NOTERI_219_GATEWAY_ENVELOPE_INVALID",
+            "NOTERI_219_COMMAND_FAILURE_UNCLASSIFIED",
+            "NOTERI_219_GATEWAY_FAILURE_UNCLASSIFIED",
+            "NOTERI_219_GATEWAY_POLICY_EXIT_",
+            "$blocked.result -ceq 'NOTERI_219_READONLY_BLOCKED'",
+            "$blocked.ready_for_builder -eq $false",
+            "$blocked.state_changed -eq $false",
+            "$blocked.secrets_read -eq $false",
+            "throw $code",
+        ):
+            self.assertIn(required, physical)
+        self.assertLess(physical.index("$gatewayExit = $LASTEXITCODE"),
+                        physical.index("if ($gatewayExit -ne 0"))
+        self.assertNotIn("throw 'NOTERI_219_GATEWAY_BLOCKED'", physical)
+        for forbidden in ("Write-Output $raw", "Write-Output $envelope",
+                          "throw $envelope.error", "throw $envelope.stdout",
+                          "Write-Output $envelope.stderr",
+                          "NOTERI_219_PHYSICAL_READONLY_RECEIPT_OK'\n          throw"):
+            self.assertNotIn(forbidden, physical)
+        self.assertIn("'--risk', '1'", physical)
+        self.assertIn("inputs.mode == 'rules219_readonly'", physical)
+
     def test_ci_runs_when_physical_workflow_changes(self):
         contract = (Path(__file__).resolve().parents[1] /
                     ".github/workflows/noteri-rules219-readonly-contract.yml").read_text(
