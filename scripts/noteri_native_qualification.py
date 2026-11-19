@@ -44,61 +44,180 @@ def read_json(path: Path) -> dict:
         raise Blocked("json_object_required")
     return result
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _windows_metadata_helper():
+    """Load only the already SHA-pinned Win32 metadata implementation.
+
+    Missing checkout or mismatched bytes fail closed. Never use an arbitrary
+    helper from PATH, PYTHONPATH or the active Gateway installation.
+    """
+    if not _is_windows():
+        raise Blocked("windows_metadata_required")
+    rules_root = os.environ.get("NOTERI_RULES_CHECKOUT")
+    if not rules_root or not Path(rules_root).is_absolute():
+        raise Blocked("windows_metadata_helper_unavailable")
+    helper_path = Path(rules_root) / "_rules" / "scripts" / "install_command_gateway_host.py"
+    try:
+        import noteri_gateway_forensic_inventory as forensic
+        return forensic._canonical_helper(helper_path)
+    except Exception:
+        raise Blocked("windows_metadata_helper_unverified") from None
+
+
+def _windows_metadata_equal(helper, expected: dict, target: Path, rel: str) -> bool:
+    try:
+        helper._validate_windows_persisted_state(expected, rel)
+        first = helper._windows_persisted_file_state(target)
+        second = helper._windows_persisted_file_state(target)
+        return (first == second
+                and helper._windows_persisted_state_equivalent(expected, first))
+    except Exception:
+        raise Blocked("windows_metadata_unverified") from None
+
+
 def rollback_readback(install: Path = INSTALL) -> dict:
     update_path = install / "update-receipt.json"
     if not update_path.exists():
         return {"status": "no_update_receipt", "matches_previous": None, "state_verified": None}
-    update = read_json(update_path)
+    receipt_before = read_regular(update_path)
+    try:
+        update = json.loads(receipt_before)
+    except (UnicodeError, json.JSONDecodeError):
+        raise Blocked("rollback_receipt_invalid") from None
+    if not isinstance(update, dict):
+        raise Blocked("rollback_receipt_invalid")
     backup = Path(str(update.get("backup_dir", "")))
     if backup.parent.resolve() != install.resolve() or not re.fullmatch(
             r"backup-[A-Za-z0-9-]+", backup.name):
         raise Blocked("rollback_location_invalid")
     raw = read_regular(backup / "rollback-manifest.json")
-    snapshot = json.loads(raw)
-    entries = snapshot.get("entries")
-    if (snapshot.get("version") != 1 or not isinstance(entries, dict)
-            or set(entries) != MANAGED
-            or Path(snapshot.get("install_root", "")).resolve() != install.resolve()):
+    try:
+        snapshot = json.loads(raw)
+    except (UnicodeError, json.JSONDecodeError):
+        raise Blocked("rollback_manifest_invalid") from None
+    entries = snapshot.get("entries") if isinstance(snapshot, dict) else None
+    version = snapshot.get("version") if isinstance(snapshot, dict) else None
+    if (version not in (1, 2) or type(version) is not int
+            or not isinstance(entries, dict) or set(entries) != MANAGED
+            or Path(str(snapshot.get("install_root", ""))).resolve() != install.resolve()):
         raise Blocked("rollback_manifest_invalid")
+    if _is_windows() and version == 1:
+        # v1 has no authenticated owner, DACL or alternate data streams.
+        raise Blocked("windows_rollback_v1_unverifiable")
+    helper = None
+    if version == 2:
+        if (not _is_windows()
+                or snapshot.get("metadata_contract") != "windows-owner-group-dacl-ads-v1"):
+            raise Blocked("rollback_metadata_contract_invalid")
+        helper = _windows_metadata_helper()
     states = {}
+    backup_integrity = True
     for rel, previous in entries.items():
-        target = install / rel
-        if previous.get("existed") is False:
-            states[rel] = {"matches_previous": not target.exists()}
-            continue
-        if previous.get("existed") is not True:
+        if not isinstance(previous, dict) or type(previous.get("existed")) is not bool:
             raise Blocked("rollback_entry_invalid")
+        target = install / rel
+        if version == 2:
+            want_sha = previous.get("desired_sha256")
+            want_size = previous.get("desired_size")
+            source = previous.get("source")
+            approved_sources = {
+                "bin/command_gateway.py": "scripts/command_gateway.py",
+                "bin/host_health_check.py": "scripts/host_health_check.py",
+                "bin/session_bootstrap.py": "scripts/session_bootstrap.py",
+                "bin/session_preflight.py": "scripts/session_preflight.py",
+                "bin/session_launcher.py": "scripts/session_launcher.py",
+                "bin/runner_version_preflight.py": "scripts/runner_version_preflight.py",
+                "config/policy.json": ("config/command-gateway.policy.json",
+                                       "config/command-gateway.policy.noteri-wsl.json"),
+            }
+            expected_sources = approved_sources.get(rel)
+            if (expected_sources is None
+                    or source not in ((expected_sources,) if isinstance(expected_sources, str)
+                                      else expected_sources)
+                    or not isinstance(want_sha, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", want_sha)
+                    or type(want_size) is not int or want_size < 0):
+                raise Blocked("rollback_entry_invalid")
+        if previous["existed"] is False:
+            if version == 2 and "previous_windows_state" in previous:
+                raise Blocked("rollback_entry_invalid")
+            if (backup / "files" / rel).exists() or (backup / "files" / rel).is_symlink():
+                raise Blocked("unexpected_backup_for_new_file")
+            states[rel] = {"matches_previous": not target.exists() and not target.is_symlink()}
+            continue
         data = read_regular(target)
-        saved = read_regular(backup / "files" / rel)
+        saved_path = backup / "files" / rel
+        saved = read_regular(saved_path)
         digest = hashlib.sha256(data).hexdigest()
-        backup_ok = (hashlib.sha256(saved).hexdigest() == previous.get("previous_sha256")
-                     and len(saved) == previous.get("previous_size"))
+        prior_sha = previous.get("previous_sha256")
+        prior_size = previous.get("previous_size")
+        prior_mode = previous.get("previous_mode")
+        if (not isinstance(prior_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", prior_sha)
+                or type(prior_size) is not int or prior_size < 0
+                or type(prior_mode) is not int or prior_mode < 0):
+            raise Blocked("rollback_entry_invalid")
+        backup_ok = (hashlib.sha256(saved).hexdigest() == prior_sha
+                     and len(saved) == prior_size
+                     and stat.S_IMODE(saved_path.stat().st_mode) == prior_mode)
+        metadata_ok = True
+        saved_metadata_ok = True
+        if version == 2:
+            expected = previous.get("previous_windows_state")
+            if not isinstance(expected, dict):
+                raise Blocked("rollback_windows_metadata_missing")
+            saved_metadata_ok = _windows_metadata_equal(helper, expected, saved_path, rel)
+            metadata_ok = (saved_metadata_ok and
+                           _windows_metadata_equal(helper, expected, target, rel))
+        backup_integrity = backup_integrity and backup_ok and saved_metadata_ok
         states[rel] = {
             "sha256": digest, "size": len(data),
-            "matches_previous": backup_ok
-            and digest == previous.get("previous_sha256")
-            and len(data) == previous.get("previous_size")
-            and stat.S_IMODE(target.stat().st_mode) == previous.get("previous_mode"),
+            "matches_previous": backup_ok and metadata_ok
+            and digest == prior_sha and len(data) == prior_size
+            and stat.S_IMODE(target.stat().st_mode) == prior_mode,
         }
     matches_previous = all(row["matches_previous"] for row in states.values())
     update_result = update.get("result")
     state_verified = False
     if update_result == "HOST_UPDATE_BLOCKED":
         state_verified = matches_previous
-    elif update_result == "HOST_UPDATE_OK":
-        # Successful upgrades must match the desired bundle, not the old backup.
+    elif update_result in ("HOST_UPDATE_OK", "HOST_UPDATE_ALREADY_CURRENT_VERIFIED"):
         declared = update.get("files")
         if isinstance(declared, dict) and set(declared) == MANAGED:
-            state_verified = True
+            state_verified = backup_integrity
             for rel, entry in entries.items():
-                current = read_regular(install / rel)
                 desired = declared.get(rel)
-                if (not isinstance(desired, dict)
-                        or hashlib.sha256(current).hexdigest() != entry.get("desired_sha256")
-                        or len(current) != entry.get("desired_size")
-                        or desired.get("sha256") != entry.get("desired_sha256")
-                        or desired.get("size") != entry.get("desired_size")):
+                if not isinstance(desired, dict):
                     state_verified = False
+                    continue
+                try:
+                    current = read_regular(install / rel)
+                except (OSError, Blocked):
+                    state_verified = False
+                    continue
+                desired_sha = entry.get("desired_sha256")
+                desired_size = entry.get("desired_size")
+                if (not isinstance(desired_sha, str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", desired_sha)
+                        or type(desired_size) is not int or desired_size < 0
+                        or hashlib.sha256(current).hexdigest() != desired_sha
+                        or len(current) != desired_size
+                        or desired.get("sha256") != desired_sha
+                        or desired.get("size") != desired_size):
+                    state_verified = False
+                if version == 2 and entry.get("existed"):
+                    # Metadata after installation must still match the
+                    # previous secured ACL/ADS unless independently updated.
+                    if not _windows_metadata_equal(
+                            helper, entry["previous_windows_state"], install / rel, rel):
+                        state_verified = False
+    # Detect a replacement or concurrent update of the trusted evidence.
+    if read_regular(update_path) != receipt_before:
+        raise Blocked("rollback_receipt_changed")
+    if read_regular(backup / "rollback-manifest.json") != raw:
+        raise Blocked("rollback_manifest_changed")
     return {"status": "observed", "matches_previous": matches_previous,
         "state_verified": state_verified, "update_result": update_result,
         "manifest_sha256": hashlib.sha256(raw).hexdigest(), "files": states}
