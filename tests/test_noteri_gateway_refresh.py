@@ -124,9 +124,9 @@ def seed_current_receipt(monkeypatch, root: Path):
 
 
 def test_contract_is_fixed():
-    assert m.RULES_COMMIT == "b5ade370fa11877ff7b899b5c6feacc3bfaf34e7"
-    assert m.RULES_VERSION == "1.6.19"
-    assert m.MANIFEST_SHA256 == "fbf4af678a11111b8a895bee1f19211523f0bdcb292838f64e252ab67d37f96c"
+    assert m.RULES_COMMIT == "58dcd4200f412a866278027ba9e433439a03f3b3"
+    assert m.RULES_VERSION == "1.6.21"
+    assert m.MANIFEST_SHA256 == "b5fa6a5c6b14054601824883f788d5fb2a24416bd4a28de49cf2ed5a0574f659"
     assert m.INSTALL_ROOT == Path(r"C:\dev\chatgpt-command-gateway")
     assert m.INSTALL_SHA256 == "4b2c200680de7e0db6bd44905a246d7e1773b36d0f516d9756046e758827e35a"
     assert m.UPDATE_SHA256 == "fa5d03b0cecb46cf02477af4a75c81c57b92d7b609d4bd4abd54f28a7b22b1a2"
@@ -648,6 +648,10 @@ def test_workflow_preserves_failure_artifact_without_retry_or_success_promotion(
         Path(__file__).resolve().parents[1]
         / ".github/workflows/noteri-command-gateway-refresh.yml"
     ).read_text(encoding="utf-8")
+    assert "ref: 58dcd4200f412a866278027ba9e433439a03f3b3" in workflow
+    assert "EXPECTED_RULES_SHA -ne '58dcd4200f412a866278027ba9e433439a03f3b3'" in workflow
+    assert "$syncRef = 'origin/main'" in workflow
+    assert "origin/fix/noteri-gateway-canonical-profile-20261028" not in workflow
     assert workflow.count("python3 scripts/noteri_gateway_refresh.py") == 1
     assert workflow.count("Independently read back run evidence and installed hashes") == 1
     assert workflow.count("Preserve sanitized updater failure evidence") == 1
