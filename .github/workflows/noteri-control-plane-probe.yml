@@ -204,8 +204,41 @@ jobs:
               try { $blocked = $envelope.stdout | ConvertFrom-Json -ErrorAction Stop }
               catch { throw 'NOTERI_219_COMMAND_FAILURE_UNCLASSIFIED' }
               $code = [string]$blocked.reason_code
+              # Exact codes from pinned source, not a regex allowing arbitrary
+              # child data to become an untrusted diagnostic message.
+              $allowedReasons = @(
+                'NOTERI_219_GIT_UNAVAILABLE',
+                'NOTERI_219_GIT_READBACK_INVALID',
+                'NOTERI_219_SOURCE_PATH_INVALID',
+                'NOTERI_219_SOURCE_ROOT_MISMATCH',
+                'NOTERI_219_SOURCE_SHA_DRIFT',
+                'NOTERI_219_SOURCE_ORIGIN_DRIFT',
+                'NOTERI_219_SOURCE_EXTRA_REMOTE',
+                'NOTERI_219_SOURCE_TRACKED_DIRTY',
+                'NOTERI_219_SOURCE_UNTRACKED',
+                'NOTERI_219_SOURCE_FILE_INVALID',
+                'NOTERI_219_SOURCE_FILE_DIGEST_DRIFT',
+                'NOTERI_219_SOURCE_INDEX_DRIFT',
+                'NOTERI_219_HOST_SHA_INVALID',
+                'NOTERI_219_NONISOLATED_CHECKOUT',
+                'NOTERI_219_HOST_UNTRACKED_SCOPE_DRIFT',
+                'NOTERI_219_POOL_BINDING_BLOB_DRIFT',
+                'NOTERI_219_POOL_BINDING_SOURCE_DRIFT',
+                'NOTERI_219_MODEL_INVENTORY_INVALID',
+                'NOTERI_219_MODEL_TAG_MISSING_OR_DUPLICATE',
+                'NOTERI_219_MODEL_NOT_LOCAL_OR_DIGEST_INVALID',
+                'NOTERI_219_MODEL_RESPONSE_UNTRUSTED',
+                'NOTERI_219_MODEL_LOOPBACK_UNAVAILABLE',
+                'NOTERI_219_MODEL_RESPONSE_TOO_LARGE',
+                'NOTERI_219_MODEL_RESPONSE_INVALID',
+                'NOTERI_219_HOST_CONTEXT_INVALID',
+                'NOTERI_219_SESSION_CONTEXT_UNATTESTED',
+                'NOTERI_219_SESSION_TARGET_REQUIRED',
+                'NOTERI_219_PREFLIGHT_UNAVAILABLE'
+              )
               if ($blocked.result -ceq 'NOTERI_219_READONLY_BLOCKED' -and
                   $code -cmatch '^NOTERI_219_[A-Z][A-Z0-9_]{4,70}$' -and
+                  $allowedReasons -ccontains $code -and
                   $blocked.ready_for_builder -eq $false -and
                   $blocked.state_changed -eq $false -and
                   $blocked.secrets_read -eq $false) {

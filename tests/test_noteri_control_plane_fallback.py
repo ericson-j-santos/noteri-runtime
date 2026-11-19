@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -757,3 +759,56 @@ def test_ready_task_must_not_bypass_stale_sha_or_attempt_uac(
             confirm=launcher.LAUNCH_CONFIRM, timeout_seconds=15,
         )
     assert source.is_file()
+
+
+# The real PowerShell 5.1 parser runs in the existing Windows CI job.
+# It never launches Gateway, accesses a host, or contacts Ollama.
+@pytest.mark.skipif(os.name != "nt", reason="requires hosted Windows PowerShell 5.1")
+@pytest.mark.parametrize(
+    ("case", "envelope", "exit_code", "expected"),
+[
+    ("empty", "", 1, "NOTERI_219_GATEWAY_ENVELOPE_MISSING"),
+    ("invalid_json", "{invalid", 1, "NOTERI_219_GATEWAY_ENVELOPE_INVALID"),
+    ("gateway_policy", "{\"result\":\"blocked\",\"gateway_exit_code\":25}", 25, "NOTERI_219_GATEWAY_POLICY_EXIT_25"),
+    ("gateway_unknown", "{\"result\":\"blocked\",\"gateway_exit_code\":99}", 99, "NOTERI_219_GATEWAY_FAILURE_UNCLASSIFIED"),
+    ("command_known", "{\"result\":\"command_failed\",\"gateway_exit_code\":2,\"command_exit_code\":2,\"stdout\":\"{\\\"result\\\":\\\"NOTERI_219_READONLY_BLOCKED\\\",\\\"reason_code\\\":\\\"NOTERI_219_MODEL_LOOPBACK_UNAVAILABLE\\\",\\\"ready_for_builder\\\":false,\\\"state_changed\\\":false,\\\"secrets_read\\\":false}\"}", 2, "NOTERI_219_MODEL_LOOPBACK_UNAVAILABLE"),
+    ("command_forged", "{\"result\":\"command_failed\",\"gateway_exit_code\":2,\"command_exit_code\":2,\"stdout\":\"{\\\"result\\\":\\\"NOTERI_219_READONLY_BLOCKED\\\",\\\"reason_code\\\":\\\"NOTERI_219_PRIVATE_CANARY_DO_NOT_LOG\\\",\\\"ready_for_builder\\\":false,\\\"state_changed\\\":false,\\\"secrets_read\\\":false}\"}", 2, "NOTERI_219_COMMAND_FAILURE_UNCLASSIFIED"),
+    ("command_missing_guards", "{\"result\":\"command_failed\",\"gateway_exit_code\":2,\"command_exit_code\":2,\"stdout\":\"{\\\"result\\\":\\\"NOTERI_219_READONLY_BLOCKED\\\",\\\"reason_code\\\":\\\"NOTERI_219_MODEL_LOOPBACK_UNAVAILABLE\\\",\\\"ready_for_builder\\\":true,\\\"state_changed\\\":false,\\\"secrets_read\\\":false}\"}", 2, "NOTERI_219_COMMAND_FAILURE_UNCLASSIFIED"),
+    ("command_not_json", "{\"result\":\"command_failed\",\"gateway_exit_code\":2,\"command_exit_code\":2,\"stdout\":\"PRIVATE_CANARY_DO_NOT_LOG\"}", 2, "NOTERI_219_COMMAND_FAILURE_UNCLASSIFIED"),
+    ("changed_state", "{\"result\":\"ok\",\"gateway_exit_code\":0,\"command_exit_code\":0,\"state_changed\":true,\"stdout\":\"{}\"}", 0, "NOTERI_219_GATEWAY_INVALID"),
+    ("success", "{\"result\":\"ok\",\"gateway_exit_code\":0,\"command_exit_code\":0,\"state_changed\":false,\"stdout\":\"{}\"}", 0, "NOTERI_219_DIAG_OK"),
+])
+def test_rules219_actual_windows_gateway_fail_closed(case, envelope, exit_code, expected):
+    content = WORKFLOW.read_text(encoding="utf-8")
+    start = "          $gatewayExit = $LASTEXITCODE"
+    end = "          $observed = $envelope.stdout | ConvertFrom-Json -ErrorAction Stop"
+    assert content.count(start) == 1, "gateway parser missing/ambiguous"
+    assert content.count(end) == 1, "receipt parser missing/ambiguous"
+    start_pos, end_pos = content.index(start), content.index(end)
+    assert start_pos < end_pos
+    block = "\n".join(
+        line[10:] if line.startswith("          ") else line
+        for line in content[start_pos:end_pos].splitlines()
+    )
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        "$raw = $env:MOCK_GATEWAY_ENVELOPE\n"
+        "$LASTEXITCODE = [int]$env:MOCK_GATEWAY_EXIT\n"
+        "try {\n" + block + "\n"
+        "Write-Output 'NOTERI_219_DIAG_OK'\n"
+        "exit 0\n"
+        "} catch { Write-Output $_.Exception.Message; exit 79 }\n"
+    )
+    env = dict(os.environ, MOCK_GATEWAY_ENVELOPE=envelope,
+               MOCK_GATEWAY_EXIT=str(exit_code))
+    completed = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+         "-Command", script],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=15,
+        check=False,
+    )
+    assert completed.returncode == (0 if expected == "NOTERI_219_DIAG_OK" else 79), (
+        case, completed.stdout, completed.stderr
+    )
+    assert expected in completed.stdout, (case, completed.stdout, completed.stderr)
+    assert "PRIVATE_CANARY_DO_NOT_LOG" not in completed.stdout + completed.stderr
