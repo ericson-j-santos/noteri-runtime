@@ -189,13 +189,14 @@ def test_workflow_and_policy_are_fixed_to_noteri() -> None:
         "  workflow_dispatch:\n"
         "    inputs:\n"
         "      mode:\n"
-        "        description: 'Governed qualification or Rules219 read-only inventory'\n"
+        "        description: 'Governed qualification or read-only inventory'\n"
         "        required: true\n"
         "        type: choice\n"
         "        default: qualification\n"
         "        options:\n"
         "          - qualification\n"
         "          - rules219_readonly\n"
+        "          - pool_readonly\n"
     )
     assert dispatch == expected
     legacy = workflow.split("\n  probe:", 1)[1].split(

@@ -4,13 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'Governed qualification or Rules219 read-only inventory'
+        description: 'Governed qualification or read-only inventory'
         required: true
         type: choice
         default: qualification
         options:
           - qualification
           - rules219_readonly
+          - pool_readonly
 
 permissions:
   contents: read
@@ -110,7 +111,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       github.actor == 'ericson-j-santos' &&
       github.event_name == 'workflow_dispatch' &&
-      inputs.mode == 'rules219_readonly'
+      (inputs.mode == 'rules219_readonly' || inputs.mode == 'pool_readonly')
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 5
     env:
@@ -121,6 +122,8 @@ jobs:
     outputs:
       receipt_b64: ${{ steps.readonly.outputs.receipt_b64 }}
       receipt_sha256: ${{ steps.readonly.outputs.receipt_sha256 }}
+      pool_receipt_b64: ${{ steps.pool_readonly.outputs.receipt_b64 }}
+      pool_receipt_sha256: ${{ steps.pool_readonly.outputs.receipt_sha256 }}
     steps:
       - name: Checkout immutable Noteri main for the current dispatch
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -172,6 +175,7 @@ jobs:
           "session=$($s.session_id)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding ascii
           "snapshot=$($s.snapshot_sha256)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding ascii
       - name: Invoke pinned source and local Ollama GET through Gateway Risk1
+        if: inputs.mode == 'rules219_readonly'
         id: readonly
         shell: powershell
         env:
@@ -294,6 +298,99 @@ jobs:
           "receipt_sha256=$digest" | Out-File $env:GITHUB_OUTPUT -Append -Encoding ascii
           Write-Output 'NOTERI_219_PHYSICAL_READONLY_RECEIPT_OK'
 
+      - name: Read local Worker Pool health via existing Gateway Risk1
+        if: inputs.mode == 'pool_readonly'
+        id: pool_readonly
+        shell: powershell
+        env:
+          SESSION_TARGET_PATH: ${{ steps.session.outputs.target }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+          SESSION_SNAPSHOT_SHA256: ${{ steps.session.outputs.snapshot }}
+          SESSION_LAUNCH_RESULT: SESSION_LAUNCH_OK
+          SESSION_STATE_VALIDATED: 'true'
+          SESSION_GATEWAY_BOUND: 'true'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_control_rules'
+          $gateway = Join-Path $rules 'scripts/command_gateway.py'
+          $policy = Join-Path $rules 'config/command-gateway.policy.json'
+          $script = Join-Path $env:SESSION_TARGET_PATH 'scripts/noteri_worker_pool_health_readonly.py'
+          $args = @('--policy', $policy, '--correlation-id', $env:CORRELATION_ID,
+            'run', '--cwd', $env:SESSION_TARGET_PATH, '--session-id', $env:SESSION_ID,
+            '--risk', '1', '--timeout', '20', '--expected-head', $env:GITHUB_SHA,
+            '--', 'python3', '-B', $script)
+          $raw = @(& python3 -B $gateway @args)
+          if (-not $raw) { throw 'NOTERI_POOL_GATEWAY_NO_ENVELOPE' }
+          try { $envelope = $raw[-1] | ConvertFrom-Json -ErrorAction Stop }
+          catch { throw 'NOTERI_POOL_GATEWAY_BAD_ENVELOPE' }
+          if ($LASTEXITCODE -ne 0 -or $envelope.gateway_exit_code -ne 0) {
+            $safeReasons = @(
+              'NOTERI_POOL_CONTEXT_UNATTESTED', 'NOTERI_POOL_ARGUMENTS_OR_BYTECODE_BLOCKED',
+              'NOTERI_POOL_LOCALAPPDATA_MISSING', 'NOTERI_POOL_LOCALAPPDATA_UNTRUSTED',
+              'NOTERI_POOL_RELEASE_ROOT_INVALID', 'NOTERI_POOL_RELEASE_IO_BLOCKED',
+              'NOTERI_POOL_RELEASE_ENTRIES_INVALID', 'NOTERI_POOL_HEALTH_UNAVAILABLE',
+              'NOTERI_POOL_HEALTH_RESPONSE_UNTRUSTED', 'NOTERI_POOL_HEALTH_READ_FAILED',
+              'NOTERI_POOL_HEALTH_SIZE_INVALID', 'NOTERI_POOL_HEALTH_JSON_INVALID',
+              'NOTERI_POOL_HEALTH_BODY_INVALID', 'NOTERI_POOL_HEALTH_SCHEMA_INVALID',
+              'NOTERI_POOL_AUTHORITY_ID_INVALID', 'NOTERI_POOL_STAGE_SCHEMA_INVALID'
+            )
+            if ($envelope.result -ceq 'command_failed' -and $envelope.command_exit_code -ne 0) {
+              try {
+                $blocked = $envelope.stdout | ConvertFrom-Json -ErrorAction Stop
+                $code = [string]$blocked.reason_code
+                if ($blocked.result -ceq 'NOTERI_POOL_RISK1_BLOCKED' -and
+                    $blocked.state_changed -eq $false -and
+                    $blocked.secrets_read -eq $false -and
+                    $blocked.ready_for_builder -eq $false -and
+                    $safeReasons -ccontains $code) { throw $code }
+              } catch {
+                if ($safeReasons -ccontains $_.Exception.Message) { throw }
+              }
+            }
+            throw 'NOTERI_POOL_GATEWAY_BLOCKED_UNCLASSIFIED'
+          }
+          if ($envelope.result -cne 'ok' -or
+              $envelope.command_exit_code -ne 0 -or $envelope.state_changed -ne $false) {
+            throw 'NOTERI_POOL_GATEWAY_READBACK_INVALID'
+          }
+          try { $observed = $envelope.stdout | ConvertFrom-Json -ErrorAction Stop }
+          catch { throw 'NOTERI_POOL_HEALTH_RECEIPT_UNREADABLE' }
+          if ($observed.result -cne 'NOTERI_POOL_RISK1_READONLY' -or
+              $observed.state_changed -ne $false -or $observed.secrets_read -ne $false -or
+              $observed.ready_for_builder -ne $false -or
+              $observed.ready_for_pr -ne $false -or $observed.lease_verified -ne $false -or
+              $observed.cas_verified -ne $false -or $observed.cost_zero_attested -ne $false -or
+              $null -ne $observed.active_release_sha) {
+            throw 'NOTERI_POOL_HEALTH_RECEIPT_FALSE_POSITIVE'
+          }
+          $safe = [ordered]@{
+            schema_version = 1; result = 'NOTERI_POOL_PHYSICAL_RISK1'
+            host_sha = [string]$env:GITHUB_SHA
+            repository = [string]$env:GITHUB_REPOSITORY
+            runner_name = [string]$env:RUNNER_NAME
+            run_id = [string]$env:GITHUB_RUN_ID; attempt = [int]$env:GITHUB_RUN_ATTEMPT
+            session_snapshot_sha256 = [string]$env:SESSION_SNAPSHOT_SHA256
+            authority_id = $observed.authority_id
+            storage_backend = [string]$observed.storage_backend
+            fenced_cutover_enabled = [bool]$observed.fenced_cutover_enabled
+            staged_releases_unverified = @($observed.staged_releases_unverified)
+            active_release_sha = $null
+            legacy_claimers_drained_verified = $false
+            lease_verified = $false; cas_verified = $false
+            ready_for_builder = $false; ready_for_pr = $false
+            cost_zero_attested = $false; state_changed = $false; secrets_read = $false
+          }
+          $bytes = [Text.Encoding]::UTF8.GetBytes(($safe | ConvertTo-Json -Depth 4 -Compress))
+          if ($bytes.Length -lt 200 -or $bytes.Length -gt 4096) {
+            throw 'NOTERI_POOL_RECEIPT_BAD_SIZE'
+          }
+          $hasher = [Security.Cryptography.SHA256]::Create()
+          try { $digest = [BitConverter]::ToString($hasher.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
+          finally { $hasher.Dispose() }
+          "receipt_b64=$([Convert]::ToBase64String($bytes))" | Out-File $env:GITHUB_OUTPUT -Append -Encoding ascii
+          "receipt_sha256=$digest" | Out-File $env:GITHUB_OUTPUT -Append -Encoding ascii
+          Write-Output 'NOTERI_POOL_PHYSICAL_RISK1_RECEIPT_OK'
+
   rules219_independent:
     name: Independent Rules219 Noteri physical receipt readback
     needs: rules219_probe
@@ -377,4 +474,83 @@ jobs:
                   "NOTERI_219_SESSION_OR_MODEL_INVALID")
           require(expected["ready_for_builder"] is False, "NOTERI_219_FALSE_READY")
           print("NOTERI_219_INDEPENDENT_READBACK_OK_READY_FALSE")
+          PY
+
+  pool_readback_independent:
+    name: Independent Noteri Worker Pool Risk1 receipt (non-promoting)
+    needs: rules219_probe
+    if: >-
+      needs.rules219_probe.result == 'success' &&
+      github.repository == 'ericson-j-santos/noteri-runtime' &&
+      github.ref == 'refs/heads/main' &&
+      github.actor == 'ericson-j-santos' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.mode == 'pool_readonly'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    env:
+      RECEIPT_B64: ${{ needs.rules219_probe.outputs.pool_receipt_b64 }}
+      RECEIPT_SHA256: ${{ needs.rules219_probe.outputs.pool_receipt_sha256 }}
+      EXPECTED_SHA: ${{ github.sha }}
+      RUN_ID: ${{ github.run_id }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - name: Independently verify runner identity by GitHub jobs API
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const {data} = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner, repo: context.repo.repo,
+              run_id: context.runId, per_page: 100
+            });
+            const jobs = data.jobs.filter(j => j.name === 'Rules219 Noteri physical read-only inventory');
+            if (jobs.length !== 1 || jobs[0].status !== 'completed' ||
+                jobs[0].conclusion !== 'success' || jobs[0].runner_name !== 'Noteri-runtime' ||
+                !Number.isInteger(jobs[0].runner_id) || jobs[0].runner_id <= 0) {
+              throw new Error('NOTERI_POOL_RUNNER_IDENTITY_UNVERIFIED');
+            }
+      - name: Verify receipt integrity SHA-bound and non-promoting flags
+        shell: bash
+        run: |
+          python3 -B - <<'PY'
+          import base64, hashlib, json, os, re
+          raw64 = os.environ.get("RECEIPT_B64", "")
+          digest = os.environ.get("RECEIPT_SHA256", "")
+          if not re.fullmatch("[0-9a-f]{64}", digest) or not 250 <= len(raw64) <= 5500:
+              raise SystemExit("NOTERI_POOL_READBACK_MISSING")
+          raw = base64.b64decode(raw64, validate=True)
+          if not 200 <= len(raw) <= 4096 or hashlib.sha256(raw).hexdigest() != digest:
+              raise SystemExit("NOTERI_POOL_READBACK_TAMPERED")
+          body = json.loads(raw)
+          expected = {
+              "schema_version": 1, "result": "NOTERI_POOL_PHYSICAL_RISK1",
+              "host_sha": os.environ["EXPECTED_SHA"],
+              "repository": "ericson-j-santos/noteri-runtime",
+              "runner_name": "Noteri-runtime",
+              "run_id": os.environ["RUN_ID"], "attempt": int(os.environ["RUN_ATTEMPT"]),
+              "active_release_sha": None, "legacy_claimers_drained_verified": False,
+              "lease_verified": False, "cas_verified": False,
+              "ready_for_builder": False, "ready_for_pr": False,
+              "cost_zero_attested": False, "state_changed": False, "secrets_read": False,
+          }
+          additional = {"session_snapshot_sha256", "authority_id", "storage_backend",
+                        "fenced_cutover_enabled", "staged_releases_unverified"}
+          if (type(body) is not dict or set(body) != set(expected) | additional
+                  or any(type(body.get(k)) is not type(v) or body[k] != v
+                         for k, v in expected.items())
+                  or not re.fullmatch("[0-9a-f]{64}", body["session_snapshot_sha256"])
+                  or body["storage_backend"] not in ("sqlite", "postgres", "postgresql")
+                  or type(body["fenced_cutover_enabled"]) is not bool
+                  or not isinstance(body["staged_releases_unverified"], list)
+                  or len(body["staged_releases_unverified"]) > 64
+                  or any(type(s) is not str or not re.fullmatch("[0-9a-f]{40}", s)
+                         for s in body["staged_releases_unverified"])
+                  or (body["authority_id"] is not None and
+                      (type(body["authority_id"]) is not str or
+                       not re.fullmatch("[0-9a-fA-F-]{32,36}", body["authority_id"])))):
+              raise SystemExit("NOTERI_POOL_READBACK_SCHEMA_INVALID")
+          print("NOTERI_POOL_INDEPENDENT_READBACK_OK_READY_FALSE")
           PY
