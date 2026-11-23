@@ -16,11 +16,14 @@ def test_gateway_refresh_requires_explicit_pinned_dispatch():
     assert "inputs.mode == 'update'" in text
     assert "inputs.mode == 'diagnose'" in text
     assert "--risk', '1'" in text
-    assert "noteri_gateway_legacy_pin_inventory.py" in text
+    assert "noteri_gateway_update_preflight.py" in text
+    assert "standard_v2" in text
+    assert "legacy_v1_rebaseline" in text
     assert "--require-runner-version-preflight" in text
     assert "expected_rules_sha:" in text
     assert "expected_legacy_receipt_sha256:" in text
     assert "expected_legacy_manifest_sha256:" in text
+    assert "expected_previous_v2_receipt_sha256:" in text
     assert "repository_dispatch" not in text
     assert "permissions:\n  contents: read" in text
 
@@ -42,17 +45,18 @@ def test_gateway_refresh_readback_matches_script_contract():
     assert len(manifest_hash) == 64
     assert f"$r.source_commit -ne '{rules_commit}'" in workflow
     assert f"$r.rules_version -ne '{rules_version}'" in workflow
-    assert "python3 scripts/noteri_gateway_refresh.py `" in workflow
+    assert "python3 scripts/noteri_gateway_refresh.py @refreshArgs" in workflow
     for argument in [
-        "--commit $env:EXPECTED_RULES_SHA",
-        "--expected-legacy-receipt-sha256 $env:EXPECTED_LEGACY_RECEIPT_SHA256",
-        "--expected-legacy-manifest-sha256 $env:EXPECTED_LEGACY_MANIFEST_SHA256",
-        "--workflow-repository $env:GITHUB_REPOSITORY",
-        "--workflow-sha $env:GITHUB_SHA",
-        "--workflow-run-id $env:GITHUB_RUN_ID",
-        "--workflow-run-attempt $env:GITHUB_RUN_ATTEMPT",
+        "'--commit', $env:EXPECTED_RULES_SHA",
+        "'--workflow-repository', $env:GITHUB_REPOSITORY",
+        "'--workflow-sha', $env:GITHUB_SHA",
+        "'--workflow-run-id', $env:GITHUB_RUN_ID",
+        "'--workflow-run-attempt', $env:GITHUB_RUN_ATTEMPT",
     ]:
         assert argument in workflow
+    assert "'--expected-legacy-receipt-sha256', $env:EXPECTED_LEGACY_RECEIPT_SHA256" in workflow
+    assert "'--expected-legacy-manifest-sha256', $env:EXPECTED_LEGACY_MANIFEST_SHA256" in workflow
+    assert "'--expected-previous-v2-receipt-sha256'," in workflow
     assert "refresh-run-receipt.json" in workflow
     assert "NOTERI_GATEWAY_REFRESHED" in workflow
     assert "NOTERI_GATEWAY_ALREADY_CURRENT_VERIFIED" in workflow
