@@ -22,9 +22,9 @@ EXPECTED_HOST = "Noteri"
 EXPECTED_WORKFLOW_REPOSITORY = "ericson-j-santos/noteri-runtime"
 CONFIRM = "REFRESH-NOTERI-COMMAND-GATEWAY"
 RULES_REPO = "ericson-j-santos/chatgpt-operational-rules"
-RULES_COMMIT = "b5ade370fa11877ff7b899b5c6feacc3bfaf34e7"
-RULES_VERSION = "1.6.19"
-MANIFEST_SHA256 = "fbf4af678a11111b8a895bee1f19211523f0bdcb292838f64e252ab67d37f96c"
+RULES_COMMIT = "58dcd4200f412a866278027ba9e433439a03f3b3"
+RULES_VERSION = "1.6.21"
+MANIFEST_SHA256 = "b5fa6a5c6b14054601824883f788d5fb2a24416bd4a28de49cf2ed5a0574f659"
 INSTALL_SHA256 = "4b2c200680de7e0db6bd44905a246d7e1773b36d0f516d9756046e758827e35a"
 UPDATE_SHA256 = "fa5d03b0cecb46cf02477af4a75c81c57b92d7b609d4bd4abd54f28a7b22b1a2"
 LEGACY_VERIFY_SHA256 = "b792692d6c86bccccfba9037596d3a7cbd4996e7d560f257194efa020357bef4"
@@ -208,6 +208,51 @@ def read_update_receipt() -> tuple[dict, bytes] | None:
     if not isinstance(receipt, dict):
         raise RefreshError("recibo de update invalido")
     return receipt, raw
+
+
+def verify_previous_v2_receipt(receipt: dict) -> dict[str, object]:
+    """Authenticate a successful, non-current v2 install before a normal update."""
+    if (
+        receipt.get("result") != "HOST_UPDATE_OK"
+        or not isinstance(receipt.get("source_commit"), str)
+        or not HEAD_RE.fullmatch(receipt["source_commit"])
+        or receipt.get("noteri_wsl_inventory_profile") is not True
+        or str(receipt.get("host", "")).casefold() != EXPECTED_HOST.casefold()
+        or not _same_path(Path(str(receipt.get("install_root", ""))), INSTALL_ROOT)
+        or receipt.get("validation_head") != receipt.get("source_commit")
+    ):
+        raise RefreshError("estado v2 anterior invalido")
+    files = receipt.get("files")
+    if not isinstance(files, dict) or set(files) != MANAGED_FILES:
+        raise RefreshError("conjunto v2 anterior divergente")
+    verified = {}
+    for relative in sorted(MANAGED_FILES):
+        metadata = files.get(relative)
+        if not isinstance(metadata, dict):
+            raise RefreshError(f"metadado v2 anterior invalido: {relative}")
+        digest = metadata.get("sha256")
+        size = metadata.get("size")
+        target = confined_regular_file(
+            INSTALL_ROOT, relative, label=f"arquivo v2 anterior: {relative}"
+        )
+        if (
+            not isinstance(digest, str)
+            or not SHA256_RE.fullmatch(digest)
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+            or size < 0
+            or sha256_file(target) != digest
+            or target.stat().st_size != size
+        ):
+            raise RefreshError(f"arquivo v2 anterior divergente: {relative}")
+        verified[relative] = {"sha256": digest, "size": size}
+    return {
+        "source_commit": receipt["source_commit"],
+        "files": verified,
+        "receipt_sha256": sha256(
+            (INSTALL_ROOT / "update-receipt.json").read_bytes()
+        ),
+    }
 
 
 def _strict_json_object(pairs: list[tuple[str, object]]) -> dict:
@@ -660,6 +705,7 @@ def run_elevated(
     run_id: int, run_attempt: int,
     legacy_receipt_sha256: str | None = None,
     legacy_manifest_sha256: str | None = None,
+    previous_v2_receipt_sha256: str | None = None,
 ) -> dict:
     """Legacy entrypoint name; invokes only the canonical updater with explicit pins.
 
@@ -693,33 +739,51 @@ def run_elevated(
             )
             return {"ok": True, "result": bound["result"]}
 
-    if (not isinstance(legacy_receipt_sha256, str)
-            or not SHA256_RE.fullmatch(legacy_receipt_sha256)
-            or not isinstance(legacy_manifest_sha256, str)
-            or not SHA256_RE.fullmatch(legacy_manifest_sha256)):
-        raise RefreshError("pins legados obrigatorios para update")
+    legacy_pins = (legacy_receipt_sha256, legacy_manifest_sha256)
+    legacy_mode = all(isinstance(value, str) and SHA256_RE.fullmatch(value)
+                      for value in legacy_pins)
+    if any(value is not None for value in legacy_pins) and not legacy_mode:
+        raise RefreshError("pins legados incompletos ou invalidos")
+    if legacy_mode and previous_v2_receipt_sha256 is not None:
+        raise RefreshError("modos legado e v2 sao mutuamente exclusivos")
+    if not legacy_mode:
+        if current is None:
+            raise RefreshError("estado anterior ausente")
+        if (not isinstance(previous_v2_receipt_sha256, str)
+                or not SHA256_RE.fullmatch(previous_v2_receipt_sha256)
+                or sha256(current[1]) != previous_v2_receipt_sha256):
+            raise RefreshError("pin do recibo v2 anterior divergente")
+        verify_previous_v2_receipt(current[0])
 
     install = fetch("scripts/install_command_gateway_host.py", INSTALL_SHA256)
     update = fetch("scripts/update_command_gateway_host.py", UPDATE_SHA256)
-    legacy_verify = fetch(
-        "scripts/noteri_gateway_legacy_v1_rebaseline.py", LEGACY_VERIFY_SHA256
+    legacy_verify = (
+        fetch("scripts/noteri_gateway_legacy_v1_rebaseline.py", LEGACY_VERIFY_SHA256)
+        if legacy_mode else None
     )
     old_raw = current[1] if current is not None else None
     started_at = datetime.now(timezone.utc)
     with tempfile.TemporaryDirectory(prefix="noteri-gateway-refresh-") as temp:
         root = Path(temp)
         (root / "install_command_gateway_host.py").write_bytes(install)
-        (root / "noteri_gateway_legacy_v1_rebaseline.py").write_bytes(legacy_verify)
+        if legacy_verify is not None:
+            (root / "noteri_gateway_legacy_v1_rebaseline.py").write_bytes(legacy_verify)
         updater = root / "update_command_gateway_host.py"
         updater.write_bytes(update)
+        command = [
+            sys.executable, str(updater), "--commit", RULES_COMMIT,
+            "--expected-self-sha256", UPDATE_SHA256, "--install-root",
+            str(INSTALL_ROOT), "--work-root", str(WORK_ROOT),
+            "--noteri-wsl-inventory-profile",
+        ]
+        if legacy_mode:
+            command.extend([
+                "--noteri-legacy-v1-rebaseline",
+                "--expected-legacy-receipt-sha256", legacy_receipt_sha256,
+                "--expected-legacy-manifest-sha256", legacy_manifest_sha256,
+            ])
         result = subprocess.run(
-            [sys.executable, str(updater), "--commit", RULES_COMMIT,
-             "--expected-self-sha256", UPDATE_SHA256, "--install-root",
-             str(INSTALL_ROOT), "--work-root", str(WORK_ROOT),
-             "--noteri-legacy-v1-rebaseline",
-             "--expected-legacy-receipt-sha256", legacy_receipt_sha256,
-             "--expected-legacy-manifest-sha256", legacy_manifest_sha256,
-             "--noteri-wsl-inventory-profile"],
+            command,
             capture_output=True, text=True, timeout=180, check=False,
         )
         if result.returncode != 0:
@@ -759,6 +823,7 @@ def main() -> int:
     parser.add_argument("--workflow-run-attempt", type=int, required=True)
     parser.add_argument("--expected-legacy-receipt-sha256")
     parser.add_argument("--expected-legacy-manifest-sha256")
+    parser.add_argument("--expected-previous-v2-receipt-sha256")
     args = parser.parse_args()
     try:
         output = run_elevated(
@@ -767,6 +832,7 @@ def main() -> int:
             run_attempt=args.workflow_run_attempt,
             legacy_receipt_sha256=args.expected_legacy_receipt_sha256,
             legacy_manifest_sha256=args.expected_legacy_manifest_sha256,
+            previous_v2_receipt_sha256=args.expected_previous_v2_receipt_sha256,
         )
     except UpdaterBlocked as exc:
         artifact = bind_failure_evidence(

@@ -124,9 +124,9 @@ def seed_current_receipt(monkeypatch, root: Path):
 
 
 def test_contract_is_fixed():
-    assert m.RULES_COMMIT == "b5ade370fa11877ff7b899b5c6feacc3bfaf34e7"
-    assert m.RULES_VERSION == "1.6.19"
-    assert m.MANIFEST_SHA256 == "fbf4af678a11111b8a895bee1f19211523f0bdcb292838f64e252ab67d37f96c"
+    assert m.RULES_COMMIT == "58dcd4200f412a866278027ba9e433439a03f3b3"
+    assert m.RULES_VERSION == "1.6.21"
+    assert m.MANIFEST_SHA256 == "b5fa6a5c6b14054601824883f788d5fb2a24416bd4a28de49cf2ed5a0574f659"
     assert m.INSTALL_ROOT == Path(r"C:\dev\chatgpt-command-gateway")
     assert m.INSTALL_SHA256 == "4b2c200680de7e0db6bd44905a246d7e1773b36d0f516d9756046e758827e35a"
     assert m.UPDATE_SHA256 == "fa5d03b0cecb46cf02477af4a75c81c57b92d7b609d4bd4abd54f28a7b22b1a2"
@@ -156,13 +156,13 @@ def test_rejects_invalid_execution_identity(repository, workflow_sha, run_id, ru
         m.validate_execution(repository, workflow_sha, run_id, run_attempt)
 
 
-def test_missing_legacy_pins_fails_before_updater_or_write(monkeypatch):
+def test_missing_previous_state_fails_before_updater_or_write(monkeypatch):
     manifest, _, _ = canonical_fixture()
     calls = {"fetch": 0, "write": 0}
     monkeypatch.setattr(m.socket, "gethostname", lambda: "Noteri")
     monkeypatch.setattr(m, "fetch", lambda *_args: manifest)
     monkeypatch.setattr(m, "atomic_json", lambda *_args: calls.__setitem__("write", calls["write"] + 1))
-    with pytest.raises(m.RefreshError, match="pins legados obrigatorios"):
+    with pytest.raises(m.RefreshError, match="estado anterior ausente"):
         m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution())
     assert calls == {"fetch": 0, "write": 0}
 
@@ -371,6 +371,66 @@ def test_complete_update_proves_new_install_and_full_rollback(monkeypatch):
         assert run_receipt["installation_performed_by_run"] is True
         assert run_receipt["workflow_run_id"] == 123
         assert set(run_receipt["files"]) == m.MANAGED_FILES
+
+
+def test_successful_v2_state_uses_normal_updater_without_legacy_flags(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        receipt, manifest, _, _ = seed_current_receipt(monkeypatch, Path(tmp))
+        receipt["source_commit"] = "1" * 40
+        receipt["validation_head"] = receipt["source_commit"]
+        m.atomic_json(m.INSTALL_ROOT / "update-receipt.json", receipt)
+
+        def fake_fetch(path, *_args):
+            if path == "MANIFEST.json":
+                return manifest
+            if path in {
+                "scripts/install_command_gateway_host.py",
+                "scripts/update_command_gateway_host.py",
+            }:
+                return b"verified-script"
+            pytest.fail(f"unexpected legacy fetch: {path}")
+
+        def fake_updater(args, **kwargs):
+            assert "--noteri-wsl-inventory-profile" in args
+            assert "--noteri-legacy-v1-rebaseline" not in args
+            assert "--expected-legacy-receipt-sha256" not in args
+            updated = dict(receipt)
+            updated["source_commit"] = m.RULES_COMMIT
+            updated["validation_head"] = m.RULES_COMMIT
+            updated["rules_version"] = m.RULES_VERSION
+            updated["updated_at"] = datetime.now(timezone.utc).isoformat()
+            m.atomic_json(m.INSTALL_ROOT / "update-receipt.json", updated)
+            return SimpleNamespace(returncode=0, stderr="")
+
+        monkeypatch.setattr(m.socket, "gethostname", lambda: "Noteri")
+        monkeypatch.setattr(m, "fetch", fake_fetch)
+        monkeypatch.setattr(m.subprocess, "run", fake_updater)
+        previous_hash = hashlib.sha256(
+            (m.INSTALL_ROOT / "update-receipt.json").read_bytes()
+        ).hexdigest()
+        result = m.run_elevated(
+            m.CONFIRM,
+            m.RULES_COMMIT,
+            **execution(),
+            previous_v2_receipt_sha256=previous_hash,
+        )
+        assert result["result"] == "NOTERI_GATEWAY_REFRESHED"
+
+
+def test_v2_transition_rejects_unpinned_or_changed_receipt(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        receipt, manifest, _, _ = seed_current_receipt(monkeypatch, Path(tmp))
+        receipt["source_commit"] = receipt["validation_head"] = "1" * 40
+        m.atomic_json(m.INSTALL_ROOT / "update-receipt.json", receipt)
+        monkeypatch.setattr(m.socket, "gethostname", lambda: "Noteri")
+        monkeypatch.setattr(m, "fetch", lambda *_args: manifest)
+        with pytest.raises(m.RefreshError, match="pin do recibo v2 anterior divergente"):
+            m.run_elevated(m.CONFIRM, m.RULES_COMMIT, **execution())
+        with pytest.raises(m.RefreshError, match="pin do recibo v2 anterior divergente"):
+            m.run_elevated(
+                m.CONFIRM, m.RULES_COMMIT, **execution(),
+                previous_v2_receipt_sha256="f" * 64,
+            )
 
 
 def test_stale_successful_subprocess_receipt_is_rejected(monkeypatch):
@@ -648,6 +708,10 @@ def test_workflow_preserves_failure_artifact_without_retry_or_success_promotion(
         Path(__file__).resolve().parents[1]
         / ".github/workflows/noteri-command-gateway-refresh.yml"
     ).read_text(encoding="utf-8")
+    assert "ref: 58dcd4200f412a866278027ba9e433439a03f3b3" in workflow
+    assert "EXPECTED_RULES_SHA -ne '58dcd4200f412a866278027ba9e433439a03f3b3'" in workflow
+    assert "$syncRef = 'origin/main'" in workflow
+    assert "origin/fix/noteri-gateway-canonical-profile-20261028" not in workflow
     assert workflow.count("python3 scripts/noteri_gateway_refresh.py") == 1
     assert workflow.count("Independently read back run evidence and installed hashes") == 1
     assert workflow.count("Preserve sanitized updater failure evidence") == 1

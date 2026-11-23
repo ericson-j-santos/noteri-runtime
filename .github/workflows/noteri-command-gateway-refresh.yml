@@ -25,6 +25,10 @@ on:
         description: SHA-256 of the original legacy manifest
         required: false
         type: string
+      expected_previous_v2_receipt_sha256:
+        description: SHA-256 returned by preflight for a standard v2 update
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -54,7 +58,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ericson-j-santos/chatgpt-operational-rules
-          ref: b5ade370fa11877ff7b899b5c6feacc3bfaf34e7
+          ref: 58dcd4200f412a866278027ba9e433439a03f3b3
           path: _rules
           persist-credentials: false
       - name: Launch governed read-only session
@@ -63,16 +67,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:GITHUB_SHA -ne $env:EXPECTED_WORKFLOW_SHA -or
-              $env:EXPECTED_RULES_SHA -ne 'b5ade370fa11877ff7b899b5c6feacc3bfaf34e7' -or
+              $env:EXPECTED_RULES_SHA -ne '58dcd4200f412a866278027ba9e433439a03f3b3' -or
               $env:COMPUTERNAME -ine 'Noteri' -or
               -not $env:RUNNER_NAME.ToLowerInvariant().StartsWith('noteri')) {
             throw 'NOTERI_GATEWAY_PIN_PREFLIGHT_IDENTITY_INVALID'
           }
           $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
-          $syncRef = 'origin/fix/noteri-gateway-canonical-profile-20261028'
-          if ($env:MODE -eq 'diagnose') {
-            $syncRef = 'origin/main'
-          }
+          $syncRef = 'origin/main'
           $args = @('--policy', (Join-Path $rules 'config/command-gateway.policy.json'),
             '--repo', $env:GITHUB_WORKSPACE, '--session-prefix', 'noteri-gateway-pins',
             '--correlation-id', $env:CORRELATION_ID,
@@ -90,7 +91,7 @@ jobs:
           }
           "target=$($session.target_path)" | Add-Content $env:GITHUB_OUTPUT
           "session=$($session.session_id)" | Add-Content $env:GITHUB_OUTPUT
-      - name: Inventory legacy pins through risk1 Gateway
+      - name: Classify current update path through risk1 Gateway
         if: inputs.mode == 'preflight'
         shell: powershell
         env:
@@ -105,7 +106,7 @@ jobs:
             '--correlation-id', $env:CORRELATION_ID, 'run', '--cwd', $env:TARGET_PATH,
             '--session-id', $env:SESSION_ID, '--risk', '1', '--timeout', '30',
             '--expected-head', $env:EXPECTED_WORKFLOW_SHA, '--', 'python3', '-B',
-            (Join-Path $env:TARGET_PATH 'scripts/noteri_gateway_legacy_pin_inventory.py'))
+            (Join-Path $env:TARGET_PATH 'scripts/noteri_gateway_update_preflight.py'))
           $raw = @(& python3 -B (Join-Path $rules 'scripts/command_gateway.py') @args)
           if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'NOTERI_GATEWAY_PIN_INVENTORY_BLOCKED' }
           $envelope = @($raw)[-1] | ConvertFrom-Json
@@ -114,15 +115,21 @@ jobs:
             throw 'NOTERI_GATEWAY_PIN_GATEWAY_INVALID'
           }
           $report = $envelope.stdout | ConvertFrom-Json
-          if ($report.result -ne 'NOTERI_LEGACY_PIN_INVENTORY' -or
+          if ($report.result -ne 'NOTERI_GATEWAY_UPDATE_PREFLIGHT' -or
+              @('standard_v2', 'legacy_v1_rebaseline') -notcontains $report.update_mode -or
               $report.receipt_sha256 -notmatch '^[0-9a-f]{64}$' -or
-              $report.manifest_sha256 -notmatch '^[0-9a-f]{64}$' -or
+              ($report.update_mode -eq 'legacy_v1_rebaseline' -and
+               $report.manifest_sha256 -notmatch '^[0-9a-f]{64}$') -or
+              ($report.update_mode -eq 'standard_v2' -and
+               $null -ne $report.manifest_sha256) -or
               $report.managed_runtime_changed -ne $false -or
               $report.installation_authorized -ne $false) {
             throw 'NOTERI_GATEWAY_PIN_REPORT_INVALID'
           }
           @{
             result = $report.result
+            update_mode = $report.update_mode
+            source_commit = $report.source_commit
             receipt_sha256 = $report.receipt_sha256
             manifest_sha256 = $report.manifest_sha256
             managed_runtime_changed = $false
@@ -212,16 +219,18 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_SHA" = "$EXPECTED_WORKFLOW_SHA"
-          test "$EXPECTED_RULES_SHA" = 'b5ade370fa11877ff7b899b5c6feacc3bfaf34e7'
+          test "$EXPECTED_RULES_SHA" = '58dcd4200f412a866278027ba9e433439a03f3b3'
           jq -e --arg sha "$GITHUB_SHA" --arg rules "$EXPECTED_RULES_SHA" \
             --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
-            '(.result == "NOTERI_LEGACY_PIN_INVENTORY") and
+            '(.result == "NOTERI_GATEWAY_UPDATE_PREFLIGHT") and
              (.workflow_sha == $sha) and (.rules_sha == $rules) and
              (.run_id == $run) and (.run_attempt == $attempt) and
              (.managed_runtime_changed == false) and
              (.installation_authorized == false) and
              (.receipt_sha256 | test("^[0-9a-f]{64}$")) and
-             (.manifest_sha256 | test("^[0-9a-f]{64}$"))' \
+             (((.update_mode == "standard_v2") and (.manifest_sha256 == null)) or
+              ((.update_mode == "legacy_v1_rebaseline") and
+               (.manifest_sha256 | test("^[0-9a-f]{64}$"))))' \
             _pin_readback/noteri-gateway-pins.json >/dev/null
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100" \
             | jq -e '[.jobs[] | select(.name == "preflight" and
@@ -300,23 +309,40 @@ jobs:
           EXPECTED_RULES_SHA: ${{ inputs.expected_rules_sha }}
           EXPECTED_LEGACY_RECEIPT_SHA256: ${{ inputs.expected_legacy_receipt_sha256 }}
           EXPECTED_LEGACY_MANIFEST_SHA256: ${{ inputs.expected_legacy_manifest_sha256 }}
+          EXPECTED_PREVIOUS_V2_RECEIPT_SHA256: ${{ inputs.expected_previous_v2_receipt_sha256 }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:GITHUB_SHA -ne $env:EXPECTED_WORKFLOW_SHA) {
             throw 'NOTERI_GATEWAY_WORKFLOW_SHA_INVALID'
           }
-          if ($env:EXPECTED_RULES_SHA -ne 'b5ade370fa11877ff7b899b5c6feacc3bfaf34e7') {
+          if ($env:EXPECTED_RULES_SHA -ne '58dcd4200f412a866278027ba9e433439a03f3b3') {
             throw 'NOTERI_GATEWAY_SOURCE_SHA_INVALID'
           }
-          $raw = @(& python3 scripts/noteri_gateway_refresh.py `
-            --confirm REFRESH-NOTERI-COMMAND-GATEWAY `
-            --commit $env:EXPECTED_RULES_SHA `
-            --expected-legacy-receipt-sha256 $env:EXPECTED_LEGACY_RECEIPT_SHA256 `
-            --expected-legacy-manifest-sha256 $env:EXPECTED_LEGACY_MANIFEST_SHA256 `
-            --workflow-repository $env:GITHUB_REPOSITORY `
-            --workflow-sha $env:GITHUB_SHA `
-            --workflow-run-id $env:GITHUB_RUN_ID `
-            --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT)
+          $refreshArgs = @(
+            '--confirm', 'REFRESH-NOTERI-COMMAND-GATEWAY',
+            '--commit', $env:EXPECTED_RULES_SHA,
+            '--workflow-repository', $env:GITHUB_REPOSITORY,
+            '--workflow-sha', $env:GITHUB_SHA,
+            '--workflow-run-id', $env:GITHUB_RUN_ID,
+            '--workflow-run-attempt', $env:GITHUB_RUN_ATTEMPT)
+          if ($env:EXPECTED_LEGACY_RECEIPT_SHA256 -or $env:EXPECTED_LEGACY_MANIFEST_SHA256) {
+            if ($env:EXPECTED_LEGACY_RECEIPT_SHA256 -notmatch '^[0-9a-f]{64}$' -or
+                $env:EXPECTED_LEGACY_MANIFEST_SHA256 -notmatch '^[0-9a-f]{64}$') {
+              throw 'NOTERI_GATEWAY_LEGACY_PINS_INVALID'
+            }
+            $refreshArgs += @(
+              '--expected-legacy-receipt-sha256', $env:EXPECTED_LEGACY_RECEIPT_SHA256,
+              '--expected-legacy-manifest-sha256', $env:EXPECTED_LEGACY_MANIFEST_SHA256)
+          }
+          if ($env:EXPECTED_PREVIOUS_V2_RECEIPT_SHA256) {
+            if ($env:EXPECTED_PREVIOUS_V2_RECEIPT_SHA256 -notmatch '^[0-9a-f]{64}$') {
+              throw 'NOTERI_GATEWAY_PREVIOUS_V2_PIN_INVALID'
+            }
+            $refreshArgs += @(
+              '--expected-previous-v2-receipt-sha256',
+              $env:EXPECTED_PREVIOUS_V2_RECEIPT_SHA256)
+          }
+          $raw = @(& python3 scripts/noteri_gateway_refresh.py @refreshArgs)
           $exitCode = $LASTEXITCODE
           if ($raw) { $raw | Write-Output }
           if ($exitCode -ne 0) {
@@ -402,8 +428,8 @@ jobs:
             throw 'old installation was reassigned to current run'
           }
           if ($r.host -ne 'Noteri') { throw 'host mismatch' }
-          if ($r.source_commit -ne 'b5ade370fa11877ff7b899b5c6feacc3bfaf34e7') { throw 'source commit mismatch' }
-          if ($r.rules_version -ne '1.6.19') { throw 'rules version mismatch' }
+          if ($r.source_commit -ne '58dcd4200f412a866278027ba9e433439a03f3b3') { throw 'source commit mismatch' }
+          if ($r.rules_version -ne '1.6.21') { throw 'rules version mismatch' }
           if ($r.noteri_wsl_inventory_profile -ne $true) { throw 'Noteri profile missing' }
           if ($r.validation_head -ne $r.source_commit) { throw 'validation head mismatch' }
           if ($r.install_root -ne $installRoot) { throw 'install root mismatch' }
@@ -484,7 +510,7 @@ jobs:
              ((.workflow_run_id | tostring) == $run) and
              ((.workflow_run_attempt | tostring) == $attempt) and
              (.managed_runtime_changed_by_capture == false) and
-             (.source_commit == "b5ade370fa11877ff7b899b5c6feacc3bfaf34e7") and
+             (.source_commit == "58dcd4200f412a866278027ba9e433439a03f3b3") and
              (.updater_exit_code | type == "number") and
              (.updater_exit_code != 0) and
              (.evidence_authenticated | type == "boolean") and
